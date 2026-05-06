@@ -1,27 +1,108 @@
-# Python-generated files
+# ======================
+# Python
+# ======================
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+*.egg
+*.whl
 
-# Virtual environments
-.venv
+# ======================
+# 虛擬環境
+# ======================
+.venv/
+venv/
+ENV/
 
-# Environment & secrets
+# ======================
+# 機密 / 環境變數
+# ======================
 .env
+.env.*
+!.env.example
+
+# ======================
+# 電子憑證 & 金鑰
+# ======================
 *.pfx
 *.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.csr
+*.jks
+*.keystore
+ca/
+certs/
 
-# Logs
+# ======================
+# Log 檔
+# ======================
 log/
+logs/
 *.log
+shioaji.log
 
-# IDE
+# ======================
+# Shioaji SDK 產生的檔案
+# ======================
+shioaji.log
+SinoPac.log
+# Shioaji 可能產生的 token 快取
+.shioaji_token
+token/
+
+# ======================
+# 資料檔 (歷史行情 / 交易紀錄)
+# ======================
+data/
+*.csv
+*.xlsx
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.sqlite
+*.db
+
+# ======================
+# IDE / 編輯器
+# ======================
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
 
-# OS
+# ======================
+# OS 產生的檔案
+# ======================
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# ======================
+# Jupyter Notebook
+# ======================
+.ipynb_checkpoints/
+
+# ======================
+# 其他
+# ======================
+*.bak
+*.tmp
+*.temp
+.cursor/
