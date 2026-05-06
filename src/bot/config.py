@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import datetime
+from typing import List
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # --- Shioaji 登入 ---
+    api_key: str = ""
+    secret_key: str = ""
+
+    # --- 電子憑證 ---
+    ca_path: str = ""
+    ca_password: str = ""
+    person_id: str = ""
+
+    # --- 模擬模式 ---
+    simulation: bool = True
+
+    # --- 監控股票 (逗號分隔, e.g. "2330,0050,2881") ---
+    symbols: List[str] = []
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def _parse_symbols(cls, v: object) -> List[str]:
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return list(v)  # type: ignore[arg-type]
+
+    # --- 策略時間 ---
+    enter_cutoff_time: datetime.time = datetime.time(9, 30)
+    exit_time: datetime.time = datetime.time(13, 15)
+
+    @field_validator("enter_cutoff_time", "exit_time", mode="before")
+    @classmethod
+    def _parse_time(cls, v: object) -> datetime.time:
+        if isinstance(v, datetime.time):
+            return v
+        if isinstance(v, str):
+            parts = v.split(":")
+            return datetime.time(int(parts[0]), int(parts[1]))
+        raise ValueError(f"Cannot parse time from {v!r}")
+
+    # --- 停損停利 (百分比) ---
+    stop_loss_pct: float = -3.0
+    take_profit_pct: float = 6.0
+
+    # --- 資金控管 ---
+    max_fund: int = 500_000
+    max_lot_per_symbol: int = 2
