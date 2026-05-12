@@ -57,7 +57,9 @@ class SjBroker:
         self.api = sj.Shioaji(simulation=self.settings.simulation)
 
         self.logger.info(
-            "登入中 ... (simulation=%s)", self.settings.simulation
+            "登入中 ... (simulation=%s, run_mode=%s)",
+            self.settings.simulation,
+            self.settings.run_mode,
         )
         try:
             accounts = self.api.login(
@@ -70,7 +72,12 @@ class SjBroker:
 
         self.logger.info("登入成功，可用帳號: %s", accounts)
 
-        if self.settings.ca_path and not self.settings.simulation:
+        activate_ca = (
+            self.settings.ca_path
+            and not self.settings.simulation
+            and self.settings.run_mode == "trade"
+        )
+        if activate_ca:
             self.logger.info("啟用電子憑證 ...")
             self.api.activate_ca(
                 ca_path=self.settings.ca_path,
@@ -78,6 +85,8 @@ class SjBroker:
                 person_id=self.settings.person_id,
             )
             self.logger.info("憑證啟用完成")
+        elif self.settings.run_mode == "watch":
+            self.logger.info("watch 模式 — 跳過電子憑證啟用")
 
         self._setup_event_callbacks()
         return True
@@ -277,6 +286,13 @@ class SjBroker:
         order_type: OrderType = OrderType.ROD,
         custom_field: str = "",
     ) -> Optional[Trade]:
+        if self.settings.run_mode != "trade":
+            self.logger.error(
+                "非 trade 模式 (%s) 禁止下單 — 已攔截",
+                self.settings.run_mode,
+            )
+            return None
+
         contract = self.get_contract(symbol)
         if contract is None:
             return None

@@ -12,6 +12,12 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "pandas",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
 ]
 
 [project.scripts]

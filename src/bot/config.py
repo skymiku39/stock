@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import datetime
-from typing import List
+from typing import List, Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # --- 執行模式 ---
+    run_mode: Literal["trade", "watch", "report"] = "trade"
+    market_source: Literal["shioaji", "twse_public", ""] = ""
+    report_poll_seconds: int = 5
+    report_output_dir: str = "data/reports"
 
     # --- Shioaji 登入 ---
     api_key: str = ""
@@ -62,3 +68,22 @@ class Settings(BaseSettings):
     # --- Telegram 通知 (留空則不啟用) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+
+    @model_validator(mode="after")
+    def _resolve_market_source(self) -> Settings:
+        if not self.market_source:
+            self.market_source = (  # type: ignore[assignment]
+                "twse_public" if self.run_mode == "report" else "shioaji"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_mode_requirements(self) -> Settings:
+        if self.run_mode in ("trade", "watch") and self.market_source == "twse_public":
+            raise ValueError(
+                f"run_mode={self.run_mode!r} 需要 Shioaji 行情，"
+                "market_source 不可為 'twse_public'"
+            )
+        if self.run_mode == "trade" and not self.api_key:
+            pass  # api_key 可由 .env 延後提供，不在此強制檢查
+        return self

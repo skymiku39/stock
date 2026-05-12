@@ -34,3 +34,37 @@ class OrderRecord:
     action: str  # "Buy" / "Sell"
     category: str  # "enter" / "stop" / "close"
     created_at: datetime.datetime = field(default_factory=datetime.datetime.now)
+
+
+# ------------------------------------------------------------------
+# 正規化行情 / 訊號型別 (trade / watch / report 共用)
+# ------------------------------------------------------------------
+
+
+@dataclass
+class MarketTick:
+    """跨來源正規化 Tick，由 Shioaji 即時行情或 TWSE 公開延遲資料轉換而來。"""
+
+    ts: datetime.datetime
+    symbol: str
+    price: float
+    volume: int
+    pct_chg: float
+    prev_close: float
+    source: str  # "shioaji" | "twse_public"
+
+
+@dataclass
+class SignalEvent:
+    """策略觸發的交易意圖 (watch/report 模式記錄用)。"""
+
+    ts: datetime.datetime
+    symbol: str
+    action: str  # "would-buy" | "would-sell"
+    price: float
+    quantity: int
+    reason: str  # "enter" | "sl" | "trail" | "close"
+    pct_chg: float
+    pnl_pct: float
+    mode: str  # "watch" | "report"
+    source: str  # "shioaji" | "twse_public"

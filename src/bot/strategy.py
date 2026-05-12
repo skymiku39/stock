@@ -2,9 +2,10 @@
 
 BaseStrategy 提供：
   - 部位管理 / 委託單追蹤
-  - 行情回呼 → Queue 解耦
+  - 行情回呼 → Queue 解耦 (trade/watch) 或輪詢迴圈 (report)
   - 收盤全出場定時器
-  - 委託狀態輪詢更新器
+  - 委託狀態輪詢更新器 (trade 模式)
+  - watch/report 模式的虛擬部位 + SignalRecorder
 
 MyStrategy 示範：
   - 開盤 N 分鐘內、漲幅 1%~5% 買進
@@ -25,14 +26,16 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from shioaji import Exchange, TickSTKv1
 from shioaji.constant import Action, OrderState
 
-from bot.models import OrderRecord, PositionInfo
+from bot.models import MarketTick, OrderRecord, PositionInfo, SignalEvent
 from bot.notifier import TelegramNotifier
 from bot.recorder import TradeRecorder
-from bot.utils import get_logger, now_tw_time
+from bot.signal_recorder import SignalRecorder
+from bot.utils import get_logger, now_tw, now_tw_time
 
 if TYPE_CHECKING:
     from bot.broker import SjBroker
     from bot.config import Settings
+    from bot.market_source import TwsePublicMarketSource
 
 
 class BaseStrategy(ABC):
@@ -40,18 +43,20 @@ class BaseStrategy(ABC):
 
     def __init__(
         self,
-        broker: SjBroker,
+        broker: Optional[SjBroker],
         settings: Settings,
+        market_source: Optional[TwsePublicMarketSource] = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.broker = broker
         self.settings = settings
+        self._market_source = market_source
         self.logger = logger or get_logger("strategy")
 
         # 部位管理
         self.positions: Dict[str, PositionInfo] = {}
 
-        # 委託追蹤: symbol -> list of pending order_no
+        # 委託追蹤: symbol -> list of pending order_no (trade 模式)
         self.pending_orders: Dict[str, List[str]] = defaultdict(list)
         self._pending_lock: Dict[str, threading.Lock] = defaultdict(threading.Lock)
 
@@ -64,14 +69,25 @@ class BaseStrategy(ABC):
         # 收盤全出場標記
         self._closure_placed: Set[str] = set()
 
-        # Tick 佇列: (exchange, tick)
+        # Tick 佇列: (exchange, tick) -- trade/watch 模式
         self._tick_queue: Queue = Queue(maxsize=50_000)
 
         # 資金追蹤: 已投入的總金額
         self._fund_used: float = 0.0
 
-        # 交易紀錄
+        # 前日收盤 (所有模式共用)
+        self._prev_close: Dict[str, float] = {}
+
+        # 最新成交價追蹤 (虛擬出場用)
+        self._last_price: Dict[str, float] = {}
+
+        # 交易紀錄 (trade 模式)
         self.recorder = TradeRecorder()
+
+        # 訊號紀錄 (watch/report 模式)
+        self.signal_recorder = SignalRecorder(
+            output_dir=settings.report_output_dir,
+        )
 
         # 通知
         self.notifier = TelegramNotifier(
@@ -83,6 +99,14 @@ class BaseStrategy(ABC):
         self._running = False
 
     # ------------------------------------------------------------------
+    # 模式判斷
+    # ------------------------------------------------------------------
+
+    @property
+    def _is_trade_mode(self) -> bool:
+        return self.settings.run_mode == "trade"
+
+    # ------------------------------------------------------------------
     # 啟動 / 停止
     # ------------------------------------------------------------------
 
@@ -90,27 +114,82 @@ class BaseStrategy(ABC):
         """啟動策略 (阻塞主執行緒直到收盤或手動中斷)。"""
         self._running = True
 
-        self.broker.set_on_tick(self._enqueue_tick)
-        self.broker.set_on_order(self._on_order_callback)
+        if self.settings.run_mode in ("trade", "watch"):
+            self._run_shioaji_mode()
+        else:
+            self._run_report_mode()
 
-        self._fetch_prev_close()
+    def _run_shioaji_mode(self) -> None:
+        """trade / watch 模式: Shioaji 即時行情。"""
+        assert self.broker is not None, "trade/watch 模式需要 SjBroker"
+
+        self.broker.set_on_tick(self._enqueue_tick)
+        if self._is_trade_mode:
+            self.broker.set_on_order(self._on_order_callback)
+
+        self._fetch_prev_close_shioaji()
         self._subscribe_symbols()
 
-        # 啟動背景執行緒
-        threads = [
-            threading.Thread(target=self._tick_consumer, daemon=True, name="tick-consumer"),
-            threading.Thread(target=self._order_status_updater, daemon=True, name="order-updater"),
-            threading.Thread(target=self._position_closure, daemon=True, name="closure"),
+        threads: List[threading.Thread] = [
+            threading.Thread(
+                target=self._tick_consumer, daemon=True, name="tick-consumer",
+            ),
+            threading.Thread(
+                target=self._position_closure, daemon=True, name="closure",
+            ),
         ]
+        if self._is_trade_mode:
+            threads.append(
+                threading.Thread(
+                    target=self._order_status_updater,
+                    daemon=True,
+                    name="order-updater",
+                )
+            )
         for t in threads:
             t.start()
 
-        self.logger.info("策略已啟動，監控 %s", self.settings.symbols)
-        self.notifier.notify_start(self.settings.symbols, self.settings.simulation)
+        mode_label = "交易" if self._is_trade_mode else "看盤"
+        self.logger.info("策略已啟動 [%s 模式]，監控 %s", mode_label, self.settings.symbols)
+        self.notifier.notify_start(
+            self.settings.symbols, self.settings.simulation,
+        )
 
         try:
             while self._running:
                 time.sleep(1)
+        except KeyboardInterrupt:
+            self.logger.info("收到中斷訊號，準備停止 ...")
+        finally:
+            self.stop()
+
+    def _run_report_mode(self) -> None:
+        """report 模式: 公開延遲資料輪詢。"""
+        assert self._market_source is not None, "report 模式需要 MarketSource"
+
+        self._fetch_prev_close_public()
+
+        closure_thread = threading.Thread(
+            target=self._position_closure, daemon=True, name="closure",
+        )
+        closure_thread.start()
+
+        self.logger.info(
+            "策略已啟動 [報表模式]，輪詢間隔 %ds，監控 %s",
+            self.settings.report_poll_seconds,
+            self.settings.symbols,
+        )
+
+        try:
+            while self._running:
+                ticks = self._market_source.poll()
+                for tick in ticks:
+                    self._last_price[tick.symbol] = tick.price
+                    try:
+                        self.on_tick(tick)
+                    except Exception:
+                        self.logger.exception("on_tick 處理例外: %s", tick.symbol)
+                time.sleep(self.settings.report_poll_seconds)
         except KeyboardInterrupt:
             self.logger.info("收到中斷訊號，準備停止 ...")
         finally:
@@ -121,54 +200,70 @@ class BaseStrategy(ABC):
         self.logger.info("策略已停止")
 
     # ------------------------------------------------------------------
-    # 行情處理 (Queue 解耦)
+    # 行情處理 (Queue 解耦, trade/watch)
     # ------------------------------------------------------------------
 
     def _enqueue_tick(self, exchange: Exchange, tick: TickSTKv1) -> None:
         try:
             self._tick_queue.put_nowait((exchange, tick))
         except Exception:
-            pass  # Queue 滿時丟棄舊資料
+            pass
 
     def _tick_consumer(self) -> None:
-        """獨立執行緒，從 Queue 取出 Tick 送入策略運算。"""
+        """獨立執行緒，將 Shioaji TickSTKv1 正規化為 MarketTick 後送入策略。"""
         while self._running:
             try:
-                exchange, tick = self._tick_queue.get(timeout=1)
+                exchange, sj_tick = self._tick_queue.get(timeout=1)
             except Empty:
                 continue
 
+            tick = MarketTick(
+                ts=getattr(sj_tick, "datetime", now_tw()),
+                symbol=sj_tick.code,
+                price=float(sj_tick.close),
+                volume=int(getattr(sj_tick, "volume", 0)),
+                pct_chg=float(sj_tick.pct_chg) if sj_tick.pct_chg else 0.0,
+                prev_close=self._prev_close.get(sj_tick.code, 0.0),
+                source="shioaji",
+            )
+            self._last_price[tick.symbol] = tick.price
+
             try:
-                self.on_tick(exchange, tick)
+                self.on_tick(tick)
             except Exception:
-                self.logger.exception("on_tick 處理例外: %s", tick.code)
+                self.logger.exception("on_tick 處理例外: %s", tick.symbol)
 
     # ------------------------------------------------------------------
     # 盤前準備
     # ------------------------------------------------------------------
 
-    def _fetch_prev_close(self) -> None:
-        """透過 broker.get_snapshots() 取得前日收盤價供策略使用。
-
-        子類別可覆寫 _on_prev_close_ready() 來接收資料。
-        """
+    def _fetch_prev_close_shioaji(self) -> None:
+        assert self.broker is not None
         refs = self.broker.get_snapshots(self.settings.symbols)
+        self._prev_close.update(refs)
+        self._on_prev_close_ready(refs)
+
+    def _fetch_prev_close_public(self) -> None:
+        assert self._market_source is not None
+        refs = self._market_source.get_prev_close(self.settings.symbols)
+        self._prev_close.update(refs)
         self._on_prev_close_ready(refs)
 
     def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
         """子類別可覆寫以接收前日收盤價。預設不做事。"""
 
     # ------------------------------------------------------------------
-    # 訂閱
+    # 訂閱 (trade/watch)
     # ------------------------------------------------------------------
 
     def _subscribe_symbols(self) -> None:
+        assert self.broker is not None
         for symbol in self.settings.symbols:
             self.broker.subscribe_tick(symbol)
             time.sleep(0.1)
 
     # ------------------------------------------------------------------
-    # 委託回報處理
+    # 委託回報處理 (trade 模式)
     # ------------------------------------------------------------------
 
     def _on_order_callback(self, stat: OrderState, msg: dict) -> None:
@@ -194,7 +289,7 @@ class BaseStrategy(ABC):
             )
 
     def _handle_deal(self, msg: dict) -> None:
-        """處理成交回報，更新部位並推入交易紀錄。"""
+        """處理成交回報，更新部位並推入交易紀錄 (trade 模式)。"""
         self.recorder.record_deal(msg)
 
         symbol = msg.get("code", "")
@@ -241,11 +336,87 @@ class BaseStrategy(ABC):
                         self.logger.info("部位更新 (賣出): %s", self.positions[symbol])
 
     # ------------------------------------------------------------------
-    # 委託狀態輪詢
+    # 虛擬成交 (watch / report)
+    # ------------------------------------------------------------------
+
+    def _virtual_fill_buy(
+        self, symbol: str, price: float, quantity: int, reason: str,
+    ) -> None:
+        cost = price * quantity * 1000
+        self._fund_used += cost
+
+        if symbol in self.positions:
+            self.positions[symbol].update(price, quantity)
+        else:
+            self.positions[symbol] = PositionInfo(
+                symbol=symbol, avg_price=price, quantity=quantity,
+            )
+
+        prev_close = self._prev_close.get(symbol, 0.0)
+        pct_chg = (
+            100 * (price - prev_close) / prev_close if prev_close > 0 else 0.0
+        )
+
+        self.signal_recorder.record(SignalEvent(
+            ts=now_tw(),
+            symbol=symbol,
+            action="would-buy",
+            price=price,
+            quantity=quantity,
+            reason=reason,
+            pct_chg=pct_chg,
+            pnl_pct=0.0,
+            mode=self.settings.run_mode,
+            source=self.settings.market_source,
+        ))
+        self.logger.info(
+            "[虛擬買入] %s %.2f x %d [%s]", symbol, price, quantity, reason,
+        )
+
+    def _virtual_fill_sell(
+        self, symbol: str, price: float, quantity: int, reason: str,
+    ) -> None:
+        released = price * quantity * 1000
+        self._fund_used = max(0.0, self._fund_used - released)
+
+        pnl_pct = 0.0
+        if symbol in self.positions:
+            pos = self.positions[symbol]
+            if pos.avg_price > 0:
+                pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
+            closed = pos.reduce(quantity)
+            if closed:
+                del self.positions[symbol]
+
+        prev_close = self._prev_close.get(symbol, 0.0)
+        pct_chg = (
+            100 * (price - prev_close) / prev_close if prev_close > 0 else 0.0
+        )
+
+        self.signal_recorder.record(SignalEvent(
+            ts=now_tw(),
+            symbol=symbol,
+            action="would-sell",
+            price=price,
+            quantity=quantity,
+            reason=reason,
+            pct_chg=pct_chg,
+            pnl_pct=pnl_pct,
+            mode=self.settings.run_mode,
+            source=self.settings.market_source,
+        ))
+        self.logger.info(
+            "[虛擬賣出] %s %.2f x %d [%s] PnL=%.2f%%",
+            symbol, price, quantity, reason, pnl_pct,
+        )
+
+    # ------------------------------------------------------------------
+    # 委託狀態輪詢 (trade 模式)
     # ------------------------------------------------------------------
 
     def _order_status_updater(self) -> None:
         """定期輪詢委託狀態，清理已完成的 pending orders。"""
+        assert self.broker is not None
         while self._running and now_tw_time() < self.settings.exit_time:
             has_pending = any(len(v) > 0 for v in self.pending_orders.values())
             if not has_pending:
@@ -273,7 +444,7 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------
 
     def _position_closure(self) -> None:
-        """在 exit_time 之後，將所有部位市價全出。"""
+        """在 exit_time 之後，將所有部位市價全出 (或虛擬出清)。"""
         while self._running:
             cur = now_tw_time()
             if cur < self.settings.exit_time:
@@ -284,27 +455,37 @@ class BaseStrategy(ABC):
                 if symbol in self._closure_placed:
                     continue
 
-                with self._pending_lock[symbol]:
-                    if len(self.pending_orders.get(symbol, [])) > 0:
-                        continue
+                if pos.quantity <= 0:
+                    continue
 
-                    if pos.quantity <= 0:
-                        continue
+                if self._is_trade_mode:
+                    with self._pending_lock[symbol]:
+                        if len(self.pending_orders.get(symbol, [])) > 0:
+                            continue
 
+                        self.logger.info(
+                            "全出場: %s %d 張 (市價 IOC)", symbol, pos.quantity,
+                        )
+                        assert self.broker is not None
+                        trade = self.broker.place_market_sell(
+                            symbol, pos.quantity, custom_field="close",
+                        )
+                        if trade:
+                            ordno = getattr(trade.order, "ordno", "")
+                            self.pending_orders[symbol].append(ordno)
+                            self._closure_placed.add(symbol)
+                else:
+                    price = self._last_price.get(symbol, pos.avg_price)
                     self.logger.info(
-                        "全出場: %s %d 張 (市價 IOC)", symbol, pos.quantity
+                        "[虛擬全出場] %s %d 張 @ %.2f", symbol, pos.quantity, price,
                     )
-                    trade = self.broker.place_market_sell(
-                        symbol, pos.quantity, custom_field="close",
-                    )
-                    if trade:
-                        ordno = getattr(trade.order, "ordno", "")
-                        self.pending_orders[symbol].append(ordno)
-                        self._closure_placed.add(symbol)
+                    self._virtual_fill_sell(symbol, price, pos.quantity, "close")
+                    self._closure_placed.add(symbol)
 
             if not self.positions:
                 self.logger.info("所有部位已清空，策略結束")
-                self.notifier.notify_closure(self.recorder.summary())
+                if self._is_trade_mode:
+                    self.notifier.notify_closure(self.recorder.summary())
                 self._running = False
                 break
 
@@ -315,6 +496,8 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------
 
     def _has_pending(self, symbol: str) -> bool:
+        if not self._is_trade_mode:
+            return False
         with self._pending_lock[symbol]:
             return len(self.pending_orders.get(symbol, [])) > 0
 
@@ -325,6 +508,12 @@ class BaseStrategy(ABC):
         quantity: int,
         custom_field: str = "enter",
     ) -> bool:
+        if not self._is_trade_mode:
+            self._virtual_fill_buy(symbol, price, quantity, custom_field)
+            self._enter_placed.add(symbol)
+            return True
+
+        assert self.broker is not None
         trade = self.broker.place_order(
             symbol=symbol,
             action=Action.Buy,
@@ -347,6 +536,12 @@ class BaseStrategy(ABC):
         quantity: int,
         custom_field: str = "stop",
     ) -> bool:
+        if not self._is_trade_mode:
+            price = self._last_price.get(symbol, 0.0)
+            self._virtual_fill_sell(symbol, price, quantity, custom_field)
+            return True
+
+        assert self.broker is not None
         trade = self.broker.place_market_sell(symbol, quantity, custom_field)
         if trade is None:
             return False
@@ -361,8 +556,8 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def on_tick(self, exchange: Exchange, tick: TickSTKv1) -> None:
-        """收到 Tick 行情時的策略邏輯，由子類別實作。"""
+    def on_tick(self, tick: MarketTick) -> None:
+        """收到正規化 Tick 時的策略邏輯，由子類別實作。"""
         ...
 
 
@@ -381,28 +576,25 @@ class MyStrategy(BaseStrategy):
 
     def __init__(
         self,
-        broker: SjBroker,
+        broker: Optional[SjBroker],
         settings: Settings,
+        market_source: Optional[TwsePublicMarketSource] = None,
         logger: Optional[logging.Logger] = None,
     ):
-        super().__init__(broker, settings, logger)
-
-        self._prev_close: Dict[str, float] = {}
+        super().__init__(broker, settings, market_source, logger)
         self._high_watermark: Dict[str, float] = {}
 
     def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
-        self._prev_close.update(refs)
-        self.logger.info("前日收盤已載入: %s", self._prev_close)
+        self.logger.info("前日收盤已載入: %s", refs)
 
-    def on_tick(self, exchange: Exchange, tick: TickSTKv1) -> None:
-        symbol = tick.code
-        price = float(tick.close)
+    def on_tick(self, tick: MarketTick) -> None:
+        symbol = tick.symbol
+        price = tick.price
         cur_time = now_tw_time()
 
-        # fallback: 盤前未取得時用 pct_chg 反推
         if symbol not in self._prev_close:
             if tick.pct_chg:
-                ref = price / (1 + float(tick.pct_chg) / 100)
+                ref = price / (1 + tick.pct_chg / 100)
             else:
                 ref = price
             self._prev_close[symbol] = ref
@@ -439,16 +631,13 @@ class MyStrategy(BaseStrategy):
             pos = self.positions[symbol]
             pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
 
-            # 更新最高水位
             hw = self._high_watermark.get(symbol, price)
             if price > hw:
                 self._high_watermark[symbol] = price
                 hw = price
 
-            # 從最高點回撤百分比
             drawdown_pct = 100 * (hw - price) / hw if hw > 0 else 0
 
-            # 移動停利: 獲利超過 take_profit_pct 門檻後，從高點回撤 trailing_stop_pct 即出場
             if (
                 pnl_pct >= self.settings.take_profit_pct
                 and drawdown_pct >= self.settings.trailing_stop_pct
@@ -459,7 +648,6 @@ class MyStrategy(BaseStrategy):
                 )
                 self._place_stop_sell(symbol, pos.quantity, custom_field="trail")
 
-            # 固定停損
             elif pnl_pct <= self.settings.stop_loss_pct:
                 self.logger.info(
                     "[停損] %s PnL=%.2f%% (<= %.1f%%)",
