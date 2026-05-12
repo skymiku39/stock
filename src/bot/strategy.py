@@ -26,6 +26,8 @@ from shioaji import Exchange, TickSTKv1
 from shioaji.constant import Action, OrderState
 
 from bot.models import OrderRecord, PositionInfo
+from bot.notifier import TelegramNotifier
+from bot.recorder import TradeRecorder
 from bot.utils import get_logger, now_tw_time
 
 if TYPE_CHECKING:
@@ -65,6 +67,18 @@ class BaseStrategy(ABC):
         # Tick 佇列: (exchange, tick)
         self._tick_queue: Queue = Queue(maxsize=50_000)
 
+        # 資金追蹤: 已投入的總金額
+        self._fund_used: float = 0.0
+
+        # 交易紀錄
+        self.recorder = TradeRecorder()
+
+        # 通知
+        self.notifier = TelegramNotifier(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        )
+
         # 控制旗標
         self._running = False
 
@@ -79,6 +93,7 @@ class BaseStrategy(ABC):
         self.broker.set_on_tick(self._enqueue_tick)
         self.broker.set_on_order(self._on_order_callback)
 
+        self._fetch_prev_close()
         self._subscribe_symbols()
 
         # 啟動背景執行緒
@@ -91,6 +106,7 @@ class BaseStrategy(ABC):
             t.start()
 
         self.logger.info("策略已啟動，監控 %s", self.settings.symbols)
+        self.notifier.notify_start(self.settings.symbols, self.settings.simulation)
 
         try:
             while self._running:
@@ -128,6 +144,21 @@ class BaseStrategy(ABC):
                 self.logger.exception("on_tick 處理例外: %s", tick.code)
 
     # ------------------------------------------------------------------
+    # 盤前準備
+    # ------------------------------------------------------------------
+
+    def _fetch_prev_close(self) -> None:
+        """透過 broker.get_snapshots() 取得前日收盤價供策略使用。
+
+        子類別可覆寫 _on_prev_close_ready() 來接收資料。
+        """
+        refs = self.broker.get_snapshots(self.settings.symbols)
+        self._on_prev_close_ready(refs)
+
+    def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
+        """子類別可覆寫以接收前日收盤價。預設不做事。"""
+
+    # ------------------------------------------------------------------
     # 訂閱
     # ------------------------------------------------------------------
 
@@ -163,7 +194,9 @@ class BaseStrategy(ABC):
             )
 
     def _handle_deal(self, msg: dict) -> None:
-        """處理成交回報，更新部位。"""
+        """處理成交回報，更新部位並推入交易紀錄。"""
+        self.recorder.record_deal(msg)
+
         symbol = msg.get("code", "")
         action = msg.get("action", "")
         price = float(msg.get("price", 0))
@@ -181,15 +214,24 @@ class BaseStrategy(ABC):
                 self.pending_orders[symbol].remove(ordno)
 
             if action == "Buy":
+                cost = price * qty * 1000
+                self._fund_used += cost
                 if symbol in self.positions:
                     self.positions[symbol].update(price, qty)
                 else:
                     self.positions[symbol] = PositionInfo(
                         symbol=symbol, avg_price=price, quantity=qty,
                     )
-                self.logger.info("部位更新 (買入): %s", self.positions[symbol])
+                self.logger.info(
+                    "部位更新 (買入): %s | 已用資金: %.0f",
+                    self.positions[symbol], self._fund_used,
+                )
+                self.notifier.notify_buy(symbol, price, qty)
 
             elif action == "Sell":
+                released = price * qty * 1000
+                self._fund_used = max(0.0, self._fund_used - released)
+                self.notifier.notify_sell(symbol, price, qty, custom)
                 if symbol in self.positions:
                     closed = self.positions[symbol].reduce(qty)
                     if closed:
@@ -262,6 +304,7 @@ class BaseStrategy(ABC):
 
             if not self.positions:
                 self.logger.info("所有部位已清空，策略結束")
+                self.notifier.notify_closure(self.recorder.summary())
                 self._running = False
                 break
 
@@ -344,18 +387,26 @@ class MyStrategy(BaseStrategy):
     ):
         super().__init__(broker, settings, logger)
 
-        # 紀錄前一日收盤 (需在盤前/登入後取得)
         self._prev_close: Dict[str, float] = {}
+        self._high_watermark: Dict[str, float] = {}
+
+    def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
+        self._prev_close.update(refs)
+        self.logger.info("前日收盤已載入: %s", self._prev_close)
 
     def on_tick(self, exchange: Exchange, tick: TickSTKv1) -> None:
         symbol = tick.code
         price = float(tick.close)
         cur_time = now_tw_time()
 
-        # 首次收到 tick 時，用 open 價格近似前日收盤 (正式可改用 snapshots)
+        # fallback: 盤前未取得時用 pct_chg 反推
         if symbol not in self._prev_close:
-            ref = float(tick.close) / (1 + float(tick.pct_chg) / 100) if tick.pct_chg else price
+            if tick.pct_chg:
+                ref = price / (1 + float(tick.pct_chg) / 100)
+            else:
+                ref = price
             self._prev_close[symbol] = ref
+            self.logger.debug("反推前日收盤: %s = %.2f", symbol, ref)
 
         prev_close = self._prev_close[symbol]
         if prev_close <= 0:
@@ -388,13 +439,27 @@ class MyStrategy(BaseStrategy):
             pos = self.positions[symbol]
             pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
 
-            if pnl_pct >= self.settings.take_profit_pct:
-                self.logger.info(
-                    "[停利] %s PnL=%.2f%% (>= %.1f%%)",
-                    symbol, pnl_pct, self.settings.take_profit_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="tp")
+            # 更新最高水位
+            hw = self._high_watermark.get(symbol, price)
+            if price > hw:
+                self._high_watermark[symbol] = price
+                hw = price
 
+            # 從最高點回撤百分比
+            drawdown_pct = 100 * (hw - price) / hw if hw > 0 else 0
+
+            # 移動停利: 獲利超過 take_profit_pct 門檻後，從高點回撤 trailing_stop_pct 即出場
+            if (
+                pnl_pct >= self.settings.take_profit_pct
+                and drawdown_pct >= self.settings.trailing_stop_pct
+            ):
+                self.logger.info(
+                    "[移動停利] %s PnL=%.2f%% 高點=%.2f 回撤=%.2f%%",
+                    symbol, pnl_pct, hw, drawdown_pct,
+                )
+                self._place_stop_sell(symbol, pos.quantity, custom_field="trail")
+
+            # 固定停損
             elif pnl_pct <= self.settings.stop_loss_pct:
                 self.logger.info(
                     "[停損] %s PnL=%.2f%% (<= %.1f%%)",
@@ -403,10 +468,17 @@ class MyStrategy(BaseStrategy):
                 self._place_stop_sell(symbol, pos.quantity, custom_field="sl")
 
     def _calc_lots(self, price: float) -> int:
-        """根據資金上限與每檔最大張數計算可買張數。"""
+        """根據剩餘可用資金與每檔最大張數計算可買張數。"""
         cost_per_lot = price * 1000
         if cost_per_lot <= 0:
             return 0
 
-        max_by_fund = int(self.settings.max_fund / cost_per_lot)
-        return min(max_by_fund, self.settings.max_lot_per_symbol, 1) or 0
+        remaining = self.settings.max_fund - self._fund_used
+        if remaining < cost_per_lot:
+            self.logger.debug(
+                "資金不足: 剩餘 %.0f < 每張 %.0f", remaining, cost_per_lot,
+            )
+            return 0
+
+        max_by_fund = int(remaining / cost_per_lot)
+        return min(max_by_fund, self.settings.max_lot_per_symbol)

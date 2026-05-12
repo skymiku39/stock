@@ -53,7 +53,12 @@ class Settings(BaseSettings):
     # --- 停損停利 (百分比) ---
     stop_loss_pct: float = -3.0
     take_profit_pct: float = 6.0
+    trailing_stop_pct: float = 2.0  # 從最高點回撤此百分比則觸發停利
 
     # --- 資金控管 ---
     max_fund: int = 500_000
     max_lot_per_symbol: int = 2
+
+    # --- Telegram 通知 (留空則不啟用) ---
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""

@@ -8,9 +8,15 @@
 
 - **Shioaji 原生整合** -- 使用 Decorator-based callback，Pythonic 風格
 - **Queue 解耦架構** -- Tick 行情與策略運算分離，避免阻塞回呼執行緒
+- **盤前收盤價載入** -- 透過 snapshots API 取得精確的前日收盤價
+- **多檔資金追蹤** -- 即時追蹤已用資金，避免超額下單
+- **移動停利** -- 追蹤持倉最高價，從高點回撤 N% 觸發出場
 - **部位管理** -- 即時追蹤持倉均價、數量，成交回報自動更新
 - **委託單追蹤** -- 防止重複下單，自動輪詢委託狀態
+- **斷線重連** -- 指數退避重試，自動恢復登入與行情訂閱
 - **收盤全出場** -- 指定時間自動市價清倉
+- **交易紀錄匯出** -- 收盤後自動匯出 CSV 至 `data/` 目錄
+- **Telegram 通知** -- 買賣/停損停利/收盤摘要即時推播到手機
 - **模擬模式** -- `SIMULATION=true` 即可使用模擬環境測試
 
 ## 前置作業
@@ -54,9 +60,12 @@ cp .env.example .env
 | `ENTER_CUTOFF_TIME` | 停止進場時間 | `09:30` |
 | `EXIT_TIME` | 全部出場時間 | `13:15` |
 | `STOP_LOSS_PCT` | 停損百分比 | `-3.0` |
-| `TAKE_PROFIT_PCT` | 停利百分比 | `6.0` |
+| `TAKE_PROFIT_PCT` | 停利門檻百分比 | `6.0` |
+| `TRAILING_STOP_PCT` | 移動停利回撤百分比 | `2.0` |
 | `MAX_FUND` | 總資金上限 | `500000` |
 | `MAX_LOT_PER_SYMBOL` | 每檔最大張數 | `2` |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token | (選填) |
+| `TELEGRAM_CHAT_ID` | Telegram Chat ID | (選填) |
 
 ## 使用方式
 
@@ -74,9 +83,11 @@ uv run python -m bot.main
 src/bot/
   main.py       # 程式進入點
   config.py     # 組態管理 (pydantic-settings + .env)
-  broker.py     # Shioaji 連線管理 (登入/行情/下單)
+  broker.py     # Shioaji 連線管理 (登入/行情/下單/斷線重連)
   strategy.py   # 策略引擎 (BaseStrategy + MyStrategy)
   models.py     # 資料模型 (PositionInfo, OrderRecord)
+  recorder.py   # 交易紀錄收集與 CSV 匯出
+  notifier.py   # Telegram 推播通知
   utils.py      # 工具函數 (Logger, 時間)
 ```
 

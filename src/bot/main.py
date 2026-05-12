@@ -40,6 +40,10 @@ def main() -> None:
     try:
         strategy.run()
     finally:
+        strategy.recorder.export_csv()
+        summary = strategy.recorder.summary()
+        logger.info("交易摘要:\n%s", summary)
+        strategy.notifier.notify_shutdown()
         broker.logout()
         logger.info("=== Stock Bot 結束 ===")
 

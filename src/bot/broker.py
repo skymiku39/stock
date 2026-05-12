@@ -211,12 +211,57 @@ class SjBroker:
             self._order_callback(stat, msg)
 
     def _handle_reconnect(self) -> None:
+        """行情連線異常時嘗試重新登入並恢復訂閱 (指數退避)。"""
         if not self._reconnect_lock.acquire(blocking=False):
             return
-        try:
-            self.logger.warning("行情連線異常，等待自動重連 ...")
-        finally:
-            self._reconnect_lock.release()
+
+        def _reconnect_worker() -> None:
+            max_retries = 10
+            delay = 5.0
+            try:
+                for attempt in range(1, max_retries + 1):
+                    self.logger.warning(
+                        "嘗試重連 (%d/%d)，等待 %.0f 秒 ...",
+                        attempt, max_retries, delay,
+                    )
+                    time.sleep(delay)
+
+                    try:
+                        if self.api is not None:
+                            try:
+                                self.api.logout()
+                            except Exception:
+                                pass
+
+                        self.api = sj.Shioaji(simulation=self.settings.simulation)
+                        self.api.login(
+                            api_key=self.settings.api_key,
+                            secret_key=self.settings.secret_key,
+                        )
+
+                        if self.settings.ca_path and not self.settings.simulation:
+                            self.api.activate_ca(
+                                ca_path=self.settings.ca_path,
+                                ca_passwd=self.settings.ca_password,
+                                person_id=self.settings.person_id,
+                            )
+
+                        self._setup_event_callbacks()
+                        self._resubscribe_all()
+                        self.logger.info("重連成功!")
+                        return
+
+                    except Exception:
+                        self.logger.exception("重連失敗 (第 %d 次)", attempt)
+                        delay = min(delay * 2, 120)
+
+                self.logger.error("已達重連上限 (%d 次)，放棄重連", max_retries)
+            finally:
+                self._reconnect_lock.release()
+
+        threading.Thread(
+            target=_reconnect_worker, daemon=True, name="reconnect",
+        ).start()
 
     # ------------------------------------------------------------------
     # 下單
@@ -281,6 +326,44 @@ class SjBroker:
             order_type=OrderType.IOC,
             custom_field=custom_field,
         )
+
+    # ------------------------------------------------------------------
+    # 快照 / 前日收盤
+    # ------------------------------------------------------------------
+
+    def get_snapshots(self, symbols: list[str]) -> Dict[str, float]:
+        """取得多檔商品的前日收盤 (reference) 價。
+
+        優先使用合約物件的 reference 屬性，若為 0 則透過 snapshots API
+        以 close - change_price 推算。
+        """
+        assert self.api is not None, "尚未登入"
+        result: Dict[str, float] = {}
+
+        contracts = []
+        for s in symbols:
+            c = self.get_contract(s)
+            if c is None:
+                continue
+            ref = getattr(c, "reference", 0.0)
+            if ref and float(ref) > 0:
+                result[s] = float(ref)
+            else:
+                contracts.append(c)
+
+        if contracts:
+            try:
+                snaps = self.api.snapshots(contracts)
+                for snap in snaps:
+                    code = snap.code
+                    ref = float(snap.close) - float(snap.change_price)
+                    if ref > 0:
+                        result[code] = ref
+            except Exception:
+                self.logger.exception("取得 snapshots 失敗")
+
+        self.logger.info("前日收盤價: %s", result)
+        return result
 
     # ------------------------------------------------------------------
     # 訂單狀態查詢
