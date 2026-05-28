@@ -18,6 +18,8 @@ def _make_settings(**overrides) -> Settings:
         run_mode="watch",
         api_key="test",
         secret_key="test",
+        # 測試固定股價 600，所以 max_fund 給足，否則 RiskGuard 會擋下
+        max_fund=1_000_000,
         _env_file=None,
     )
     defaults.update(overrides)

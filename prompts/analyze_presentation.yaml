@@ -1,0 +1,46 @@
+id: analyze_presentation
+version: "1.2"
+description: 解析法說會逐字稿/簡報文字，輸出情緒、Capex、毛利率指引、成長驅動、風險等結構化 JSON
+model_hint: gemini-2.5-flash
+max_output_tokens: 2048
+temperature: 0.2
+inputs:
+  - name: ticker
+    required: true
+  - name: text
+    required: true
+    max_chars: 30000
+output_format: json
+template: |
+  你是一位嚴謹的台股機構研究員。請仔細閱讀以下「{ticker}」法說會逐字稿或簡報文字，
+  並產出結構化 JSON 報告。輸出**必須**是合法 JSON 物件，不可包含 markdown 標記。
+
+  分析準則：
+  - 看分析師 Q&A 時管理階層是否「閃爍/明確/迴避」，影響情緒分數
+  - 對「未來」「明年」「中長期」等模糊承諾要打折
+  - 評分依據明確的數據支撐、時間表、良率/客戶驗證進度
+  - 若文字嚴重不足以分析，請降低 confidence
+
+  JSON schema:
+  {{
+    "summary": "200 字內中文摘要",
+    "sentiment": "positive | neutral | negative",
+    "sentiment_score": -1.0 到 1.0 浮點數,
+    "confidence": 0.0 到 1.0 浮點數,
+    "key_metrics": {{
+      "revenue_guidance": "如有營收指引",
+      "gross_margin_guidance": "毛利率指引",
+      "capex": "資本支出指引",
+      "yoy": "YoY 變化",
+      "qoq": "QoQ 變化"
+    }},
+    "growth_drivers": ["3-5 個關鍵成長驅動因子"],
+    "risks": ["3-5 個風險"],
+    "capex_signal": "擴張 | 維持 | 收斂",
+    "margin_outlook": "上行 | 維持 | 下行"
+  }}
+
+  文本：
+  """
+  {text}
+  """

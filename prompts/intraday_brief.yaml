@@ -1,0 +1,61 @@
+id: intraday_brief
+version: "1.0"
+description: 把今日題材 + 候選股 + 量化分數 整合成「當沖戰情室」中文簡報
+model_hint: gemini-2.5-flash
+max_output_tokens: 3000
+temperature: 0.25
+inputs:
+  - name: asof_date
+    required: true
+  - name: themes_json
+    required: true
+    desc: theme_radar 萃取的 themes JSON
+  - name: ranked_candidates_json
+    required: true
+    desc: 候選股排序結果 (含 day_trade 分數、美股連動、ADR 溢價、籌碼摘要)
+  - name: macro_summary
+    required: false
+output_format: markdown
+template: |
+  你是當沖戰情室的早盤主播。請依以下資料寫一份「{asof_date} 當沖戰情簡報」(Markdown 中文)。
+
+  輸出結構 (請嚴格遵守)：
+
+  ## 1. 大盤定調 (3-4 句)
+     - 結合美股夜盤、加權前一日表現、VIX、外資期貨多空淨額（若有提供）給出今日多空判斷
+     - 給出建議「全力做多 / 選擇性做多 / 觀望 / 反彈做空」其中之一
+
+  ## 2. 今日 5 大熱門題材 (列點)
+     - 每個題材一行：`**題材名 (熱度★★★☆)** — 主要驅動 → 核心受惠股 (代號)`
+
+  ## 3. 當沖首選 Top 5 (表格)
+     代號 | 名稱 | 題材 | 當沖分 | 主要進場理由 (≤20 字) | 警示
+     從 ranked_candidates_json 取分數最高且至少有 1 個正向訊號的股
+
+  ## 4. 進場/停損規則
+     - 統一規則：停損 -1%、停利 +2%；觸發任一條 → 立即出場
+     - 個股若 ADR 溢價 > 5% 可放寬至 -1.5%/+3%
+
+  ## 5. 風險警示
+     - 列 2-3 條今日要特別注意的事件 (例：FOMC 凌晨、外資結算日、權息日)
+
+  撰寫原則：
+  - 完全使用繁體中文
+  - 不可編造未提供的資料；表格中的「當沖分」直接套 ranked_candidates_json 的 day_trade_score
+  - 用機構晨會口吻：短促、有節奏、含具體數字
+  - 篇幅 600-900 字
+
+  ## 美股盤後
+  ```
+  {macro_summary}
+  ```
+
+  ## 今日題材
+  ```json
+  {themes_json}
+  ```
+
+  ## 候選股排序 (前 20 名)
+  ```json
+  {ranked_candidates_json}
+  ```

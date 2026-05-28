@@ -10,12 +10,23 @@
    ```
 
 2. **檢查 .env 設定**
+   - 確認 `RUN_MODE`：`trade` 自動交易、`watch` 看盤不下單、`report` 公開延遲資料報表
    - 確認 `SYMBOLS` 是否需要更新（今天要監控哪些股票）
-   - 確認 `SIMULATION` 設定（`true` = 模擬，`false` = 實單）
+   - `trade` 模式才需要確認 `SIMULATION` 設定（`true` = 模擬，`false` = 實單）
 
 3. **啟動機器人**
    ```powershell
    uv run stock-bot
+   ```
+
+   不使用 Shioaji API 的報表模式：
+   ```powershell
+   $env:RUN_MODE="report"; $env:SYMBOLS="2330,0050"; uv run stock-bot
+   ```
+
+   使用 Shioaji 行情但不下單的看盤模式：
+   ```powershell
+   $env:RUN_MODE="watch"; uv run stock-bot
    ```
 
 4. **確認啟動成功**
@@ -23,7 +34,7 @@
    正常啟動的 log 順序：
    ```
    [INFO] main: === Stock Bot 啟動 ===
-   [INFO] main: 組態載入完成 (simulation=true)
+   [INFO] main: 組態載入完成 (run_mode=trade, market_source=shioaji, simulation=true)
    [INFO] broker: 正在初始化 Shioaji ...
    [INFO] broker: 登入中 ... (simulation=true)
    [INFO] broker: 登入成功，可用帳號: [...]
@@ -60,8 +71,9 @@
    ```
 
 2. **檢查交易紀錄**
-   - CSV 檔案位於 `data/trades_YYYY-MM-DD.csv`
+   - `trade` 模式 CSV 檔案位於 `data/trades_YYYY-MM-DD.csv`
    - 欄位: datetime, symbol, action, price, quantity, ordno, custom_field, amount
+   - `watch/report` 模式位於 `data/reports/signals_YYYY-MM-DD.csv` 與 `report_YYYY-MM-DD.csv`
 
 3. **檢查 log 檔案**
    - Log 位於 `log/` 目錄
@@ -107,6 +119,8 @@ log/
 | `[停損] 2330 PnL=-3.5%` | 觸發停損 |
 | `[移動停利] 2330 PnL=6.2% 高點=636.00 回撤=2.1%` | 觸發移動停利 |
 | `全出場: 2330 2 張 (市價 IOC)` | 收盤清倉 |
+| `[虛擬買入] 2330 600.00 x 1` | watch/report 模式產生 would-buy |
+| `[虛擬賣出] 2330 610.00 x 1` | watch/report 模式產生 would-sell |
 | `嘗試重連 (1/10)` | 行情斷線，開始重連 |
 | `重連成功!` | 重連成功 |
 | `已達重連上限` | 重連失敗，需人工處理 |

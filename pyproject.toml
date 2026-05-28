@@ -13,15 +13,34 @@ dependencies = [
     "python-dotenv",
     "pandas",
     "requests",
+    "streamlit>=1.32",
+    "altair>=5.0",
+    "google-genai>=1.0",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pypdf>=4.0",
+    "pyyaml>=6.0",
+    "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
 ]
+# 雲端同步 (Google Sheets) — 不裝也能跑，只是不能用雲端同步
+cloud = [
+    "gspread>=6.0",
+    "google-auth>=2.30",
+]
 
 [project.scripts]
 stock-bot = "bot.main:main"
+stock-dashboard = "bot.dashboard:run"
+stock-auto-research = "bot.auto_research:main"
+stock-macro-update = "bot.macro_update:main"
+stock-intraday = "bot.intraday_cli:main"
+stock-preflight = "bot.preflight_cli:main"
+stock-gemini-test = "bot.gemini_smoke:main"
 
 [build-system]
 requires = ["hatchling"]

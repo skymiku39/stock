@@ -3,10 +3,12 @@
 ## 前置條件
 
 - Python 3.11 以上
-- Windows 10/11（Shioaji 的電子憑證目前僅支援 Windows）
-- 永豐金證券帳戶
+- Windows 10/11（`trade` 實單模式需使用 Shioaji 電子憑證）
+- 永豐金證券帳戶（`trade/watch` 模式需要；`report` 模式不需要）
 
-## Step 1: 永豐金開戶與 API 申請
+## Step 1: 永豐金開戶與 API 申請（trade/watch 模式）
+
+如果你只要先跑 `RUN_MODE=report`，可以略過本步驟；report 模式不登入 Shioaji，也不會下單。
 
 ### 1.1 開戶
 
@@ -70,6 +72,14 @@ Copy-Item .env.example .env
 用任何文字編輯器開啟 `.env`，填入你的資訊：
 
 ```ini
+# === 執行模式 ===
+# trade  = 自動交易
+# watch  = Shioaji 看盤不下單
+# report = TWSE 公開延遲資料報表，不需 API key
+RUN_MODE=trade
+REPORT_POLL_SECONDS=5
+REPORT_OUTPUT_DIR=data/reports
+
 # === Shioaji 登入資訊 ===
 API_KEY=你的API_Key_這裡貼上
 SECRET_KEY=你的Secret_Key_這裡貼上
@@ -104,6 +114,7 @@ TELEGRAM_CHAT_ID=
 - `.env` 已在 `.gitignore` 中，不會被提交到 Git
 - `CA_PATH` 使用正斜線 `/` 分隔路徑（Windows 也適用）
 - **第一次務必設定 `SIMULATION=true`**，確認系統正常後再改為 `false`
+- 只看盤不下單請用 `RUN_MODE=watch`；完全不使用 Shioaji API 請用 `RUN_MODE=report`
 
 ## Step 4: 設定 Telegram 通知（選填）
 
@@ -130,7 +141,25 @@ uv run python -c "from bot.main import main; print('OK')"
 
 如果看到 `OK` 就表示安裝成功。
 
-## Step 6: 首次執行（模擬模式）
+## Step 6: 首次執行
+
+### 6.1 報表模式（不需 API Key）
+
+```powershell
+$env:RUN_MODE="report"; $env:SYMBOLS="2330,0050"; uv run stock-bot
+```
+
+此模式會輪詢 TWSE 公開延遲資料，結束時輸出 `data/reports/signals_YYYY-MM-DD.csv` 與 `report_YYYY-MM-DD.csv`。
+
+### 6.2 看盤模式（需 API Key，不下單）
+
+```powershell
+$env:RUN_MODE="watch"; uv run stock-bot
+```
+
+此模式使用 Shioaji 即時行情，但不啟用 CA，也不送出委託。
+
+### 6.3 自動交易/模擬交易模式
 
 ```powershell
 # 確認 .env 中 SIMULATION=true
@@ -141,7 +170,7 @@ uv run stock-bot
 1. 登入成功的 log
 2. 前日收盤價載入
 3. Tick 訂閱成功
-4. 開始接收即時行情
+4. 開始接收即時行情或公開延遲資料
 
 按 `Ctrl+C` 可隨時停止。
 
@@ -158,5 +187,6 @@ d:\skymiku\stock\
   src/bot/             ← 原始碼
   log/                 ← Log 檔案（自動建立）
   data/                ← 交易紀錄 CSV（自動建立）
+  data/reports/        ← watch/report 訊號與報表（自動建立）
   .venv/               ← 虛擬環境（uv sync 建立）
 ```

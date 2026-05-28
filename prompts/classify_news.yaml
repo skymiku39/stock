@@ -1,0 +1,30 @@
+id: classify_news
+version: "1.0"
+description: 將 MOPS 重大訊息 / 新聞分類，輸出影響面與情緒
+model_hint: gemini-2.5-flash
+max_output_tokens: 512
+temperature: 0.1
+inputs:
+  - name: ticker
+    required: true
+  - name: subject
+    required: true
+  - name: detail
+    required: false
+output_format: json
+template: |
+  你是台股事件驅動量化分析師。請判讀以下重大訊息：
+
+  ticker: {ticker}
+  主旨: {subject}
+  細節: {detail}
+
+  輸出 JSON (無 markdown)：
+  {{
+    "category": "營收 | 法人說明會 | 庫藏股 | 增資減資 | 訂單 | 重大投資 | 高層異動 | 訴訟 | 其他",
+    "impact": "positive | neutral | negative",
+    "magnitude": "high | medium | low",
+    "horizon": "short | medium | long",
+    "key_points": ["1-3 個重點"],
+    "tags": ["相關產業/題材標籤"]
+  }}

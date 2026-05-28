@@ -1,0 +1,39 @@
+id: extract_etf_holdings
+version: "1.0"
+description: 從投信網頁 HTML / PDF 文字抽取主動式 ETF 持股清單為 JSON
+model_hint: gemini-2.5-flash
+max_output_tokens: 4096
+temperature: 0.0
+inputs:
+  - name: etf_symbol
+    required: true
+  - name: etf_name
+    required: false
+  - name: source_text
+    required: true
+    max_chars: 60000
+output_format: json
+template: |
+  以下是主動式 ETF「{etf_symbol} {etf_name}」的官方持股資訊頁面內容
+  (HTML 或從 PDF 抽出的純文字)。請抽取所有「成分股」並回傳 JSON。
+
+  輸出**必須**是合法 JSON 陣列，每個元素 schema：
+  {{
+    "ticker": "證券代號 (如 2330, 2382)",
+    "name": "公司名稱 (如 台積電)",
+    "weight_pct": 權重百分比 (浮點數，例如 22.1，不要帶 % 符號),
+    "shares": 持有張數 (浮點數，找不到請填 0),
+    "value": 市值 (浮點數，找不到請填 0)
+  }}
+
+  注意：
+  - 排除「現金部位」、「應收應付」、「其他資產」等非個股項目
+  - 若 HTML 含有 ETF 報酬率/淨值等表格，請只抽「持股明細」表
+  - 若同一檔證券出現多次，請合併權重
+  - 若文字明顯不是持股頁 (例如錯誤頁、登入頁)，請回傳空陣列 []
+  - 不要任何 markdown 包裹，直接輸出 JSON
+
+  來源內容：
+  """
+  {source_text}
+  """

@@ -1,0 +1,46 @@
+id: daily_brief
+version: "1.0"
+description: 整合 ETF 共識訊號 + 法說會分析 + 籌碼面，產出當日一頁紙
+model_hint: gemini-2.5-flash
+max_output_tokens: 3000
+temperature: 0.3
+inputs:
+  - name: date
+    required: true
+  - name: consensus_signals_json
+    required: true
+    desc: 共識持股 / 加碼 / 新建倉 JSON
+  - name: presentation_analyses_json
+    required: true
+    desc: 當日所有法說會分析結果 JSON
+  - name: chips_summary_json
+    required: true
+    desc: 主要監控標的的籌碼面摘要 JSON
+output_format: markdown
+template: |
+  你是一位資深投資組合經理，請依以下資料撰寫一份「{date} 每日盤後簡報」(Markdown 格式)，
+  全程使用繁體中文，重點突出、有數據支撐，不要編造資料。
+
+  簡報結構（依序）：
+  1. **重點摘要** (3-5 句)
+  2. **主動 ETF 共識動向** (依共識強度排序，列出 Top 5)
+  3. **法說會解讀重點** (對當日有分析的標的，列摘要 + 情緒 + 言行反查結果)
+  4. **籌碼面警訊** (列出外資/投信/借券異動明顯的標的)
+  5. **明日操作建議** (買/賣/觀望，必須說明依據)
+
+  輸出語氣：機構研究報告，避免過度樂觀或悲觀，少用形容詞、多用數據。
+
+  ## ETF 共識訊號
+  ```json
+  {consensus_signals_json}
+  ```
+
+  ## 法說會分析
+  ```json
+  {presentation_analyses_json}
+  ```
+
+  ## 籌碼面摘要
+  ```json
+  {chips_summary_json}
+  ```

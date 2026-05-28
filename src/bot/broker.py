@@ -48,6 +48,14 @@ class SjBroker:
 
         self._reconnect_lock = threading.Lock()
 
+    def _should_activate_ca(self) -> bool:
+        """Only trade mode may activate CA; watch mode must stay quote-only."""
+        return bool(
+            self.settings.ca_path
+            and not self.settings.simulation
+            and self.settings.run_mode == "trade"
+        )
+
     # ------------------------------------------------------------------
     # 登入 / 登出
     # ------------------------------------------------------------------
@@ -72,12 +80,7 @@ class SjBroker:
 
         self.logger.info("登入成功，可用帳號: %s", accounts)
 
-        activate_ca = (
-            self.settings.ca_path
-            and not self.settings.simulation
-            and self.settings.run_mode == "trade"
-        )
-        if activate_ca:
+        if self._should_activate_ca():
             self.logger.info("啟用電子憑證 ...")
             self.api.activate_ca(
                 ca_path=self.settings.ca_path,
@@ -248,7 +251,7 @@ class SjBroker:
                             secret_key=self.settings.secret_key,
                         )
 
-                        if self.settings.ca_path and not self.settings.simulation:
+                        if self._should_activate_ca():
                             self.api.activate_ca(
                                 ca_path=self.settings.ca_path,
                                 ca_passwd=self.settings.ca_password,

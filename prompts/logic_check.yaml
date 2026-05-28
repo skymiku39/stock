@@ -1,0 +1,71 @@
+id: logic_check
+version: "1.1"
+description: 對比法說語意 (言) 與籌碼面動向 (行)，判斷管理階層是否言行一致
+model_hint: gemini-2.5-flash
+max_output_tokens: 512
+temperature: 0.2
+inputs:
+  - name: ticker
+    required: true
+  - name: sentiment
+    required: true
+  - name: sentiment_score
+    required: true
+  - name: summary
+    required: true
+  - name: drivers
+    required: false
+  - name: risks
+    required: false
+  - name: foreign
+    required: true
+    desc: 外資近 N 日累計淨買超 (張)
+  - name: trust
+    required: true
+    desc: 投信淨買超 (張)
+  - name: dealer
+    required: true
+    desc: 自營商淨買超 (張)
+  - name: margin
+    required: true
+    desc: 融資餘額變動 (%)
+  - name: short_borrow
+    required: true
+    desc: 借券賣出餘額變動 (%)
+  - name: block
+    required: true
+    desc: 鉅額交易淨額 (張)
+output_format: json
+template: |
+  你是一位專注於市場微結構的避險基金分析師。請依據以下兩段資料，
+  判斷管理階層的法說會語意 (言) 與真實籌碼動向 (行) 是否一致。
+
+  [法說會分析]
+  ticker: {ticker}
+  sentiment: {sentiment}
+  sentiment_score: {sentiment_score}
+  summary: {summary}
+  growth_drivers: {drivers}
+  risks: {risks}
+
+  [籌碼面背景]
+  外資近期淨買超 (張): {foreign}
+  投信淨買超 (張): {trust}
+  自營商淨買超 (張): {dealer}
+  融資餘額變動 (%): {margin}
+  借券賣出餘額變動 (%): {short_borrow}
+  鉅額交易淨額 (張): {block}
+
+  判定原則：
+  - 法說正向但外資/借券暗中放空 → suspicious_distribution
+  - 法說保守但聰明錢悄悄吸籌 → suspicious_accumulation
+  - 言行一致 → consistent
+  - 資料不足或方向矛盾 → inconclusive
+
+  請輸出**合法 JSON**，不含 markdown：
+  {{
+    "verdict": "consistent | suspicious_distribution | suspicious_accumulation | inconclusive",
+    "reasoning": "中文 100 字內說明",
+    "confidence": 0.0 到 1.0,
+    "suggestion": "buy | hold | avoid | short"
+  }}

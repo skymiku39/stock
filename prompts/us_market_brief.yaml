@@ -1,0 +1,63 @@
+id: us_market_brief
+version: "1.0"
+description: 將當日 (或當夜) 美股表現整合為「對台股供應鏈影響」中文簡報
+model_hint: gemini-2.5-flash
+max_output_tokens: 2500
+temperature: 0.25
+inputs:
+  - name: asof_date
+    required: true
+  - name: indices_json
+    required: true
+    desc: 主要指數 (S&P/NASDAQ/SOX/VIX/TWII) 的 JSON
+  - name: stocks_json
+    required: true
+    desc: 重要美股 + ADR 的 JSON
+  - name: adr_premiums_json
+    required: true
+    desc: ADR vs 母股溢價 JSON
+  - name: supply_chain_json
+    required: true
+    desc: 美股 → 台股供應鏈對照表 JSON
+output_format: markdown
+template: |
+  你是一位專注「美台連動」的機構研究員。請依以下當日美股資料，
+  寫一份「{asof_date} 美股盤後 → 台股早盤影響評估」(Markdown 中文簡報)。
+
+  輸出結構 (請嚴格遵守)：
+
+  1. **大盤定調** (1-2 句) — 依據 S&P / NASDAQ / SOX / VIX 判斷整體氣氛
+  2. **費半 (SOX) 對台股半導體** — 列出影響等級 (高/中/低) 與主要原因
+  3. **ADR 溢價 / 折價訊號** — 列出每檔 ADR 對應台股的開盤偏多/偏空訊號
+  4. **美股 → 台股供應鏈 Top 5 觀察** — 從 supply_chain_json 取 weight 高的標的，
+     結合對應美股當夜表現，列出最可能受惠/受害的 5 檔台股
+  5. **早盤戰術建議**
+     - 偏多標的 (列 3-5 檔台股代號 + 1 句理由)
+     - 偏空標的 (列 0-3 檔)
+     - 觀望理由 (若 VIX > 20 或方向不明)
+
+  撰寫原則：
+  - 完全使用繁體中文
+  - 不可編造未提供的資料；ADR 溢價要直接套用 adr_premiums_json 數字
+  - 用機構研究報告口吻，少用形容詞、多用數據
+  - 篇幅 400-700 字
+
+  ## 主要指數
+  ```json
+  {indices_json}
+  ```
+
+  ## 重要美股 / ADR
+  ```json
+  {stocks_json}
+  ```
+
+  ## ADR 溢價
+  ```json
+  {adr_premiums_json}
+  ```
+
+  ## 美股 → 台股供應鏈對照
+  ```json
+  {supply_chain_json}
+  ```

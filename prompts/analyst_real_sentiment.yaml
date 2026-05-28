@@ -1,0 +1,47 @@
+id: analyst_real_sentiment
+version: "1.0"
+description: 外資/賣方研究報告語意 vs 實際買賣超的「真實情緒」反指標分析
+model_hint: gemini-2.5-flash
+max_output_tokens: 800
+temperature: 0.2
+inputs:
+  - name: ticker
+    required: true
+  - name: report_text
+    required: true
+    max_chars: 15000
+    desc: 外資/賣方研究報告或新聞稿原文
+  - name: actual_flow_json
+    required: true
+    desc: 同期間外資/投信實際買賣超數據 JSON
+output_format: json
+template: |
+  你是專注「外資真實意圖」的市場微結構研究員。請判讀以下兩段資料：
+
+  [研究報告文本]
+  ticker: {ticker}
+  ```
+  {report_text}
+  ```
+
+  [實際籌碼數據 (同期間)]
+  ```json
+  {actual_flow_json}
+  ```
+
+  輸出**合法 JSON**：
+  {{
+    "report_tone": "bullish | neutral | bearish",
+    "report_score": -1.0 到 1.0,
+    "actual_direction": "buying | selling | neutral",
+    "discrepancy": "consistent | report_bullish_but_selling | report_bearish_but_buying | mixed",
+    "interpretation": "中文 80 字內解釋為何出現此差異",
+    "implication": "中文 60 字內：若你是散戶，這暗示什麼操作機會",
+    "confidence": 0.0 到 1.0
+  }}
+
+  判定原則：
+  - report_bullish_but_selling → 疑似出貨/利多出盡，建議避開
+  - report_bearish_but_buying → 疑似低調吸籌/逆向操作，建議分批佈局
+  - consistent → 言行一致，跟隨方向操作
+  - mixed → 訊號矛盾或資料不足，觀望

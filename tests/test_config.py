@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from bot.config import Settings
@@ -38,6 +36,13 @@ class TestRunModeDefaults:
                 symbols=["2330"], _env_file=None,  # type: ignore[call-arg]
             )
 
+    def test_report_with_shioaji_raises(self) -> None:
+        with pytest.raises(Exception):
+            Settings(
+                run_mode="report", market_source="shioaji",
+                symbols=["2330"], _env_file=None,  # type: ignore[call-arg]
+            )
+
 
 class TestReportSettings:
     def test_poll_seconds_default(self) -> None:
@@ -50,6 +55,13 @@ class TestReportSettings:
             symbols=["2330"], _env_file=None,  # type: ignore[call-arg]
         )
         assert s.report_poll_seconds == 10
+
+    def test_poll_seconds_must_be_positive(self) -> None:
+        with pytest.raises(Exception):
+            Settings(
+                run_mode="report", report_poll_seconds=0,
+                symbols=["2330"], _env_file=None,  # type: ignore[call-arg]
+            )
 
     def test_output_dir_default(self) -> None:
         s = Settings(run_mode="report", symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
@@ -64,3 +76,17 @@ class TestSymbolParsing:
     def test_list_input(self) -> None:
         s = Settings(symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
         assert s.symbols == ["2330"]
+
+    def test_dotenv_comma_separated(self, tmp_path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "RUN_MODE=watch\n"
+            "API_KEY=test\n"
+            "SECRET_KEY=test\n"
+            "SYMBOLS=2330,0050,2881\n",
+            encoding="utf-8",
+        )
+
+        s = Settings(_env_file=env_file)  # type: ignore[call-arg]
+
+        assert s.symbols == ["2330", "0050", "2881"]

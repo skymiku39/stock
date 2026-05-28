@@ -24,6 +24,7 @@ ENV/
 .env
 .env.*
 !.env.example
+.secrets/
 
 # ======================
 # 電子憑證 & 金鑰
@@ -47,6 +48,7 @@ log/
 logs/
 *.log
 shioaji.log
+_dash_*.txt
 
 # ======================
 # Shioaji SDK 產生的檔案

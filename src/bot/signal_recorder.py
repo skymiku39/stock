@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from bot.models import SignalEvent
+from bot.models import MarketTick, SignalEvent
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -24,6 +24,7 @@ class SignalRecorder:
         self.output_dir = output_dir
         self.logger = logger or get_logger("signal-recorder")
         self._signals: List[SignalEvent] = []
+        self._price_stats: Dict[str, Dict[str, float]] = {}
 
     # ------------------------------------------------------------------
     # 記錄
@@ -31,11 +32,25 @@ class SignalRecorder:
 
     def record(self, event: SignalEvent) -> None:
         self._signals.append(event)
+        self._update_price_stats(event.symbol, event.price)
         self.logger.debug(
             "Signal: %s %s %s @ %.2f x%d [%s]",
             event.action, event.symbol, event.reason,
             event.price, event.quantity, event.mode,
         )
+
+    def record_tick(self, tick: MarketTick) -> None:
+        """Track observed market highs/lows for report summaries."""
+        self._update_price_stats(tick.symbol, tick.price)
+
+    def _update_price_stats(self, symbol: str, price: float) -> None:
+        if price <= 0:
+            return
+        stats = self._price_stats.setdefault(
+            symbol, {"high": price, "low": price},
+        )
+        stats["high"] = max(stats["high"], price)
+        stats["low"] = min(stats["low"], price)
 
     @property
     def signal_count(self) -> int:
@@ -84,7 +99,7 @@ class SignalRecorder:
             sym_sells = sells[sells["symbol"] == sym]
             entry_price = float(sym_buys["price"].iloc[0]) if len(sym_buys) else 0.0
             exit_price = float(sym_sells["price"].iloc[-1]) if len(sym_sells) else 0.0
-            all_prices = df[df["symbol"] == sym]["price"]
+            stats = self._price_stats.get(sym, {})
 
             pnl_pct = 0.0
             if entry_price > 0 and exit_price > 0:
@@ -96,8 +111,8 @@ class SignalRecorder:
                 "sell_signals": len(sym_sells),
                 "first_entry_price": entry_price,
                 "last_exit_price": exit_price,
-                "high": float(all_prices.max()),
-                "low": float(all_prices.min()),
+                "high": float(stats.get("high", 0.0)),
+                "low": float(stats.get("low", 0.0)),
                 "pnl_pct": round(pnl_pct, 2),
             })
 

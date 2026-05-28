@@ -60,8 +60,18 @@ class TelegramNotifier:
     # 便捷方法
     # ------------------------------------------------------------------
 
-    def notify_start(self, symbols: list[str], simulation: bool) -> None:
-        mode = "模擬" if simulation else "實單"
+    def notify_start(
+        self,
+        symbols: list[str],
+        simulation: bool,
+        run_mode: str = "trade",
+    ) -> None:
+        if run_mode == "watch":
+            mode = "看盤"
+        elif run_mode == "report":
+            mode = "報表"
+        else:
+            mode = "模擬" if simulation else "實單"
         self.send(f"🤖 <b>Stock Bot 啟動</b> [{mode}]\n監控: {', '.join(symbols)}")
 
     def notify_buy(self, symbol: str, price: float, qty: int) -> None:

@@ -29,6 +29,7 @@ from shioaji.constant import Action, OrderState
 from bot.models import MarketTick, OrderRecord, PositionInfo, SignalEvent
 from bot.notifier import TelegramNotifier
 from bot.recorder import TradeRecorder
+from bot.risk_guard import RiskGuard
 from bot.signal_recorder import SignalRecorder
 from bot.utils import get_logger, now_tw, now_tw_time
 
@@ -95,6 +96,9 @@ class BaseStrategy(ABC):
             chat_id=settings.telegram_chat_id,
         )
 
+        # 風險 / 資金控制 (所有實際下單都會經過)
+        self.risk = RiskGuard(settings=settings, logger=self.logger)
+
         # 控制旗標
         self._running = False
 
@@ -152,7 +156,9 @@ class BaseStrategy(ABC):
         mode_label = "交易" if self._is_trade_mode else "看盤"
         self.logger.info("策略已啟動 [%s 模式]，監控 %s", mode_label, self.settings.symbols)
         self.notifier.notify_start(
-            self.settings.symbols, self.settings.simulation,
+            self.settings.symbols,
+            self.settings.simulation,
+            self.settings.run_mode,
         )
 
         try:
@@ -185,6 +191,7 @@ class BaseStrategy(ABC):
                 ticks = self._market_source.poll()
                 for tick in ticks:
                     self._last_price[tick.symbol] = tick.price
+                    self.signal_recorder.record_tick(tick)
                     try:
                         self.on_tick(tick)
                     except Exception:
@@ -227,6 +234,8 @@ class BaseStrategy(ABC):
                 source="shioaji",
             )
             self._last_price[tick.symbol] = tick.price
+            if not self._is_trade_mode:
+                self.signal_recorder.record_tick(tick)
 
             try:
                 self.on_tick(tick)
@@ -317,6 +326,7 @@ class BaseStrategy(ABC):
                     self.positions[symbol] = PositionInfo(
                         symbol=symbol, avg_price=price, quantity=qty,
                     )
+                self.risk.on_entry_filled(symbol, price, qty)
                 self.logger.info(
                     "部位更新 (買入): %s | 已用資金: %.0f",
                     self.positions[symbol], self._fund_used,
@@ -327,6 +337,8 @@ class BaseStrategy(ABC):
                 released = price * qty * 1000
                 self._fund_used = max(0.0, self._fund_used - released)
                 self.notifier.notify_sell(symbol, price, qty, custom)
+                entry_price = self.positions[symbol].avg_price if symbol in self.positions else price
+                self.risk.on_exit_filled(symbol, entry_price, price, qty)
                 if symbol in self.positions:
                     closed = self.positions[symbol].reduce(qty)
                     if closed:
@@ -351,6 +363,7 @@ class BaseStrategy(ABC):
             self.positions[symbol] = PositionInfo(
                 symbol=symbol, avg_price=price, quantity=quantity,
             )
+        self.risk.on_entry_filled(symbol, price, quantity)
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -380,13 +393,16 @@ class BaseStrategy(ABC):
         self._fund_used = max(0.0, self._fund_used - released)
 
         pnl_pct = 0.0
+        entry_price = price
         if symbol in self.positions:
             pos = self.positions[symbol]
             if pos.avg_price > 0:
                 pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
+            entry_price = pos.avg_price
             closed = pos.reduce(quantity)
             if closed:
                 del self.positions[symbol]
+        self.risk.on_exit_filled(symbol, entry_price, price, quantity)
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -507,7 +523,32 @@ class BaseStrategy(ABC):
         price: float,
         quantity: int,
         custom_field: str = "enter",
+        *,
+        pct_chg: Optional[float] = None,
     ) -> bool:
+        # === 風控守門員 ===
+        decision = self.risk.check_entry(
+            symbol=symbol,
+            price=price,
+            requested_lots=quantity,
+            pct_chg=pct_chg,
+        )
+        if not decision.allowed:
+            self.logger.warning(
+                "進場被風控拒絕 [%s] %s: %s",
+                decision.blocking_rule, symbol, decision.reason,
+            )
+            self.notifier.send(
+                f"⛔ 進場被風控擋下 {symbol}：{decision.reason}",
+            )
+            return False
+        if decision.adjusted_lots != quantity:
+            self.logger.info(
+                "張數經風控調整: %s %d → %d",
+                symbol, quantity, decision.adjusted_lots,
+            )
+        quantity = decision.adjusted_lots
+
         if not self._is_trade_mode:
             self._virtual_fill_buy(symbol, price, quantity, custom_field)
             self._enter_placed.add(symbol)
@@ -620,7 +661,10 @@ class MyStrategy(BaseStrategy):
                         "[進場] %s 漲幅 %.2f%% price=%.2f lots=%d",
                         symbol, pct_chg, price, lots,
                     )
-                    self._place_buy(symbol, price, lots, custom_field="enter")
+                    self._place_buy(
+                        symbol, price, lots,
+                        custom_field="enter", pct_chg=pct_chg,
+                    )
 
         # === 停損 / 停利邏輯 ===
         if (

@@ -1,0 +1,58 @@
+id: theme_radar
+version: "1.0"
+description: 從一批今日台股新聞中，萃取 5-8 個「今日熱門題材」並列出最相關台股代號
+model_hint: gemini-2.5-flash
+max_output_tokens: 3000
+temperature: 0.3
+inputs:
+  - name: asof_date
+    required: true
+  - name: news_text
+    required: true
+    max_chars: 18000
+    desc: 今日新聞清單 (壓縮文字格式：序號 [類別] 標題 (tickers) — 摘要)
+  - name: macro_summary
+    required: false
+    desc: 美股盤後關鍵指標 (S&P/NASDAQ/SOX/VIX 漲跌) — 給 LLM 判斷外部風向
+output_format: json
+template: |
+  你是專注台股「當沖題材」的盤前策略分析師。請從下列今日台股新聞 (asof={asof_date}) 中
+  萃取出 **5-8 個今日最熱、最具當沖價值的題材**。
+
+  輸出**合法 JSON 物件** (絕對不可包含 markdown 標記)：
+  {{
+    "asof_date": "{asof_date}",
+    "market_tone": "risk_on | neutral | risk_off",
+    "themes": [
+      {{
+        "theme": "題材名稱 (10 字內，例：被動元件漲價、AI 伺服器訂單)",
+        "category": "AI/半導體 | 電子代工 | 被動元件 | 航運 | 金融 | 生技 | 傳產 | 其他",
+        "heat": 1-5 整數 (1=冷門、5=極熱)，
+        "horizon": "intraday | short_term | mid_term",
+        "drivers": ["1-3 句中文，說明為什麼今天熱"],
+        "catalyst_news_idx": [新聞清單對應序號],
+        "candidate_tickers": [
+          {{"ticker": "代號", "name": "公司名", "role": "在題材中的角色 (例：龍頭/上游/設備)"}}
+        ],
+        "risks": ["1-2 項風險警示"]
+      }}
+    ],
+    "overall_brief": "100-150 字總結今日盤前策略，含建議偏多/偏空族群"
+  }}
+
+  選題原則：
+  - 同一題材內候選股 3-6 檔；題材間盡量分散 (不要 5 個都選 AI)
+  - 至少 1 個題材偏「強勢突發」(突發新聞 / 訂單利多)，1 個偏「籌碼鎖定」(投信連買、外資吃貨)
+  - candidate_tickers 必須是新聞中真實提到或邏輯上必然連動的台股 (4-6 位數代號)
+  - heat=5 只給「全市場最熱」的題材；不要灌水
+  - 若 macro_summary 顯示美股偏空 (SOX < -2% 或 VIX > 25)，market_tone 給 risk_off 且避開高 beta
+
+  ## 美股盤後概況
+  ```
+  {macro_summary}
+  ```
+
+  ## 今日台股新聞 ({asof_date})
+  ```
+  {news_text}
+  ```

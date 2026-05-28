@@ -2,28 +2,38 @@
 
 ## 概述
 
-Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交易機器人，採用 **Broker-Strategy 雙層架構**，將券商 SDK 操作與策略邏輯完全解耦。
+Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表分析的台股策略機器人，核心採用 **Market Source / Broker / Strategy** 分層架構，讓行情來源、下單執行與策略邏輯彼此解耦。
+
+## 執行模式
+
+| 模式 | 行情來源 | 登入 Shioaji | 啟用 CA | 下單 | 主要輸出 |
+|------|----------|:------------:|:-------:|:----:|----------|
+| `trade` | Shioaji 即時行情 | 是 | 實單時是 | 是 | `data/trades_*.csv` |
+| `watch` | Shioaji 即時行情 | 是 | 否 | 否 | `data/reports/signals_*.csv`、`report_*.csv` |
+| `report` | TWSE 公開延遲資料 | 否 | 否 | 否 | `data/reports/signals_*.csv`、`report_*.csv` |
+
+`SIMULATION=true` 是 Shioaji 的模擬交易環境，只影響 `trade` 模式；如果目標是「只看盤不下單」，請使用 `RUN_MODE=watch` 或 `RUN_MODE=report`。
 
 ## 架構圖
 
 ```
                           ┌─────────────────────────────────────┐
                           │            main.py                  │
-                          │  載入 Settings → 建立 Broker →      │
+                          │  載入 Settings → 依模式建立元件 →   │
                           │  建立 Strategy → strategy.run()     │
                           └──────────┬──────────────────────────┘
                                      │
                  ┌───────────────────┼───────────────────┐
                  │                   │                   │
           ┌──────▼──────┐    ┌───────▼───────┐   ┌──────▼──────┐
-          │  config.py  │    │  broker.py    │   │ strategy.py │
-          │  Settings   │    │  SjBroker     │   │ BaseStrategy│
+          │  config.py  │    │  broker.py /  │   │ strategy.py │
+          │  Settings   │    │ market_source │   │ BaseStrategy│
           │ (pydantic)  │    │ (Shioaji SDK) │   │ MyStrategy  │
           └──────┬──────┘    └───────┬───────┘   └──────┬──────┘
                  │                   │                   │
                  │            ┌──────┴──────┐    ┌──────┴──────┐
-                 │            │  Shioaji    │    │ recorder.py │
-                 │            │  API Server │    │ notifier.py │
+                 │            │ Shioaji/TWSE│    │ recorder.py │
+                 │            │ data source │    │ notifier.py │
                  │            └─────────────┘    │ models.py   │
                  │                               └─────────────┘
            ┌─────▼─────┐
@@ -38,9 +48,9 @@ Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交
 負責組裝所有元件並啟動系統的生命週期：
 
 1. 載入 `Settings`（從 `.env`）
-2. 建立 `SjBroker` 並登入
+2. `trade/watch` 建立 `SjBroker` 並登入；`report` 建立 `TwsePublicMarketSource`
 3. 建立 `MyStrategy` 並執行 `run()`
-4. 收到中斷信號或策略結束後，匯出紀錄、發送通知、登出
+4. 收到中斷信號或策略結束後，依模式匯出交易紀錄或訊號報表，必要時登出 Shioaji
 
 ### config.py -- 組態管理
 
@@ -48,6 +58,9 @@ Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交
 
 | 分類 | 設定項 | 類型 | 說明 |
 |------|--------|------|------|
+| 模式 | `run_mode` | str | `trade` / `watch` / `report` |
+| 行情 | `market_source` | str | 留空自動依模式選擇 |
+| 報表 | `report_poll_seconds`, `report_output_dir` | int / str | 公開資料輪詢秒數與輸出目錄 |
 | 登入 | `api_key`, `secret_key` | str | Shioaji API 憑證 |
 | 憑證 | `ca_path`, `ca_password`, `person_id` | str | 電子憑證路徑與密碼 |
 | 模式 | `simulation` | bool | True = 模擬環境 |
@@ -62,7 +75,7 @@ Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交
 封裝 Shioaji SDK 的所有低階操作，對外提供簡潔介面：
 
 **登入/登出**
-- `login()` -- 初始化 Shioaji、登入帳號、啟用憑證、綁定回呼
+- `login()` -- 初始化 Shioaji、登入帳號、依模式決定是否啟用憑證、綁定回呼
 - `logout()` -- 安全登出並釋放資源
 
 **合約**
@@ -77,6 +90,15 @@ Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交
 **下單**
 - `place_order(...)` -- 通用下單（限價/市價、ROD/IOC/FOK）
 - `place_market_sell(...)` -- 市價 IOC 賣出（停損/全出場用）
+- 非 `trade` 模式會在 broker 層攔截下單，回傳 `None`
+
+### market_source.py -- TWSE 公開延遲行情來源
+
+- `TwsePublicMarketSource` -- 不登入 Shioaji，輪詢 TWSE 公開延遲報價
+- `get_prev_close(symbols)` -- 從公開資料取得前日收盤價
+- `poll()` -- 將公開報價正規化為 `MarketTick`
+
+公開資料並非完整歷史逐筆行情，而是以輪詢形成 tick-like 序列，適合初步報表分析。
 
 **事件**
 - `set_on_tick(callback)` -- 設定 Tick 回呼
@@ -99,6 +121,7 @@ Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交
 - **資金追蹤**: `_fund_used` 即時追蹤已投入金額
 - **收盤出場**: 獨立 Thread 在 `exit_time` 後市價清倉
 - **委託輪詢**: 獨立 Thread 定期清理已完成的 pending orders
+- **虛擬成交**: `watch/report` 模式以觀察價記錄 would-buy / would-sell，永不送單
 
 **MyStrategy (示範策略)**
 
@@ -112,12 +135,21 @@ Stock Bot 是一支基於 Shioaji (永豐金證券) API 的台股當沖自動交
 
 - `PositionInfo` -- 持倉資訊（股號、均價、數量、進場時間）
 - `OrderRecord` -- 委託紀錄（委託號、股號、方向、類型）
+- `MarketTick` -- 跨來源正規化行情
+- `SignalEvent` -- 看盤/報表模式的交易意圖訊號
 
 ### recorder.py -- 交易紀錄
 
 - `record_deal(msg)` -- 暫存成交回報
 - `export_csv()` -- 匯出 CSV 至 `data/trades_YYYY-MM-DD.csv`
 - `summary()` -- 產生統計摘要（筆數、買賣金額）
+
+### signal_recorder.py -- 訊號與分析報表
+
+- `record(event)` -- 記錄 would-buy / would-sell
+- `record_tick(tick)` -- 追蹤觀察到的最高/最低價
+- `export_signals_csv()` -- 匯出訊號明細
+- `export_report()` -- 匯出每檔訊號次數、進出場價與分析損益
 
 ### notifier.py -- Telegram 通知
 

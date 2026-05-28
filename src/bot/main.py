@@ -64,13 +64,32 @@ def main() -> None:
         )
 
     # ---- 建立策略 ----
-    from bot.strategy import MyStrategy
+    if settings.strategy_type == "etf_follow":
+        from bot.strategy_etf_follow import EtfFollowStrategy
 
-    strategy = MyStrategy(
-        broker=broker,
-        settings=settings,
-        market_source=market_source,
-    )
+        strategy = EtfFollowStrategy(
+            broker=broker,
+            settings=settings,
+            market_source=market_source,
+            min_consensus_new=settings.etf_min_consensus_new,
+            min_consensus_add=settings.etf_min_consensus_add,
+            max_pct_chg_on_entry=settings.etf_max_pct_chg_on_entry,
+        )
+        logger.info(
+            "策略: EtfFollowStrategy (new>=%d, add>=%d, max_pct=%.1f)",
+            settings.etf_min_consensus_new,
+            settings.etf_min_consensus_add,
+            settings.etf_max_pct_chg_on_entry,
+        )
+    else:
+        from bot.strategy import MyStrategy
+
+        strategy = MyStrategy(
+            broker=broker,
+            settings=settings,
+            market_source=market_source,
+        )
+        logger.info("策略: MyStrategy (預設當沖示範)")
 
     def _shutdown(signum: int, frame: object) -> None:
         logger.info("收到信號 %d，關閉中 ...", signum)
