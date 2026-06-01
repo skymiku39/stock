@@ -1,0 +1,99 @@
+id: next_day_radar
+version: "1.0"
+description: 從盤後新聞 + 今日收盤資料 + 美股盤前/盤中 + 明日法說事件，萃取「明日預備題材 + 強勢承接 + 事件焦點」
+model_hint: gemini-2.5-flash
+max_output_tokens: 3500
+temperature: 0.3
+inputs:
+  - name: target_date
+    required: true
+    desc: 明日的目標交易日 (YYYY-MM-DD)
+  - name: mode
+    required: true
+    desc: draft (盤後初版) 或 update (凌晨更新版)
+  - name: news_text
+    required: true
+    max_chars: 18000
+    desc: 今日台股新聞 (壓縮文字格式：序號 [類別] 標題 (tickers) — 摘要)
+  - name: today_strong_text
+    required: false
+    desc: 今日收盤強勢承接候選 (代號/名稱/漲幅/量比/外資投信買賣超)
+  - name: macro_summary
+    required: false
+    desc: 美股盤後或盤中關鍵指標 (S&P/NASDAQ/SOX/VIX 漲跌、ADR 溢價)
+  - name: catalyst_text
+    required: false
+    desc: 明日法說會、財報、權息、政策事件清單
+output_format: json
+template: |
+  你是專注台股「**明日當沖預備**」的盤後策略分析師。請依下列資料萃取明日 ({target_date}) 的當沖預備清單。
+  本次模式：**{mode}**
+  - draft：盤後初版，重點放在「題材延續 + 今日強勢承接 + 明日事件」
+  - update：凌晨更新版，須結合今夜美股實際走勢調整偏多/偏空，並標註與 draft 差異
+
+  輸出**合法 JSON 物件** (絕對不可包含 markdown 或 ``` 標記)：
+  {{
+    "target_date": "{target_date}",
+    "mode": "{mode}",
+    "market_tone": "risk_on | neutral | risk_off",
+    "carry_themes": [
+      {{
+        "theme": "題材名 (10 字內，例：CoWoS 擴產、ASIC 訂單)",
+        "category": "AI/半導體 | 電子代工 | 被動元件 | 航運 | 金融 | 生技 | 傳產 | 其他",
+        "heat": 1-5 整數 (1=冷門、5=極熱)，
+        "drivers": ["1-3 句中文，說明明日為何續熱"],
+        "candidate_tickers": [
+          {{"ticker": "代號", "name": "公司名", "role": "龍頭/上游/設備/二線補漲", "entry_logic": "補漲 / 強勢承接 / 拉回承接"}}
+        ],
+        "risks": ["1-2 條風險"]
+      }}
+    ],
+    "event_focus": [
+      {{
+        "event": "事件名稱 (例：台積電法說、權息日)",
+        "event_time": "明日上午 / 明日下午 / 盤前 / 盤後 / 未指定",
+        "tickers": [
+          {{"ticker": "代號", "name": "公司名", "side": "受惠 | 受壓 | 中性"}}
+        ],
+        "expected_impact": "1-2 句中文：可能對開盤/盤中的影響"
+      }}
+    ],
+    "strong_carry": [
+      {{
+        "ticker": "代號",
+        "name": "公司名",
+        "today_pct": 浮點數 (今日漲跌幅%),
+        "volume_ratio": 浮點數 (量比，>1.5 視為放大),
+        "reason": "≤20 字，例：法人連 3 買量增、突破年線",
+        "watch_level": "open_strong | pullback_buy | observe"
+      }}
+    ],
+    "overall_brief": "150-200 字總結明日盤前策略：偏多/偏空族群、開盤策略 (追高/拉回承接/觀望)、最大風險"
+  }}
+
+  選股原則：
+  - carry_themes 取 3-5 個，每題材 3-6 檔；至少包含 1 個「強勢延續」與 1 個「補漲輪動」
+  - event_focus 至少 1 個 (若 catalyst_text 為空可從新聞推敲)，所有 ticker 必須是 4-6 位數台股代號
+  - strong_carry 從 today_strong_text 挑 5-10 檔，過濾「量比 < 1.2」或「漲幅 > 8% 過熱」
+  - 若 macro_summary 顯示美股偏空 (SOX < -2% 或 VIX > 25)，market_tone 給 risk_off 且建議拉回承接
+  - 不可編造未在輸入中出現的代號；同一檔可重複於 carry_themes / event_focus / strong_carry，但用途要清楚
+
+  ## 美股盤後/盤中概況
+  ```
+  {macro_summary}
+  ```
+
+  ## 明日事件焦點 (法說/財報/權息)
+  ```
+  {catalyst_text}
+  ```
+
+  ## 今日收盤強勢承接候選
+  ```
+  {today_strong_text}
+  ```
+
+  ## 今日台股新聞
+  ```
+  {news_text}
+  ```

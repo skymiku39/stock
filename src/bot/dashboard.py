@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # 確保被 `streamlit run src/bot/dashboard.py` 啟動時也能 import bot.*
 _PKG_ROOT = Path(__file__).resolve().parents[1]
@@ -128,12 +128,63 @@ def _badge(text: str, color: str = "gray") -> str:
         "yellow": "#d49a17",
         "blue": "#2563eb",
         "gray": "#6b7280",
+        "purple": "#7c3aed",
     }
     bg = palette.get(color, palette["gray"])
     return (
         f"<span style='background:{bg};color:#fff;padding:2px 10px;"
         f"border-radius:10px;font-size:12px;'>{text}</span>"
     )
+
+
+# ----------------------------------------------------------------------
+# LLM 消耗提示 (全域共用)
+# ----------------------------------------------------------------------
+# 規則：凡是點下去後 *會直接呼叫 Gemini API* 的按鈕，label 前加 🤖
+# 並把以下常數帶到 help= 內，讓使用者懸停就看得到。
+# 對「隱式」會自動觸發 LLM 的操作 (例如「分析」/「計算評分」會跑 auto_llm)，
+# 額外用 _llm_auto_banner() 在頁面頂端顯示一個明顯的提示框。
+
+LLM_TAG = "🤖"
+LLM_LABEL = "LLM"
+
+LLM_HINT_DIRECT = (
+    "🤖 此操作會直接呼叫 Gemini API，消耗 token 與 API 額度。"
+    "可在『LLM 呼叫紀錄』頁追蹤每筆呼叫的 input/output/延遲/tokens。"
+)
+
+LLM_HINT_AUTO = (
+    "🤖 自動 LLM：若已設 GEMINI_API_KEY，本操作會在背景自動呼叫 Gemini "
+    "(用 MOPS 重大訊息 + 鉅亨新聞做法說情緒分析)，每檔 12 小時內快取。"
+    "未設 API Key 時會 graceful skip，不會收費。"
+)
+
+
+def _llm_button_label(label: str) -> str:
+    """為 button label 加上 🤖 LLM 前綴 (若尚未含 LLM 字眼)。"""
+    if LLM_TAG in label or "LLM" in label or "Gemini" in label:
+        return label
+    return f"{LLM_TAG} {label}"
+
+
+def _llm_caption(text: str = "") -> None:
+    """頁面/區塊頂部統一的『此處會呼叫 LLM』提示橫條。"""
+    msg = "🤖 **LLM 消耗提示**：以下操作會呼叫 Gemini API、消耗 token (請先確認 `GEMINI_API_KEY` 已設定)。"
+    if text:
+        msg += f"  \n{text}"
+    st.info(msg, icon="🤖")
+
+
+def _llm_auto_banner(text: str = "") -> None:
+    """頁面有『隱式自動呼叫 LLM』的功能時，用這個 banner 提醒。"""
+    msg = (
+        "🤖 **此頁含自動 LLM 行為**：若 `GEMINI_API_KEY` 已設定，"
+        "本頁的『分析 / 計算評分 / 強制重抓』等動作會在背景自動呼叫 Gemini "
+        "做法說情緒分析 (有 12 小時快取避免重複)。"
+    )
+    if text:
+        msg += f"  \n{text}"
+    st.warning(msg, icon="🤖")
 
 
 # ======================================================================
@@ -280,15 +331,37 @@ def page_overview() -> None:
     if q5.button("跟單訊號", use_container_width=True):
         st.session_state.page = "跟單訊號"
         st.rerun()
-    if q6.button("主動 ETF 追蹤", use_container_width=True):
+    if q6.button("主動 ETF 追蹤 🤖", use_container_width=True, help="此頁的「立即抓取所有」會呼叫 Gemini。"):
         st.session_state.page = "主動 ETF 追蹤"
         st.rerun()
-    if q7.button("LLM 法說分析", use_container_width=True):
+    if q7.button("🤖 LLM 法說分析", use_container_width=True, help="此頁所有「用 Gemini 分析 / 執行反查」按鈕都會呼叫 Gemini。"):
         st.session_state.page = "LLM 法說分析"
         st.rerun()
     if q8.button("啟動 / 監控", use_container_width=True):
         st.session_state.page = "啟動 / 監控"
         st.rerun()
+
+    st.markdown("---")
+    with st.container(border=True):
+        st.markdown("### 🤖 哪些操作會呼叫 LLM (消耗 Gemini API 額度)？")
+        st.markdown(
+            "| 頁面 | 操作 | LLM 呼叫類型 |\n"
+            "|------|------|--------------|\n"
+            "| 🤖 LLM 法說分析 | 用 Gemini 分析 / 執行反查 | **直接** (1-2 次/按) |\n"
+            "| 🤖 自動化管線 | 立即執行管線 (LLM toggle 開) | **直接** (數次 ~ 數十次) |\n"
+            "| 🤖 主動 ETF 追蹤 | 立即抓取所有 (有 URL 的) | **直接** (每檔 ETF 1 次) |\n"
+            "| 🤖 今日當沖戰情室 | 重抓新聞 + 重跑 / 用快取重跑 | **直接** (至少 2 次) |\n"
+            "| 🤖 美股 / 跨市場 | 呼叫 Gemini 產出簡報 | **直接** (1 次) |\n"
+            "| 🤖 個股深入分析 | 分析 / 強制重抓全部資料 | **自動** (該檔缺 LLM 法說時) |\n"
+            "| 🤖 個股總覽 | 計算評分 | **自動** (對每檔缺 LLM 法說的個股) |\n"
+            "| Prompt 管理 / LLM 呼叫紀錄 | (檢視/編輯) | ❌ 不呼叫 |\n"
+            "| 其他頁面 (組態/資料庫/風控/報表/...) | — | ❌ 不呼叫 |\n"
+        )
+        st.caption(
+            "ℹ 自動觸發的 LLM 呼叫有 12 小時快取 (`data/auto_llm/<ticker>.json`)，"
+            "且未設 `GEMINI_API_KEY` 時整段 graceful skip，不會偷扣額度。"
+            "所有 LLM 呼叫的 input/output/延遲/tokens 都會記在『LLM 呼叫紀錄』頁。"
+        )
 
 
 # ======================================================================
@@ -1017,7 +1090,7 @@ def page_notifier() -> None:
     st.markdown("---")
     msg = st.text_area(
         "測試訊息",
-        value="🤖 <b>Stock Bot Dashboard</b>\n這是一則來自儀表板的測試訊息。",
+        value="📈 <b>Stock Bot Dashboard</b>\n這是一則來自儀表板的測試訊息。",
         height=120,
     )
     if st.button("發送測試", disabled=not (token and chat), type="primary"):
@@ -1171,11 +1244,11 @@ def page_etf_tracker() -> None:
     else:
         st.info("此 ETF 尚無對應日期的持股檔。可在下方匯入 / 編輯。")
 
-    with st.expander("自動從投信網頁抓持股 (使用 Gemini 抽取)", expanded=False):
+    with st.expander("自動從投信網頁抓持股 (🤖 使用 Gemini 抽取)", expanded=False):
         st.caption(
             "於下方填入每一檔 ETF 的官方持股頁 URL (或留空關閉)，"
-            "按「立即抓取所有」會：HTTP 下載 → 轉純文字 → 呼叫 Gemini `extract_etf_holdings` prompt → "
-            "存為當日 CSV。"
+            "按「🤖 立即抓取所有」會：HTTP 下載 → 轉純文字 → **呼叫 Gemini "
+            "`extract_etf_holdings` prompt (消耗 LLM)** → 存為當日 CSV。"
         )
         edited_rows = []
         for e in etfs:
@@ -1201,7 +1274,16 @@ def page_etf_tracker() -> None:
             st.success(f"已儲存到 {p}")
             st.rerun()
 
-        if cf.button("立即抓取所有 (有 URL 的)", type="primary", key="fetch_all"):
+        if cf.button(
+            "🤖 立即抓取所有 (有 URL 的)",
+            type="primary",
+            key="fetch_all",
+            help=(
+                "對每檔有 URL 的 ETF 逐一呼叫 Gemini `extract_etf_holdings` "
+                "從 HTML 抽出結構化持股 JSON。每檔約 1 次 LLM call。"
+                "\n\n" + LLM_HINT_DIRECT
+            ),
+        ):
             env_values = load_env()
             api_key = env_values.get("GEMINI_API_KEY", "")
             model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -1430,19 +1512,228 @@ def page_follow_signals() -> None:
 # ======================================================================
 
 
+def _render_auto_research_tab(api_key: str, model: str) -> None:
+    """LLM 法說分析頁 → 「🤖 自動研究」分頁的內容。
+
+    使用者只需要輸入個股代號 → 一鍵自動跑完
+    (行事曆 + MOPS 重訊 + 鉅亨新聞 + 網頁搜尋 + LLM 結構化分析 + 籌碼面言行反查)。
+    """
+    st.caption(
+        "全自動：行事曆 + MOPS 重大訊息 + 鉅亨新聞 + 上網搜尋 → Gemini 研究 → 籌碼面言行反查"
+    )
+
+    from bot.conference_calendar import upcoming_conferences
+
+    upcoming = upcoming_conferences(days=14, root=PROJECT_ROOT)
+    if upcoming:
+        upcoming_tickers_list = list({e.ticker for e in upcoming if e.ticker})
+        st.info(
+            f"📅 未來 14 天有 {len(upcoming)} 場法說會 (涵蓋 {len(upcoming_tickers_list)} 檔)，"
+            f"代號：{', '.join(upcoming_tickers_list[:20])}"
+            + (" ..." if len(upcoming_tickers_list) > 20 else "")
+        )
+    else:
+        st.caption("未來 14 天行事曆快取為空 (可能 MOPS 還沒公告，或行事曆需要重抓)。")
+
+    cc1, cc2, cc3 = st.columns([2, 1, 1])
+    tickers_input = cc1.text_input(
+        "個股代號 (逗號分隔)",
+        value="2330",
+        key="auto_research_tickers",
+        help="可一次輸入多檔，例如 2330,2317,3231。留白將跑 watchlist 全部。",
+    )
+    force = cc2.checkbox("強制重跑", value=False, key="auto_research_force",
+                        help="略過 12 小時快取，重新打 LLM。")
+    include_upcoming = cc3.checkbox(
+        "+ 未來 14 天法說股", value=False, key="auto_research_upcoming",
+        help="自動加入未來 14 天有法說會的所有個股。",
+    )
+
+    btn_run = st.button(
+        "🤖 開始自動研究", type="primary",
+        disabled=not api_key, key="auto_research_run",
+    )
+    if btn_run:
+        tickers: List[str] = []
+        for raw in (tickers_input or "").split(","):
+            t = raw.strip()
+            if t and t not in tickers:
+                tickers.append(t)
+        if not tickers:
+            try:
+                items = wl.load(PROJECT_ROOT).items
+                tickers = [i.ticker for i in items if i.ticker]
+            except Exception:
+                tickers = []
+        if include_upcoming:
+            for e in upcoming:
+                if e.ticker and e.ticker not in tickers:
+                    tickers.append(e.ticker)
+        if not tickers:
+            st.error("沒有 ticker 可分析；請輸入代號或先建立 watchlist。")
+            return
+
+        from bot.auto_llm import auto_research_ticker
+        from bot.llm_analyzer import GeminiClient
+
+        client = GeminiClient(api_key=api_key, model=model)
+        results: List[Dict] = []
+        progress = st.progress(0.0, text=f"準備中 ... (共 {len(tickers)} 檔)")
+        for i, ticker in enumerate(tickers, 1):
+            progress.progress(
+                (i - 1) / max(len(tickers), 1),
+                text=f"[{i}/{len(tickers)}] 研究 {ticker} ...",
+            )
+            name_hint = ""
+            try:
+                for it in wl.load(PROJECT_ROOT).items:
+                    if it.ticker == ticker:
+                        name_hint = it.name
+                        break
+            except Exception:
+                pass
+            try:
+                res = auto_research_ticker(
+                    ticker,
+                    root=PROJECT_ROOT,
+                    name_hint=name_hint,
+                    force_refresh=force,
+                    refresh_calendar=False,
+                )
+            except Exception as e:
+                results.append({"ticker": ticker, "error": str(e)})
+                continue
+            if res is None:
+                results.append({"ticker": ticker, "error": "無結果 (素材不足或 LLM 停用)"})
+                continue
+            row = {
+                "ticker": ticker,
+                "name": name_hint,
+                "sentiment": res.get("sentiment"),
+                "score": res.get("sentiment_score"),
+                "confidence": res.get("confidence"),
+                "catalyst_outlook": res.get("catalyst_outlook", ""),
+                "logic_verdict": (res.get("logic_check") or {}).get("verdict", ""),
+                "logic_suggestion": (res.get("logic_check") or {}).get("suggestion", ""),
+                "_raw": res,
+            }
+            results.append(row)
+        progress.progress(1.0, text=f"完成 {len(results)} 檔")
+        st.session_state["auto_research_results"] = results
+        st.success(f"完成：{len(results)} 檔已自動研究")
+
+    results = st.session_state.get("auto_research_results") or []
+    if results:
+        st.markdown("### 研究結果")
+        df = pd.DataFrame([
+            {k: v for k, v in r.items() if not k.startswith("_") and k != "error"}
+            | ({"error": r["error"]} if r.get("error") else {})
+            for r in results
+        ])
+        st.dataframe(df, hide_index=True, use_container_width=True)
+
+        for r in results:
+            if r.get("error"):
+                st.warning(f"{r['ticker']}: {r['error']}")
+                continue
+            raw = r.get("_raw") or {}
+            with st.expander(
+                f"🔎 {r['ticker']} {raw.get('name','')} — "
+                f"{raw.get('sentiment','?')} "
+                f"({raw.get('sentiment_score', 0):+.2f}, "
+                f"信心 {raw.get('confidence', 0):.0%})",
+                expanded=False,
+            ):
+                st.markdown(f"**📝 摘要**：{raw.get('summary','(無)')}")
+                if raw.get("catalyst_outlook"):
+                    st.markdown(f"**🚀 催化劑展望**：{raw['catalyst_outlook']}")
+                if raw.get("news_sentiment"):
+                    st.markdown(f"**📰 新聞基調**：{raw['news_sentiment']}")
+
+                gc1, gc2 = st.columns(2)
+                with gc1:
+                    st.markdown("**成長驅動因子**")
+                    for d in raw.get("growth_drivers", []) or []:
+                        st.write(f"- {d}")
+                with gc2:
+                    st.markdown("**風險**")
+                    for x in raw.get("risks", []) or []:
+                        st.write(f"- {x}")
+
+                st.markdown("**關鍵指標**")
+                st.json(raw.get("key_metrics", {}) or {})
+
+                st.markdown(
+                    f"**Capex 信號:** {raw.get('capex_signal','-')}"
+                    f"&nbsp;|&nbsp; **毛利率展望:** {raw.get('margin_outlook','-')}"
+                )
+
+                logic = raw.get("logic_check") or {}
+                if logic:
+                    color = {
+                        "consistent": "green",
+                        "suspicious_distribution": "red",
+                        "suspicious_accumulation": "yellow",
+                        "inconclusive": "gray",
+                    }.get(logic.get("verdict", ""), "gray")
+                    st.markdown(
+                        f"**💡 言行反查**：{_badge(logic.get('verdict','-'), color)}"
+                        f" → 建議 **{logic.get('suggestion','-').upper()}**"
+                        f" (信心 {float(logic.get('confidence', 0)):.0%})",
+                        unsafe_allow_html=True,
+                    )
+                    if logic.get("reasoning"):
+                        st.caption(logic["reasoning"])
+
+                sources = raw.get("evidence_sources") or []
+                if sources:
+                    st.markdown("**🔗 主要資料來源**")
+                    for s in sources:
+                        st.caption(f"- {s}")
+
+                meta = raw.get("source_materials") or {}
+                if meta:
+                    st.caption(
+                        f"素材：MOPS {meta.get('mops_count', 0)} 條、"
+                        f"鉅亨 {meta.get('news_count', 0)} 條、"
+                        f"網頁搜尋 {meta.get('web_search_results', 0)} 筆、"
+                        f"抓 {meta.get('web_pages_fetched', 0)} 篇原文、"
+                        f"行事曆未來 {meta.get('upcoming_conferences', 0)}+"
+                        f"過去 {meta.get('past_conferences', 0)} 場 "
+                        f"｜ prompt={raw.get('prompt_id','')} v{raw.get('prompt_version','')}"
+                        f"｜ 更新於 {raw.get('fetched_at','')}"
+                    )
+
+
 def page_llm_analysis() -> None:
     st.title("LLM 法說會分析 / 邏輯反查")
+    _llm_caption(
+        "全自動：抓 MOPS 法說會行事曆 + 上網搜尋 (DuckDuckGo + Google News) + 鉅亨新聞 "
+        "→ Gemini 結構化研究 → 籌碼面言行反查。"
+        "本頁進入時會自動更新行事曆快取 (一日一次)。"
+    )
 
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
     model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-    c1, c2 = st.columns(2)
+    try:
+        from bot.conference_calendar import (
+            ensure_calendar_fresh,
+            last_refresh_at,
+        )
+        ensure_calendar_fresh(root=PROJECT_ROOT)
+        cal_last = last_refresh_at(PROJECT_ROOT)
+    except Exception:
+        cal_last = ""
+
+    c1, c2, c3 = st.columns(3)
     c1.markdown(
         f"Gemini API Key: {_badge('已設定', 'green') if api_key else _badge('未設定', 'gray')}",
         unsafe_allow_html=True,
     )
     c2.markdown(f"模型: `{model}`")
+    c3.markdown(f"行事曆快取: `{cal_last or '尚未更新'}`")
 
     if not api_key:
         st.warning(
@@ -1450,9 +1741,15 @@ def page_llm_analysis() -> None:
             "可在 https://aistudio.google.com 免費取得。"
         )
 
-    tab_paste, tab_mops, tab_logic = st.tabs([
-        "貼文字分析", "MOPS 行事曆 / 重大訊息", "言行反查",
+    tab_auto, tab_paste, tab_mops, tab_logic = st.tabs([
+        "🤖 自動研究 (推薦)",
+        "貼文字分析",
+        "MOPS 行事曆 / 重大訊息",
+        "言行反查",
     ])
+
+    with tab_auto:
+        _render_auto_research_tab(api_key, model)
 
     with tab_paste:
         ticker = st.text_input("股票代號", value="2330", key="llm_ticker")
@@ -1462,7 +1759,12 @@ def page_llm_analysis() -> None:
             placeholder="例：本季營收 850 億美元，年增 35%，下季毛利率指引 56-58% ...",
             key="llm_text",
         )
-        run = st.button("用 Gemini 分析", type="primary", disabled=not (api_key and text))
+        run = st.button(
+            "🤖 用 Gemini 分析",
+            type="primary",
+            disabled=not (api_key and text),
+            help=LLM_HINT_DIRECT,
+        )
         if run:
             from bot.llm_analyzer import GeminiClient, analyze_presentation
             client = GeminiClient(api_key=api_key, model=model)
@@ -1501,27 +1803,65 @@ def page_llm_analysis() -> None:
                 st.code(analysis.raw_response or "(無)", language="json")
 
     with tab_mops:
-        st.caption("從公開資訊觀測站抓法說會行事曆與重大訊息 (測試用)")
-        sub_tab_conf, sub_tab_mat = st.tabs(["法說會行事曆", "個股重大訊息"])
+        st.caption(
+            "MOPS 法說會行事曆 (自動快取一日一次 + 個股重大訊息)。"
+            "「自動研究」分頁會直接吃這些快取，不需要手動觸發。"
+        )
+        sub_tab_conf, sub_tab_mat = st.tabs(["法說會行事曆 (自動快取)", "個股重大訊息"])
 
         with sub_tab_conf:
-            today = dt.date.today()
-            roc_year = today.year - 1911
-            ry = st.number_input("民國年", 100, roc_year + 1, roc_year)
-            rm = st.number_input("月份", 1, 12, today.month)
-            if st.button("抓取行事曆", key="mops_conf_fetch"):
-                from bot.mops_scraper import fetch_conference_schedule
-                with st.spinner("MOPS 抓取中..."):
-                    entries = fetch_conference_schedule(int(ry), int(rm))
-                if entries:
-                    df = pd.DataFrame([
+            from bot.conference_calendar import (
+                load_calendar,
+                recent_conferences,
+                update_calendar,
+                upcoming_conferences,
+            )
+            cc1, cc2, cc3 = st.columns([1, 1, 2])
+            days_up = cc1.number_input("未來 N 天", 1, 60, 14, key="cal_up_days")
+            days_back = cc2.number_input("過去 N 天", 1, 90, 14, key="cal_back_days")
+            with cc3:
+                if st.button("🔄 立即重抓 (上月/本月/下月/+2)", key="cal_refresh"):
+                    with st.spinner("自 MOPS 抓最新行事曆…"):
+                        summary = update_calendar(root=PROJECT_ROOT)
+                    st.success(f"完成: {summary}")
+                    st.rerun()
+
+            up = upcoming_conferences(days=int(days_up), root=PROJECT_ROOT)
+            back = recent_conferences(days=int(days_back), root=PROJECT_ROOT)
+            all_items = load_calendar(root=PROJECT_ROOT)
+
+            st.markdown(f"#### 🔮 未來 {int(days_up)} 天 ({len(up)} 場)")
+            if up:
+                df_up = pd.DataFrame([
+                    {"日期": e.date.isoformat(), "時間": e.time,
+                     "代號": e.ticker, "公司": e.company, "備註": e.note}
+                    for e in up
+                ])
+                st.dataframe(df_up, hide_index=True, use_container_width=True)
+            else:
+                st.info("未來窗口內目前沒有法說會。")
+
+            st.markdown(f"#### 🕘 過去 {int(days_back)} 天 ({len(back)} 場)")
+            if back:
+                df_back = pd.DataFrame([
+                    {"日期": e.date.isoformat(), "時間": e.time,
+                     "代號": e.ticker, "公司": e.company, "備註": e.note}
+                    for e in back
+                ])
+                st.dataframe(df_back, hide_index=True, use_container_width=True)
+            else:
+                st.info("過去窗口內沒有法說會紀錄。")
+
+            with st.expander(f"完整快取共 {len(all_items)} 場 (含 ±2 個月)"):
+                if all_items:
+                    df_all = pd.DataFrame([
                         {"日期": e.date.isoformat(), "時間": e.time,
                          "代號": e.ticker, "公司": e.company, "備註": e.note}
-                        for e in entries
+                        for e in all_items
                     ])
-                    st.dataframe(df, hide_index=True, use_container_width=True)
+                    st.dataframe(df_all, hide_index=True, use_container_width=True)
                 else:
-                    st.info("查無資料，或 MOPS 端點異動。")
+                    st.info("尚無任何快取。點上方「立即重抓」即可。")
 
         with sub_tab_mat:
             mt = st.text_input("股票代號", value="2330", key="mops_mat_ticker")
@@ -1601,7 +1941,15 @@ def page_llm_analysis() -> None:
                     step=100.0,
                 )
             note = st.text_input("備註", "")
-            if st.button("執行反查", type="primary"):
+            if st.button(
+                "🤖 執行反查",
+                type="primary",
+                help=(
+                    "對比『法說會語意分數』與『籌碼面方向』找言行不一致 (出貨/吸籌)。"
+                    "有設 GEMINI_API_KEY 會走 Gemini；沒設則退回純規則式 (不消耗 LLM)。"
+                    "\n\n" + LLM_HINT_DIRECT
+                ),
+            ):
                 from bot.llm_analyzer import ChipsContext, GeminiClient, logic_check
                 chips = ChipsContext(
                     foreign_net=foreign,
@@ -1641,6 +1989,11 @@ def page_pipeline() -> None:
     st.caption(
         "一鍵完成：ETF 持股自動抓取 → 共識計算 → 籌碼面拉取 → 法說 LLM 解析 → "
         "言行反查 → 每日簡報"
+    )
+    _llm_caption(
+        "下方 toggle 中 **`LLM 法說分析`** 與 **`產出每日簡報`** 打開時，"
+        "「🤖 立即執行管線」會直接呼叫 Gemini。可在 toggle 全關情況下只跑 ETF/籌碼，"
+        "完全不消耗 LLM。"
     )
 
     env_values = load_env()
@@ -1698,7 +2051,22 @@ def page_pipeline() -> None:
         key="pipe_pres_text",
     )
 
-    run_now = st.button("立即執行管線", type="primary", use_container_width=True)
+    will_call_llm = (bool(run_llm) or bool(gen_brief)) and bool(api_key)
+    btn_label = (
+        "🤖 立即執行管線 (含 LLM 呼叫)"
+        if will_call_llm
+        else "立即執行管線 (本次不呼叫 LLM)"
+    )
+    run_now = st.button(
+        btn_label,
+        type="primary",
+        use_container_width=True,
+        help=(
+            LLM_HINT_DIRECT
+            if will_call_llm
+            else "目前 LLM 相關 toggle 都已關閉，本次不會呼叫 Gemini。"
+        ),
+    )
     if run_now:
         from bot.data_pipeline import (
             PipelineConfig,
@@ -1847,6 +2215,11 @@ def page_prompts() -> None:
         "所有 LLM 呼叫使用的 Prompt 都集中在 `prompts/*.yaml` 中。"
         "於此修改後立即生效，並會同步寫入 Git 控管的檔案。"
     )
+    st.success(
+        "✅ **此頁不會呼叫 LLM** — 編輯、儲存、Render 預覽都是本機操作，"
+        "不會消耗 Gemini API 額度。",
+        icon="✅",
+    )
 
     reg = get_registry(PROJECT_ROOT / "prompts")
     ids = reg.list_ids()
@@ -1931,6 +2304,11 @@ def page_llm_log() -> None:
     st.caption(
         "所有透過 `gemini_call()` 與 `analyze_presentation()` / `logic_check()` 等 "
         "API 發出的 LLM 請求都會落地於 `log/llm_calls/*.jsonl`。"
+    )
+    st.success(
+        "✅ **此頁不會呼叫 LLM** — 只讀取歷史 JSONL 紀錄。"
+        "可在這裡審計 / 估算每日 token 消耗。",
+        icon="✅",
     )
 
     log = get_call_logger()
@@ -2062,6 +2440,9 @@ def _build_scorecards(
             distribution_detail=snap.distribution_detail,
             distribution_score=snap.distribution_score,
             has_distribution=bool(snap.distribution_trend and snap.distribution_trend.weeks),
+            macro_snapshot=snap.macro_snapshot,
+            related_us_stocks=snap.us_related,
+            adr_premium=snap.adr_premium,
             fetched_at=snap.fetched_at,
         )
         out.append((snap, card))
@@ -2073,6 +2454,12 @@ def page_watchlist() -> None:
     st.caption(
         "把你關注的股票放這裡。每一檔會用四個時間框架 (當沖/短/中/長) "
         "對 LLM 法說、籌碼、ETF 共識、技術面、風險做加權評分。"
+    )
+    _llm_auto_banner(
+        "「🤖 計算評分」會對 watchlist 每檔逐一組 snapshot；"
+        "若該檔尚無 LLM 法說分析、且 `GEMINI_API_KEY` 已設定，"
+        "會自動呼叫 Gemini 為每檔跑一次 (每檔 12 小時快取)。"
+        "**未設 API Key 時整段 LLM 步驟會 graceful skip，不會收費。**"
     )
 
     wlist = wl.load(PROJECT_ROOT)
@@ -2163,7 +2550,17 @@ def page_watchlist() -> None:
     refresh_tech = cs2.toggle("抓日K + 指標", value=False, key="wl_refresh_t")
     refresh_fund = cs3.toggle("更新基本面", value=False, key="wl_refresh_f")
     refresh_dist = cs4.toggle("更新 TDCC", value=False, key="wl_refresh_d")
-    if cs5.button("計算評分", type="primary", use_container_width=True, key="wl_calc"):
+    if cs5.button(
+        "🤖 計算評分",
+        type="primary",
+        use_container_width=True,
+        key="wl_calc",
+        help=(
+            "對 watchlist 每檔重新組 snapshot + 加權算分。"
+            "若有設 `GEMINI_API_KEY`，會自動為缺 LLM 法說分析的個股呼叫 Gemini。"
+            "\n\n" + LLM_HINT_AUTO
+        ),
+    ):
         st.session_state.pop("watchlist_cards", None)
 
     cards = st.session_state.get("watchlist_cards")
@@ -2269,12 +2666,20 @@ def _tf_card(tf_score) -> None:
     # factor breakdown
     for f in tf_score.factors:
         bar = "█" * int(f.score / 5) + "░" * (20 - int(f.score / 5))
-        avail = "" if f.available else " (缺資料)"
+        # 缺資料的因子已從加權中剔除，明確標示且淡化顏色
+        if f.available:
+            avail = ""
+            row_color = color
+            bar_color = color
+        else:
+            avail = " · 缺資料·不計入加權"
+            row_color = "#9ca3af"
+            bar_color = "#d1d5db"
         st.markdown(
             f"<div style='font-family:monospace; font-size:11.5px; "
-            f"color:#374151; line-height:1.4;'>"
+            f"color:{row_color}; line-height:1.4;'>"
             f"{f.label} (w={f.weight:.0%}{avail}): "
-            f"<span style='color:{color}'>{bar}</span> {f.score:.0f}"
+            f"<span style='color:{bar_color}'>{bar}</span> {f.score:.0f}"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -2298,6 +2703,10 @@ def _tf_card(tf_score) -> None:
 
 def page_ticker_detail() -> None:
     st.title("個股深入分析")
+    _llm_auto_banner(
+        "按下「🤖 分析」或「🤖 強制重抓全部資料」時，若沒有 pipeline 法說分析，"
+        "系統會自動跑一次 `auto_analyze_ticker` (Gemini 法說情緒分析)。"
+    )
 
     wlist = wl.load(PROJECT_ROOT)
     options: List[str] = sorted({i.ticker for i in wlist.items})
@@ -2318,10 +2727,14 @@ def page_ticker_detail() -> None:
         [1.0, 1.1, 0.9, 0.9, 0.9, 0.8, 1.0],
     )
     if ccall.button(
-        "一鍵抓全部即時資料",
+        "🤖 強制重抓全部資料",
         use_container_width=True,
         key="detail_fetch_all",
-        help="同時啟用下面四個 toggle，把籌碼/日K/基本面/TDCC 全部重抓",
+        help=(
+            "預設按「分析」時系統已會自動補齊缺資料 (TDCC/基本面/日K/籌碼/macro/自動LLM)。"
+            "這個按鈕用於強制 ignore cache，把 4 個 toggle 全打開重抓最新資料。"
+            "\n\n" + LLM_HINT_AUTO
+        ),
     ):
         for k in ("detail_rc", "detail_rt", "detail_rf", "detail_rd"):
             st.session_state[k] = True
@@ -2331,7 +2744,17 @@ def page_ticker_detail() -> None:
     refresh_technicals = ctech.toggle("抓日K + 指標", value=False, key="detail_rt")
     refresh_fundamentals = cfund.toggle("更新基本面", value=False, key="detail_rf")
     refresh_distribution = cdist.toggle("更新 TDCC", value=False, key="detail_rd")
-    if cgo.button("分析", type="primary", use_container_width=True, key="detail_go"):
+    if cgo.button(
+        "🤖 分析",
+        type="primary",
+        use_container_width=True,
+        key="detail_go",
+        help=(
+            "組裝該股全部 3D 資料 (基本面/技術面/籌碼/集保/ETF/macro)。"
+            "若尚無 LLM 法說分析，會自動呼叫 Gemini 跑一次 (12 小時內共用快取)。"
+            "\n\n" + LLM_HINT_AUTO
+        ),
+    ):
         st.session_state["detail_ticker"] = free_t.strip()
         st.session_state.pop("detail_cache", None)
         st.session_state.pop("detail_cache_key", None)
@@ -2376,6 +2799,9 @@ def page_ticker_detail() -> None:
                 distribution_detail=snap.distribution_detail,
                 distribution_score=snap.distribution_score,
                 has_distribution=bool(snap.distribution_trend and snap.distribution_trend.weeks),
+                macro_snapshot=snap.macro_snapshot,
+                related_us_stocks=snap.us_related,
+                adr_premium=snap.adr_premium,
                 fetched_at=snap.fetched_at,
             )
             st.session_state["detail_cache"] = (snap, card)
@@ -2384,25 +2810,55 @@ def page_ticker_detail() -> None:
     snap, card = st.session_state["detail_cache"]
 
     # ---- 資料完整度提示 ----
+    # build_snapshot 已會自動抓 (TDCC/基本面/日K/籌碼/macro/自動LLM)。
+    # 走到這裡還缺，多半是「使用者沒設 API key」或「外部源真的拿不到」。
     missing: List[str] = []
+    try:
+        from bot.market_meta import detect_market, is_etf, market_label
+        _mkt = detect_market(snap.ticker, root=PROJECT_ROOT)
+        _is_etf = is_etf(snap.ticker)
+        _mkt_label = market_label(_mkt)
+    except Exception:
+        _mkt, _is_etf, _mkt_label = "unknown", False, "未知市場"
+
     if snap.price <= 0 and not (snap.technicals and snap.technicals.has_data):
-        missing.append("**現價／日K** (請勾選 `抓日K + 指標`)")
+        missing.append(
+            f"**現價／日K** — 抓不到 {snap.ticker} 的日K"
+            f"（已支援上市 TWSE／上櫃 TPEx），請手動勾選 `抓日K + 指標` 重試"
+        )
     if not snap.chip_summary:
-        missing.append("**籌碼面** (請勾選 `即時抓籌碼`)")
-    if not snap.fundamentals or not snap.fundamentals.revenues:
-        missing.append("**基本面** (請勾選 `更新基本面`)")
+        missing.append("**籌碼面** — 三大法人尚未公布或抓取失敗，請勾選 `即時抓籌碼` 重試")
+    if _is_etf:
+        # ETF 本來就沒有月營收 / 本益比 / 法說會，不應提示「抓不到、請重試」
+        pass
+    elif not snap.fundamentals or not snap.fundamentals.revenues:
+        missing.append(
+            f"**基本面** — 月營收/估值資料抓不到（{_mkt_label}），請勾選 `更新基本面` 重試"
+        )
     if not snap.distribution_trend or not snap.distribution_trend.weeks:
-        missing.append("**大戶結構 TDCC** (請勾選 `更新 TDCC`)")
+        missing.append("**大戶結構 TDCC** — TDCC 端點暫時不可用，請勾選 `更新 TDCC` 重試")
     if snap.consensus is None and not snap.held_by_etfs:
         missing.append(
-            "**主動 ETF 共識** (請先到 `主動 ETF 追蹤` 抓 ETF 持股，"
-            "或在 `自動化管線` 一鍵跑完整流程)"
+            "**主動 ETF 共識** — 請到 `主動 ETF 追蹤` 抓 ETF 持股，"
+            "或在 `自動化管線` 一鍵跑完整流程"
         )
     if not snap.llm_analysis:
-        missing.append("**LLM 法說分析** (請在 `LLM 法說分析` 頁貼逐字稿執行)")
+        # 區分 (a) 未設 API key、(b) 有設但抓不到素材
+        from bot.env_io import load_env as _le
+        if not _le().get("GEMINI_API_KEY"):
+            missing.append(
+                "**LLM 法說分析** — 請到 `組態設定` 填入 `GEMINI_API_KEY`，"
+                "之後本系統會自動用 MOPS 重大訊息+新聞做情緒分析；"
+                "若有完整法說逐字稿可到 `LLM 法說分析` 頁手動貼"
+            )
+        else:
+            missing.append(
+                "**LLM 法說分析** — 已啟用自動分析但素材不足，"
+                "可在 `LLM 法說分析` 頁貼逐字稿補強"
+            )
     if missing:
         st.warning(
-            "目前快取中缺少以下資料，點上方 **一鍵抓全部即時資料** 或勾選對應 toggle 後按 **分析**：\n\n- "
+            "目前缺以下資料 (build_snapshot 已嘗試自動抓)：\n\n- "
             + "\n- ".join(missing)
         )
 
@@ -2452,7 +2908,12 @@ def page_ticker_detail() -> None:
     ])
 
     with tabs[0]:
-        st.markdown("#### LLM 法說會解讀")
+        # ETF 沒有法說會：標題改為「新聞/情緒解讀」避免誤導
+        if _is_etf:
+            st.markdown("#### LLM 新聞 / 情緒解讀")
+            st.caption("註：ETF 無法人說明會，本段為基於新聞與市場資訊的情緒彙整，非法說逐字稿。")
+        else:
+            st.markdown("#### LLM 法說會解讀")
         if snap.llm_analysis:
             a = snap.llm_analysis
             st.markdown(
@@ -2875,15 +3336,16 @@ def _render_fundamentals_tab(snap) -> None:
 
 
 def _render_technicals_tab(snap) -> None:
-    """技術面：K 線 + MA / MACD / RSI 圖。"""
+    """技術面：KPI + 訊號 + 完整 K 線工作台 (時間範圍 / Y 軸 / 面板選擇 / 往前抓)。"""
     t = snap.technicals
     if not t or not t.has_data:
         st.info(
             "尚無日 K 資料。請在上方勾選『抓日K + 指標』，系統會打 TWSE STOCK_DAY "
-            "抓近 6 個月日 K 線 (含成交量) 並計算技術指標。"
+            "抓近 6 個月日 K 線 (含成交量) 並計算技術指標。可在下方圖表用「往更早抓取」延伸到 5/10 年前。"
         )
         return
 
+    # ---- KPI ----
     cols = st.columns(6)
     cols[0].metric("收盤", f"{t.last_close:.2f}" if t.last_close else "—")
     cols[1].metric("1 日 %", f"{t.pct_change_1d:+.2f}%")
@@ -2892,6 +3354,7 @@ def _render_technicals_tab(snap) -> None:
     cols[4].metric("60 日 %", f"{t.pct_change_60d:+.2f}%")
     cols[5].metric("技術面分", f"{t.technical_score:.1f}")
 
+    # ---- 訊號 + 指標值 ----
     sigcols = st.columns(2)
     sigcols[0].markdown("**訊號摘要**")
     bullish = [s for s in t.signals if s.get("bullish") is True]
@@ -2922,76 +3385,33 @@ def _render_technicals_tab(snap) -> None:
             hide_index=True, use_container_width=True,
         )
 
-    # K 線圖
+    # ---- 完整 K 線工作台 (含 K 線型態判讀) ----
+    st.markdown("### K 線工作台")
     try:
-        from bot.technicals import build_technical_snapshot
-        _, df = build_technical_snapshot(
-            snap.ticker, root=PROJECT_ROOT, refresh=False,
+        from bot.technicals import (
+            build_technical_snapshot,
+            load_kline_from_db,
         )
+        # 先試 SQLite (含所有歷史)，沒有再退回 CSV 透過 build_technical_snapshot
+        df = load_kline_from_db(snap.ticker, root=PROJECT_ROOT)
+        if df is None or df.empty:
+            _, df = build_technical_snapshot(
+                snap.ticker, root=PROJECT_ROOT, refresh=False,
+            )
     except Exception:
         df = None
 
-    if df is not None and not df.empty:
-        try:
-            import altair as alt  # noqa: F401
-            df_plot = df.tail(120).copy()
-            df_plot["date"] = pd.to_datetime(df_plot["date"])
-            df_plot["color"] = (df_plot["close"] >= df_plot["open"]).map({
-                True: "red", False: "green",
-            })
-            base = alt.Chart(df_plot).encode(x=alt.X("date:T", title="日期"))
-            rule = base.mark_rule().encode(
-                y="low:Q", y2="high:Q", color=alt.Color("color:N", scale=None),
-            )
-            bar = base.mark_bar(size=4).encode(
-                y="open:Q", y2="close:Q", color=alt.Color("color:N", scale=None),
-            )
-            ma_layers = []
-            for ma_col, color in [
-                ("ma5", "#ffa500"), ("ma20", "#1f77b4"),
-                ("ma60", "#9467bd"), ("ma120", "#8c564b"),
-            ]:
-                if ma_col in df_plot.columns:
-                    ma_layers.append(
-                        base.mark_line(color=color).encode(y=f"{ma_col}:Q"),
-                    )
-            price_chart = alt.layer(rule, bar, *ma_layers).properties(
-                height=320, title="日 K + 均線 (近 120 日)",
-            )
-
-            vol_chart = alt.Chart(df_plot).mark_bar(opacity=0.6).encode(
-                x=alt.X("date:T", title=""),
-                y=alt.Y("volume:Q", title="成交張數"),
-                color=alt.Color("color:N", scale=None),
-            ).properties(height=120, title="成交量")
-
-            macd_chart = alt.Chart(df_plot).transform_fold(
-                ["macd", "macd_signal"], as_=["指標", "值"],
-            ).mark_line().encode(
-                x="date:T", y="值:Q", color="指標:N",
-            ).properties(height=140, title="MACD")
-            macd_hist = alt.Chart(df_plot).mark_bar(opacity=0.5).encode(
-                x="date:T", y="macd_hist:Q",
-                color=alt.condition(
-                    "datum.macd_hist >= 0",
-                    alt.value("#d62728"), alt.value("#2ca02c"),
-                ),
-            ).properties(height=140)
-            macd_layer = alt.layer(macd_hist, macd_chart)
-
-            rsi_chart = alt.Chart(df_plot).mark_line(color="#e377c2").encode(
-                x="date:T", y=alt.Y("rsi14:Q", title="RSI14"),
-            ).properties(height=140, title="RSI(14)")
-
-            st.altair_chart(price_chart, use_container_width=True)
-            st.altair_chart(vol_chart, use_container_width=True)
-            st.altair_chart(macd_layer, use_container_width=True)
-            st.altair_chart(rsi_chart, use_container_width=True)
-        except Exception as e:
-            st.warning(f"K 線繪圖失敗: {e}")
-            st.dataframe(df.tail(60), hide_index=True, use_container_width=True)
-    else:
+    if df is None or df.empty:
         st.info("無 K 線 DataFrame；請先勾選『抓日K + 指標』後再分析一次。")
+        return
+
+    _render_kline_workspace(
+        snap.ticker, df,
+        key_prefix=f"tech_{snap.ticker}",
+        default_window="近 6 個月",
+        default_panels=("kline", "volume", "macd", "rsi"),
+        show_fetch_more=True,
+    )
 
 
 def _render_dividends_tab(snap) -> None:
@@ -3160,6 +3580,558 @@ def _render_quarterly_tab(snap) -> None:
 
 
 # ======================================================================
+# K 線繪圖共用 panel builders (個股深入分析 + K 線看板共用)
+# ======================================================================
+
+
+# 可顯示的面板列表 (順序即堆疊預設順序)
+KLINE_PANELS = [
+    ("kline", "📈 K 線 + 均線"),
+    ("volume", "📊 成交量"),
+    ("macd", "MACD"),
+    ("rsi", "RSI"),
+    ("kd", "KD"),
+    ("boll", "布林通道"),
+]
+
+
+# 時間範圍預設 (label, 約略交易日數)
+KLINE_WINDOWS = [
+    ("近 1 個月", 22),
+    ("近 3 個月", 66),
+    ("近 6 個月", 130),
+    ("近 1 年", 250),
+    ("近 2 年", 500),
+    ("近 3 年", 750),
+    ("近 5 年", 1250),
+    ("近 10 年", 2500),
+    ("全部", None),
+    ("自訂日期", -1),
+]
+
+
+def _candle_color_col(df: pd.DataFrame) -> pd.DataFrame:
+    """加上 color 欄位 (台股慣例：紅漲綠跌)。"""
+    out = df.copy()
+    out["color"] = (out["close"] >= out["open"]).map({
+        True: "#d64545", False: "#1d9c5b",
+    })
+    return out
+
+
+def _kline_panel(
+    df: pd.DataFrame,
+    *,
+    ma_periods: Tuple[int, ...] = (5, 20, 60),
+    bollinger: bool = False,
+    y_min: Optional[float] = None,
+    y_max: Optional[float] = None,
+    height: int = 320,
+    title: str = "",
+    x_axis: bool = True,
+):
+    """K 線 + 均線 + (可選) 布林通道 panel。"""
+    import altair as alt
+    if df.empty:
+        return None
+    d = _candle_color_col(df)
+    d["date"] = pd.to_datetime(d["date"])
+    for p in ma_periods:
+        col = f"ma{p}"
+        if col not in d.columns:
+            d[col] = d["close"].rolling(p, min_periods=1).mean()
+
+    y_scale = alt.Scale(zero=False)
+    if y_min is not None and y_max is not None and y_max > y_min:
+        y_scale = alt.Scale(domain=[y_min, y_max], zero=False, clamp=True)
+
+    x_enc = alt.X(
+        "date:T",
+        title="日期" if x_axis else None,
+        axis=alt.Axis() if x_axis else None,
+    )
+    base = alt.Chart(d).encode(x=x_enc)
+    rule = base.mark_rule().encode(
+        y=alt.Y("low:Q", scale=y_scale, title="價"),
+        y2="high:Q",
+        color=alt.Color("color:N", scale=None, legend=None),
+        tooltip=[
+            alt.Tooltip("date:T", title="日期"),
+            alt.Tooltip("open:Q", title="開"),
+            alt.Tooltip("high:Q", title="高"),
+            alt.Tooltip("low:Q", title="低"),
+            alt.Tooltip("close:Q", title="收"),
+            alt.Tooltip("volume:Q", title="量(張)"),
+        ],
+    )
+    bar = base.mark_bar(size=4).encode(
+        y="open:Q", y2="close:Q",
+        color=alt.Color("color:N", scale=None, legend=None),
+    )
+    ma_colors = {
+        "ma5": "#ffa500", "ma10": "#2ca02c", "ma20": "#1f77b4",
+        "ma60": "#9467bd", "ma120": "#8c564b", "ma240": "#7f7f7f",
+    }
+    ma_layers = []
+    for p in ma_periods:
+        col = f"ma{p}"
+        ma_layers.append(
+            base.mark_line(
+                color=ma_colors.get(col, "#888"),
+                strokeWidth=1.4,
+            ).encode(y=f"{col}:Q"),
+        )
+
+    boll_layers = []
+    if bollinger and {"boll_upper", "boll_lower", "boll_mid"}.issubset(d.columns):
+        boll_band = base.mark_area(opacity=0.08, color="#3478b6").encode(
+            y="boll_lower:Q", y2="boll_upper:Q",
+        )
+        boll_mid = base.mark_line(strokeDash=[4, 3], color="#3478b6").encode(
+            y="boll_mid:Q",
+        )
+        boll_layers = [boll_band, boll_mid]
+
+    layers = [*boll_layers, rule, bar, *ma_layers]
+    return alt.layer(*layers).properties(height=height, title=title or "")
+
+
+def _volume_panel(df: pd.DataFrame, *, height: int = 110, title: str = "成交量"):
+    import altair as alt
+    if df.empty:
+        return None
+    d = _candle_color_col(df)
+    d["date"] = pd.to_datetime(d["date"])
+    return alt.Chart(d).mark_bar(opacity=0.6).encode(
+        x=alt.X("date:T", title=""),
+        y=alt.Y("volume:Q", title="成交張"),
+        color=alt.Color("color:N", scale=None, legend=None),
+        tooltip=[
+            alt.Tooltip("date:T", title="日期"),
+            alt.Tooltip("volume:Q", title="量(張)"),
+        ],
+    ).properties(height=height, title=title)
+
+
+def _macd_panel(df: pd.DataFrame, *, height: int = 140, title: str = "MACD"):
+    import altair as alt
+    if df.empty or "macd" not in df.columns:
+        return None
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    line = alt.Chart(d).transform_fold(
+        ["macd", "macd_signal"], as_=["指標", "值"],
+    ).mark_line().encode(
+        x=alt.X("date:T", title=""),
+        y=alt.Y("值:Q", title="MACD"),
+        color="指標:N",
+    )
+    hist = alt.Chart(d).mark_bar(opacity=0.5).encode(
+        x="date:T",
+        y="macd_hist:Q",
+        color=alt.condition(
+            "datum.macd_hist >= 0",
+            alt.value("#d64545"), alt.value("#1d9c5b"),
+        ),
+    )
+    return alt.layer(hist, line).properties(height=height, title=title)
+
+
+def _rsi_panel(df: pd.DataFrame, *, height: int = 140, title: str = "RSI(14)"):
+    import altair as alt
+    if df.empty or "rsi14" not in df.columns:
+        return None
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    line = alt.Chart(d).mark_line(color="#e377c2").encode(
+        x=alt.X("date:T", title=""),
+        y=alt.Y("rsi14:Q", title="RSI14", scale=alt.Scale(domain=[0, 100])),
+    )
+    overbought = alt.Chart(pd.DataFrame({"y": [70]})).mark_rule(
+        strokeDash=[3, 3], color="#d64545",
+    ).encode(y="y:Q")
+    oversold = alt.Chart(pd.DataFrame({"y": [30]})).mark_rule(
+        strokeDash=[3, 3], color="#1d9c5b",
+    ).encode(y="y:Q")
+    return alt.layer(line, overbought, oversold).properties(height=height, title=title)
+
+
+def _kd_panel(df: pd.DataFrame, *, height: int = 140, title: str = "KD"):
+    import altair as alt
+    if df.empty or "k" not in df.columns or "d" not in df.columns:
+        return None
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    return alt.Chart(d).transform_fold(
+        ["k", "d"], as_=["指標", "值"],
+    ).mark_line().encode(
+        x=alt.X("date:T", title=""),
+        y=alt.Y("值:Q", title="KD", scale=alt.Scale(domain=[0, 100])),
+        color="指標:N",
+    ).properties(height=height, title=title)
+
+
+def _boll_panel(df: pd.DataFrame, *, height: int = 220, title: str = "布林通道"):
+    """獨立顯示布林（與 K 線 panel 的 bollinger 重複時可關掉它）。"""
+    import altair as alt
+    if df.empty or "boll_upper" not in df.columns:
+        return None
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"])
+    band = alt.Chart(d).mark_area(opacity=0.15, color="#3478b6").encode(
+        x="date:T", y="boll_lower:Q", y2="boll_upper:Q",
+    )
+    close = alt.Chart(d).mark_line(color="#222").encode(
+        x=alt.X("date:T", title=""),
+        y=alt.Y("close:Q", title="價", scale=alt.Scale(zero=False)),
+    )
+    mid = alt.Chart(d).mark_line(strokeDash=[4, 3], color="#3478b6").encode(
+        x="date:T", y="boll_mid:Q",
+    )
+    return alt.layer(band, mid, close).properties(height=height, title=title)
+
+
+def _build_df_with_indicators(
+    df: pd.DataFrame,
+    *,
+    ma_periods: Tuple[int, ...] = (5, 10, 20, 60, 120),
+) -> pd.DataFrame:
+    """確保 df 含技術指標欄位 (給 panel 用)。"""
+    from bot.technicals import compute_indicators
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if "macd" in df.columns and "rsi14" in df.columns:
+        return df.copy()
+    try:
+        return compute_indicators(df, ma_periods=list(ma_periods))
+    except Exception:
+        return df.copy()
+
+
+def _slice_df_by_window(
+    df: pd.DataFrame,
+    window_label: str,
+    *,
+    custom_start: Optional[dt.date] = None,
+    custom_end: Optional[dt.date] = None,
+) -> pd.DataFrame:
+    """依照「近 N 月/年 / 自訂日期」剪 df。"""
+    if df is None or df.empty:
+        return df
+    sorted_df = df.sort_values("date").reset_index(drop=True)
+    if window_label == "全部":
+        return sorted_df
+    if window_label == "自訂日期":
+        d = sorted_df.copy()
+        d["_d"] = pd.to_datetime(d["date"]).dt.date
+        if custom_start:
+            d = d[d["_d"] >= custom_start]
+        if custom_end:
+            d = d[d["_d"] <= custom_end]
+        return d.drop(columns=["_d"])
+    # 對應 KLINE_WINDOWS 的 N 個交易日
+    for lbl, days in KLINE_WINDOWS:
+        if lbl == window_label and isinstance(days, int) and days > 0:
+            return sorted_df.tail(days).reset_index(drop=True)
+    return sorted_df
+
+
+def _render_candle_pattern_section(df: pd.DataFrame, *, key_prefix: str) -> None:
+    """K 線型態判讀區塊：最新一根型態 + 近 10 根型態表。
+
+    被「個股深入分析 - 技術面」「K 線看板 - 單檔展開」共用 (直接吃 df，不依賴 snapshot)。
+    """
+    try:
+        from bot.candle_patterns import classify_latest, classify_recent
+        latest = classify_latest(df)
+        recent = classify_recent(df, n=10)
+    except Exception:
+        latest, recent = None, []
+
+    if latest is None:
+        return
+
+    bias = latest.bias
+    badge = (
+        "🔴 偏多" if bias is True
+        else "🟢 偏空" if bias is False
+        else "⚪ 中性 / 取決於位置"
+    )
+    box = st.success if bias is True else st.error if bias is False else st.info
+    box(
+        f"**最新 K 線型態：{latest.name}**（{latest.category}） · {badge}"
+        f" ｜ 實體 {latest.body_pct * 100:.0f}% / 上影 {latest.upper_pct * 100:.0f}%"
+        f" / 下影 {latest.lower_pct * 100:.0f}%\n\n"
+        f"{latest.meaning}"
+    )
+
+    if recent:
+        with st.expander("🕯 近 10 根 K 線型態判讀", expanded=False):
+            st.caption(
+                "依「實體大小 + 上下影線比例」分類；偏多 🔴 / 偏空 🟢 / 中性 ⚪。"
+                "型態僅供參考，需搭配位置與其他指標判讀。"
+            )
+            prows = []
+            for r in recent:
+                b = r.get("bias")
+                prows.append({
+                    "日期": r.get("date", ""),
+                    "型態": r.get("name", ""),
+                    "類別": r.get("category", ""),
+                    "方向": "🔴偏多" if b is True else "🟢偏空" if b is False else "⚪中性",
+                    "反轉訊號": "✔" if r.get("reversal") else "",
+                    "實體%": round(r.get("body_pct", 0) * 100, 1),
+                    "上影%": round(r.get("upper_pct", 0) * 100, 1),
+                    "下影%": round(r.get("lower_pct", 0) * 100, 1),
+                    "市場訊號": r.get("meaning", ""),
+                })
+            st.dataframe(
+                pd.DataFrame(prows), hide_index=True, use_container_width=True,
+            )
+
+
+def _render_kline_workspace(
+    ticker: str,
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    default_window: str = "近 6 個月",
+    default_panels: Tuple[str, ...] = ("kline", "volume", "macd", "rsi"),
+    show_fetch_more: bool = True,
+) -> None:
+    """K 線完整工作台：時間範圍 / Y 軸 / 面板選擇 / 堆疊或分頁 + 往前批量抓。
+
+    被「個股深入分析 - 技術面」與「K 線看板 - 單檔展開」共用。
+    """
+    from bot.technicals import (
+        extend_kline_backward,
+        get_kline_coverage,
+    )
+
+    if df is None or df.empty:
+        st.info("無 K 線資料 — 請先抓取。")
+        return
+
+    df = _build_df_with_indicators(df).sort_values("date").reset_index(drop=True)
+    df["_d"] = pd.to_datetime(df["date"]).dt.date
+    earliest = df["_d"].min()
+    latest = df["_d"].max()
+
+    # ===== K 線型態判讀 (最新一根 + 近 10 根) =====
+    _render_candle_pattern_section(df.drop(columns=["_d"]), key_prefix=key_prefix)
+
+    # ===== 控制列 =====
+    c1, c2, c3, c4 = st.columns([1.4, 1.4, 1.4, 1.4])
+    window_label = c1.selectbox(
+        "時間範圍",
+        [w[0] for w in KLINE_WINDOWS],
+        index=[w[0] for w in KLINE_WINDOWS].index(default_window)
+        if default_window in [w[0] for w in KLINE_WINDOWS] else 2,
+        key=f"{key_prefix}_window",
+    )
+
+    custom_start = c2.date_input(
+        "自訂起日",
+        value=max(earliest, (latest - dt.timedelta(days=365))),
+        min_value=earliest, max_value=latest,
+        key=f"{key_prefix}_start",
+        disabled=(window_label != "自訂日期"),
+    )
+    custom_end = c3.date_input(
+        "自訂迄日",
+        value=latest, min_value=earliest, max_value=latest,
+        key=f"{key_prefix}_end",
+        disabled=(window_label != "自訂日期"),
+    )
+    layout_mode = c4.radio(
+        "排列",
+        ["堆疊", "分頁", "並排兩欄"],
+        horizontal=True, key=f"{key_prefix}_layout",
+    )
+
+    # ===== 面板 + Y 軸 =====
+    p1, p2 = st.columns([3, 2])
+    panel_keys = p1.multiselect(
+        "顯示面板",
+        options=[k for k, _ in KLINE_PANELS],
+        default=list(default_panels),
+        format_func=lambda k: dict(KLINE_PANELS).get(k, k),
+        key=f"{key_prefix}_panels",
+    )
+    y_mode = p2.radio(
+        "Y 軸範圍 (K 線)", ["自動", "手動"], horizontal=True,
+        key=f"{key_prefix}_ymode",
+    )
+
+    df_slice = _slice_df_by_window(
+        df.drop(columns=["_d"]),
+        window_label,
+        custom_start=custom_start if window_label == "自訂日期" else None,
+        custom_end=custom_end if window_label == "自訂日期" else None,
+    )
+    if df_slice is None or df_slice.empty:
+        st.warning("這個範圍內沒有任何 K 線資料。請選更寬的時間範圍。")
+        return
+
+    auto_low = float(df_slice["low"].min())
+    auto_high = float(df_slice["high"].max())
+    y_min: Optional[float] = None
+    y_max: Optional[float] = None
+    if y_mode == "手動":
+        ya, yb = st.columns(2)
+        y_min = ya.number_input(
+            "Y 下限", value=round(auto_low * 0.95, 2),
+            min_value=0.0,
+            key=f"{key_prefix}_ymin",
+        )
+        y_max = yb.number_input(
+            "Y 上限", value=round(auto_high * 1.05, 2),
+            min_value=0.0,
+            key=f"{key_prefix}_ymax",
+        )
+
+    bollinger_overlay = "boll" in panel_keys
+
+    # ===== 摘要 =====
+    cov_cols = st.columns(4)
+    cov_cols[0].metric("資料筆數", f"{len(df)} 根")
+    cov_cols[1].metric("最早日期", str(earliest))
+    cov_cols[2].metric("最新日期", str(latest))
+    cov_cols[3].metric("此區段筆數", f"{len(df_slice)} 根")
+
+    # ===== 往前抓 =====
+    if show_fetch_more:
+        with st.expander("⏪ 往更早抓取 K 線 (分批，可隨時停止)", expanded=False):
+            f1, f2, f3 = st.columns([1.5, 1.5, 2])
+            extend_years = f1.selectbox(
+                "再往前", [1, 2, 3, 5, 10], index=2,
+                format_func=lambda y: f"{y} 年",
+                key=f"{key_prefix}_extend_years",
+            )
+            delay = f2.slider(
+                "每月請求間隔 (秒)", 0.2, 2.0, 0.5, 0.1,
+                key=f"{key_prefix}_delay",
+                help="TWSE 對連續請求較敏感；推薦 0.4~0.8 秒。",
+            )
+            do_extend = f3.button(
+                f"⏪ 開始抓取 {extend_years} 年更早資料",
+                use_container_width=True,
+                key=f"{key_prefix}_extend_btn",
+            )
+            if do_extend:
+                _run_extend_backward(
+                    ticker, extend_years, delay,
+                    key_prefix=key_prefix,
+                )
+
+    # ===== 繪圖 =====
+    panels: List[tuple[str, str, Any]] = []
+    for key in panel_keys:
+        chart = _make_panel_chart(
+            key, df_slice,
+            y_min=y_min, y_max=y_max,
+            bollinger=bollinger_overlay and key == "kline",
+            title=dict(KLINE_PANELS).get(key, key),
+        )
+        if chart is not None:
+            panels.append((key, dict(KLINE_PANELS).get(key, key), chart))
+
+    if not panels:
+        st.info("請至少選擇一個面板。")
+        return
+
+    if layout_mode == "堆疊":
+        for _, _, chart in panels:
+            st.altair_chart(chart, use_container_width=True)
+    elif layout_mode == "分頁":
+        labels = [label for _, label, _ in panels]
+        tabs_obj = st.tabs(labels)
+        for i, (_, _, chart) in enumerate(panels):
+            with tabs_obj[i]:
+                st.altair_chart(chart, use_container_width=True)
+    else:  # 並排兩欄
+        for i in range(0, len(panels), 2):
+            cols = st.columns(2)
+            for j in range(2):
+                if i + j < len(panels):
+                    _, _, chart = panels[i + j]
+                    with cols[j]:
+                        st.altair_chart(chart, use_container_width=True)
+
+
+def _make_panel_chart(
+    key: str,
+    df: pd.DataFrame,
+    *,
+    y_min: Optional[float] = None,
+    y_max: Optional[float] = None,
+    bollinger: bool = False,
+    title: str = "",
+):
+    if key == "kline":
+        return _kline_panel(
+            df, y_min=y_min, y_max=y_max,
+            bollinger=bollinger, title=title,
+        )
+    if key == "volume":
+        return _volume_panel(df, title=title or "成交量")
+    if key == "macd":
+        return _macd_panel(df, title=title or "MACD")
+    if key == "rsi":
+        return _rsi_panel(df, title=title or "RSI(14)")
+    if key == "kd":
+        return _kd_panel(df, title=title or "KD")
+    if key == "boll":
+        return _boll_panel(df, title=title or "布林通道")
+    return None
+
+
+def _run_extend_backward(
+    ticker: str,
+    years: int,
+    delay: float,
+    *,
+    key_prefix: str,
+) -> None:
+    """執行往前抓 N 年；顯示即時進度條。"""
+    from bot.technicals import extend_kline_backward
+    progress = st.progress(0, text="準備中…")
+    counter = {"fetched_rows": 0, "months_done": 0}
+
+    def cb(idx: int, total: int, label: str, fetched: int) -> None:
+        counter["fetched_rows"] += fetched
+        counter["months_done"] += 1
+        ratio = idx / max(total, 1)
+        progress.progress(
+            min(ratio, 1.0),
+            text=(
+                f"[{idx}/{total}] 抓取 {ticker} {label} "
+                f"-- 累計新增 {counter['fetched_rows']} 根 K 棒"
+            ),
+        )
+
+    try:
+        df_new = extend_kline_backward(
+            ticker, years_back=years, root=PROJECT_ROOT,
+            request_delay_sec=delay,
+            on_progress=cb,
+        )
+    except Exception as e:
+        st.error(f"抓取失敗：{e}")
+        return
+    finally:
+        progress.empty()
+
+    if df_new is None or df_new.empty:
+        st.warning("沒有抓到新的資料 (可能已經有快取或超出 TWSE 可查詢區段)。")
+    else:
+        st.success(
+            f"完成：累計新增 {counter['fetched_rows']} 根 K 棒、"
+            f"快取現含 {len(df_new)} 根。請重整頁面或重新選擇時間範圍。",
+        )
+
+
+# ======================================================================
 # 頁面: K 線看板 (Stock Board) -- 多檔股票一覽 + mini K 線
 # ======================================================================
 
@@ -3177,6 +4149,7 @@ def _board_rows_summary(symbols: List[str], db: StockDB) -> pd.DataFrame:
                 "chg_1d_%": None,
                 "chg_5d_%": None,
                 "chg_20d_%": None,
+                "K線型態": "",
                 "volume": None,
                 "vol_ratio": None,
                 "high_60d": None,
@@ -3196,6 +4169,22 @@ def _board_rows_summary(symbols: List[str], db: StockDB) -> pd.DataFrame:
 
         vol_recent = [b.volume for b in bars[-20:] if b.volume > 0]
         vol_ma = sum(vol_recent) / len(vol_recent) if vol_recent else 0.0
+
+        # 最新一根 K 線型態
+        pattern_label = ""
+        try:
+            from bot.candle_patterns import classify_candle
+            bodies = [abs(b.close - b.open) for b in bars[-20:] if abs(b.close - b.open) > 0]
+            avg_body = sum(bodies) / len(bodies) if bodies else None
+            cp = classify_candle(
+                open=last.open, high=last.high, low=last.low, close=last.close,
+                avg_body=avg_body,
+            )
+            mark = "🔴" if cp.bias is True else "🟢" if cp.bias is False else "⚪"
+            pattern_label = f"{mark} {cp.name}"
+        except Exception:
+            pattern_label = ""
+
         rows.append({
             "symbol": sym,
             "last_date": last.date,
@@ -3203,6 +4192,7 @@ def _board_rows_summary(symbols: List[str], db: StockDB) -> pd.DataFrame:
             "chg_1d_%": _pct(last.close, prev.close),
             "chg_5d_%": _pct(last.close, d5.close),
             "chg_20d_%": _pct(last.close, d20.close),
+            "K線型態": pattern_label,
             "volume": round(last.volume, 0),
             "vol_ratio": round(last.volume / vol_ma, 2) if vol_ma else None,
             "high_60d": round(max(b.high for b in bars), 2),
@@ -3287,23 +4277,239 @@ def _full_kline_chart(bars, *, ma_periods=(5, 20, 60), title: str = ""):
     return price, vol
 
 
+def _board_y_controls(key: str) -> Tuple[Optional[float], Optional[float]]:
+    """Y 軸範圍 (Optional min, max)；放到 K 線 panel 用。"""
+    enabled = st.toggle("手動 Y 軸範圍", value=False, key=f"{key}_y_enable")
+    if not enabled:
+        return None, None
+    yc1, yc2 = st.columns(2)
+    y_min = yc1.number_input("Y 下限", value=0.0, min_value=0.0, key=f"{key}_ymin")
+    y_max = yc2.number_input("Y 上限", value=0.0, min_value=0.0, key=f"{key}_ymax")
+    if y_max <= y_min:
+        return None, None
+    return float(y_min), float(y_max)
+
+
+def _bars_to_df(bars) -> pd.DataFrame:
+    if not bars:
+        return pd.DataFrame()
+    return pd.DataFrame([{
+        "date": b.date, "open": b.open, "high": b.high,
+        "low": b.low, "close": b.close, "volume": b.volume,
+    } for b in bars])
+
+
+def _render_grid_view(
+    sorted_syms: List[str],
+    df_view: pd.DataFrame,
+    db,
+    *,
+    n_days: int,
+    cols_per_row: int,
+) -> None:
+    st.markdown(f"### K 線縮圖 (近 {n_days} 日)")
+    cols = st.columns(cols_per_row)
+    for i, sym in enumerate(sorted_syms):
+        bars = db.get_price_history(sym, limit=n_days, ascending=True)
+        with cols[i % cols_per_row]:
+            row = df_view.loc[df_view["symbol"] == sym].iloc[0]
+            chg = row.get("chg_1d_%")
+            chg_str = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else "—"
+            color = "green" if (isinstance(chg, (int, float)) and chg > 0) else (
+                "red" if isinstance(chg, (int, float)) and chg < 0 else "gray"
+            )
+            st.markdown(
+                f"**`{sym}`** · 收 {row['close'] if row['close'] is not None else '—'} "
+                f"· {_badge(chg_str, color)}",
+                unsafe_allow_html=True,
+            )
+            patt = row.get("K線型態", "")
+            if patt:
+                st.caption(f"型態：{patt}")
+            if bars:
+                chart = _spark_chart(bars, height=110)
+                if chart is not None:
+                    st.altair_chart(chart, use_container_width=True)
+            else:
+                st.caption("無 K 線資料 - 點上方『一鍵更新』")
+
+
+def _render_compare_view(
+    sorted_syms: List[str],
+    df_view: pd.DataFrame,
+    db,
+    *,
+    window_label: str,
+) -> None:
+    """並排大圖：選 2~4 檔，每檔顯示完整 K 線 + 量。"""
+    st.markdown("### 並排大圖比較 (含 MA20/60)")
+    multi_pick = st.multiselect(
+        "選擇要比較的個股 (建議 2~4 檔)",
+        options=sorted_syms,
+        default=sorted_syms[: min(3, len(sorted_syms))],
+        key="board_compare_pick",
+    )
+    if not multi_pick:
+        st.info("請至少選擇一檔股票。")
+        return
+
+    y_min, y_max = _board_y_controls("board_compare")
+    cols_per_row = 2 if len(multi_pick) >= 2 else 1
+    rows = [multi_pick[i:i + cols_per_row] for i in range(0, len(multi_pick), cols_per_row)]
+    for row in rows:
+        cols = st.columns(len(row))
+        for sym, col in zip(row, cols):
+            with col:
+                bars = db.get_price_history(sym, ascending=True)
+                if not bars:
+                    st.warning(f"{sym}: 無 K 線資料。")
+                    continue
+                prow = df_view.loc[df_view["symbol"] == sym]
+                patt = prow.iloc[0].get("K線型態", "") if not prow.empty else ""
+                if patt:
+                    st.caption(f"最新 K 線型態：{patt}")
+                df_full = _bars_to_df(bars)
+                df_sliced = _slice_df_by_window(df_full, window_label)
+                df_ind = _build_df_with_indicators(df_sliced, ma_periods=(5, 20, 60))
+                chart = _kline_panel(
+                    df_ind, ma_periods=(5, 20, 60),
+                    y_min=y_min, y_max=y_max,
+                    height=300, title=f"{sym}",
+                )
+                vol = _volume_panel(df_ind, height=80)
+                if chart is not None:
+                    st.altair_chart(chart, use_container_width=True)
+                if vol is not None:
+                    st.altair_chart(vol, use_container_width=True)
+
+
+def _render_focus_view(
+    sorted_syms: List[str],
+    db,
+) -> None:
+    """單檔專注：把完整 K 線工作台 (時間範圍/Y軸/面板/抓取) 顯示在這一檔上。"""
+    st.markdown("### 單檔專注 (完整 K 線工作台)")
+    pick = st.selectbox(
+        "選一檔深入看", options=sorted_syms, index=0 if sorted_syms else None,
+        key="board_focus_pick",
+    )
+    if not pick:
+        return
+    bars = db.get_price_history(pick, ascending=True)
+    if not bars:
+        st.warning(f"{pick} 尚無 K 線資料。請點上方『一鍵更新』或『往更早抓取』。")
+        return
+    df_full = _bars_to_df(bars)
+    _render_kline_workspace(
+        pick, df_full,
+        key_prefix=f"board_focus_{pick}",
+        default_window="近 6 個月",
+        default_panels=("kline", "volume", "macd", "rsi"),
+        show_fetch_more=True,
+    )
+
+
+def _run_batch_refresh(symbols: List[str], months: int) -> None:
+    """『一鍵更新所有 K 線』後端：分檔 → 分月 fetch，含進度條。"""
+    from bot.technicals import fetch_kline_range
+
+    progress = st.progress(0, text="準備中...")
+    end = dt.date.today()
+    start = end.replace(day=1)
+    try:
+        start = start.replace(year=start.year - months // 12)
+        remaining = months % 12
+        if remaining:
+            new_month = start.month - remaining
+            new_year = start.year
+            while new_month <= 0:
+                new_month += 12
+                new_year -= 1
+            start = dt.date(new_year, new_month, 1)
+    except ValueError:
+        start = end - dt.timedelta(days=months * 31)
+
+    ok, fail = 0, 0
+    total = len(symbols)
+    for i, sym in enumerate(symbols, start=1):
+        try:
+            fetch_kline_range(
+                sym,
+                start_date=start, end_date=end,
+                root=PROJECT_ROOT, save_to_db=True,
+                request_delay_sec=0.4,
+            )
+            ok += 1
+        except Exception as e:
+            fail += 1
+            st.warning(f"{sym} 抓取失敗：{e}")
+        progress.progress(
+            i / total,
+            text=f"[{i}/{total}] {sym} ({start.isoformat()} ~ {end.isoformat()})",
+        )
+    progress.empty()
+    st.success(f"完成：成功 {ok} 檔 / 失敗 {fail} 檔，已寫入 price_history")
+
+
+def _run_batch_extend(symbols: List[str], years: int, delay: float) -> None:
+    """批量對所有股票呼叫 extend_kline_backward。"""
+    from bot.technicals import extend_kline_backward
+
+    outer = st.progress(0, text=f"批量抓取 {len(symbols)} 檔的 {years} 年歷史...")
+    inner = st.empty()
+    total = len(symbols)
+    ok, fail = 0, 0
+    for i, sym in enumerate(symbols, start=1):
+        sym_counter = {"rows": 0, "months": 0}
+
+        def cb(idx: int, total_months: int, label: str, fetched: int) -> None:
+            sym_counter["rows"] += fetched
+            sym_counter["months"] += 1
+            inner.progress(
+                idx / max(total_months, 1),
+                text=(
+                    f"[{i}/{total}] {sym} · 月 {idx}/{total_months} ({label}) "
+                    f"· 累計新增 {sym_counter['rows']} 根"
+                ),
+            )
+
+        try:
+            extend_kline_backward(
+                sym, years_back=years, root=PROJECT_ROOT,
+                request_delay_sec=delay, on_progress=cb,
+            )
+            ok += 1
+        except Exception as e:
+            fail += 1
+            st.warning(f"{sym} 往前抓失敗：{e}")
+        outer.progress(i / total, text=f"完成 {sym} ({i}/{total})")
+    inner.empty()
+    outer.empty()
+    st.success(f"批量完成：成功 {ok} 檔 / 失敗 {fail} 檔")
+
+
 def page_board() -> None:
-    """K 線看板：多檔股票一覽，每檔一張 mini K 線縮圖，可展開看完整 K 線。"""
+    """K 線看板：縮圖 grid / 並排大圖 / 單檔專注三種模式 + 長時間範圍 + 批次往前抓。"""
     st.title("📊 K 線看板 (Stock Board)")
     st.caption(
-        "一目了然多檔股票的最新走勢。資料來源為本地 SQLite `price_history` "
-        "(由「個股深入分析 → 抓日 K + 指標」或下方『一鍵更新所有』寫入)，"
-        "可透過「資料庫 / 雲端同步」推送到 Google Sheets。"
+        "三種看板模式：縮圖 grid (多檔一覽) · 並排大圖 (2~3 檔比較) · 單檔專注 (完整 K 線工作台)。"
+        "資料來源為本地 SQLite `price_history`，"
+        "支援批次往更早 (5/10 年) 抓取，並可推送到 Google Sheets。"
     )
 
     db = _open_db_for_page()
 
     # ---- 來源選擇 ----
-    src_col1, src_col2, src_col3, src_col4 = st.columns([2, 1, 1, 1])
+    src_col1, src_col2 = st.columns([3, 2])
     source = src_col1.radio(
         "監控池來源",
         ["Watchlist", "DB 已有資料的全部 symbol", "自訂"],
         horizontal=True, key="board_source",
+    )
+    view_mode = src_col2.radio(
+        "顯示模式",
+        ["縮圖 grid", "並排大圖", "單檔專注"],
+        horizontal=True, key="board_view_mode",
     )
 
     if source == "Watchlist":
@@ -3318,49 +4524,66 @@ def page_board() -> None:
         )
         symbols = [s.strip() for s in custom.split(",") if s.strip()]
 
-    period = src_col2.selectbox(
-        "時間範圍",
-        ["近 30 日", "近 60 日", "近 120 日", "近 250 日"],
-        index=1, key="board_period",
-    )
-    period_map = {"近 30 日": 30, "近 60 日": 60, "近 120 日": 120, "近 250 日": 250}
-    n_days = period_map[period]
-
-    cols_per_row = src_col3.selectbox(
-        "每列張數", [2, 3, 4], index=1, key="board_cols",
-    )
-
-    refresh_clicked = src_col4.button(
-        "🔄 一鍵更新所有 K 線",
-        type="primary",
-        use_container_width=True,
-        help="對清單中每檔呼叫 TWSE STOCK_DAY 取近 6 個月 K 線，寫回 SQLite。",
-    )
-
     if not symbols:
         st.info("尚未選定股票。可到「個股總覽」加入 watchlist，或選『自訂』直接輸入代號。")
         return
 
-    # ---- 重新抓 K 線 ----
+    # ---- 時間範圍 + 抓取選項 ----
+    pc1, pc2, pc3, pc4 = st.columns([1.2, 1.2, 1.2, 1.4])
+    window_label = pc1.selectbox(
+        "顯示時間範圍",
+        [w[0] for w in KLINE_WINDOWS if w[0] != "自訂日期"],
+        index=2, key="board_window",
+    )
+    n_days_map = {w[0]: w[1] for w in KLINE_WINDOWS if isinstance(w[1], int) and w[1] > 0}
+    n_days = n_days_map.get(window_label, 130)
+
+    cols_per_row = pc2.selectbox(
+        "每列張數", [1, 2, 3, 4, 6], index=2, key="board_cols",
+    )
+    refresh_months = pc3.selectbox(
+        "一鍵更新範圍",
+        [3, 6, 12, 24, 36, 60, 120],
+        index=1,
+        format_func=lambda m: f"近 {m} 個月" if m < 12 else f"近 {m // 12} 年",
+        key="board_refresh_months",
+    )
+    refresh_clicked = pc4.button(
+        "🔄 一鍵更新所有 K 線",
+        type="primary",
+        use_container_width=True,
+        help=f"對清單中每檔抓近 {refresh_months} 個月 K 線，分月寫入 SQLite。",
+    )
+
+    # ---- 一鍵更新 (改用 fetch_kline_range，分月 + 進度) ----
     if refresh_clicked:
-        from bot.technicals import fetch_recent_kline
-        progress = st.progress(0, text="抓取 K 線中...")
-        ok, fail = 0, 0
-        for i, sym in enumerate(symbols, start=1):
-            try:
-                fetch_recent_kline(
-                    sym, months=6, root=PROJECT_ROOT, save_to_db=True,
-                )
-                ok += 1
-            except Exception as e:
-                fail += 1
-                st.warning(f"{sym} 抓取失敗：{e}")
-            progress.progress(i / len(symbols), text=f"({i}/{len(symbols)}) {sym}")
-        progress.empty()
-        st.success(f"完成：成功 {ok} 檔 / 失敗 {fail} 檔，已寫入 price_history")
+        _run_batch_refresh(symbols, refresh_months)
         st.rerun()
 
-    # ---- 摘要表 (排序 / 過濾) ----
+    # ---- 批量往前抓更早 ----
+    with st.expander("⏪ 批量往更早抓取所有股票 (5 / 10 年歷史)", expanded=False):
+        eb1, eb2, eb3 = st.columns([1.5, 1.5, 2])
+        ext_years = eb1.selectbox(
+            "往前再抓",
+            [1, 2, 3, 5, 10],
+            index=2,
+            format_func=lambda y: f"{y} 年",
+            key="board_ext_years",
+        )
+        ext_delay = eb2.slider(
+            "每月請求間隔 (秒)", 0.2, 2.0, 0.5, 0.1,
+            key="board_ext_delay",
+            help="抓 10 年 = 約 120 個月。建議 0.5+ 秒避免 TWSE rate limit。",
+        )
+        ext_clicked = eb3.button(
+            f"⏪ 對 {len(symbols)} 檔開始批量抓取 {ext_years} 年",
+            use_container_width=True,
+            key="board_ext_btn",
+        )
+        if ext_clicked:
+            _run_batch_extend(symbols, ext_years, ext_delay)
+
+    # ---- 摘要表 ----
     summary = _board_rows_summary(symbols, db)
     if summary.empty:
         st.warning("symbols 為空。")
@@ -3382,7 +4605,6 @@ def page_board() -> None:
         sort_by, ascending=ascending, na_position="last",
     ).reset_index(drop=True)
 
-    # ---- 摘要表頭 ----
     st.markdown("### 摘要表")
     st.dataframe(
         df_view,
@@ -3408,56 +4630,19 @@ def page_board() -> None:
         mime="text/csv",
     )
 
-    # ---- mini K 線 grid ----
-    st.markdown(f"### K 線縮圖 (近 {n_days} 日)")
     sorted_syms = df_view["symbol"].tolist()
-    cols = st.columns(cols_per_row)
-    for i, sym in enumerate(sorted_syms):
-        bars = db.get_price_history(sym, limit=n_days, ascending=True)
-        with cols[i % cols_per_row]:
-            row = df_view.loc[df_view["symbol"] == sym].iloc[0]
-            chg = row.get("chg_1d_%")
-            chg_str = f"{chg:+.2f}%" if isinstance(chg, (int, float)) else "—"
-            color = "green" if (isinstance(chg, (int, float)) and chg > 0) else (
-                "red" if isinstance(chg, (int, float)) and chg < 0 else "gray"
-            )
-            st.markdown(
-                f"**`{sym}`** · 收 {row['close'] if row['close'] is not None else '—'} "
-                f"· {_badge(chg_str, color)}",
-                unsafe_allow_html=True,
-            )
-            if bars:
-                chart = _spark_chart(bars, height=110)
-                if chart is not None:
-                    st.altair_chart(chart, use_container_width=True)
-            else:
-                st.caption("無 K 線資料 - 點上方『一鍵更新』")
 
-    # ---- 展開單檔完整 K 線 ----
-    st.markdown("---")
-    st.markdown("### 展開查看完整 K 線 (含 MA + 成交量)")
-    pick = st.selectbox(
-        "選一檔深入看", options=sorted_syms, index=0 if sorted_syms else None,
-        key="board_detail_pick",
-    )
-    if pick:
-        bars = db.get_price_history(pick, limit=n_days, ascending=True)
-        if not bars:
-            st.info(f"{pick} 尚無 K 線資料。請點上方『一鍵更新所有』。")
-        else:
-            result = _full_kline_chart(bars, title=f"{pick} 近 {n_days} 日 K 線")
-            if result is not None:
-                price_chart, vol_chart = result
-                st.altair_chart(price_chart, use_container_width=True)
-                st.altair_chart(vol_chart, use_container_width=True)
-            with st.expander(f"原始資料 ({len(bars)} 根 K 棒)"):
-                st.dataframe(
-                    pd.DataFrame([{
-                        "date": b.date, "open": b.open, "high": b.high,
-                        "low": b.low, "close": b.close, "volume": b.volume,
-                    } for b in bars]).sort_values("date", ascending=False),
-                    hide_index=True, use_container_width=True,
-                )
+    # ---- 三種顯示模式 ----
+    if view_mode == "縮圖 grid":
+        _render_grid_view(
+            sorted_syms, df_view, db, n_days=n_days, cols_per_row=cols_per_row,
+        )
+    elif view_mode == "並排大圖":
+        _render_compare_view(
+            sorted_syms, df_view, db, window_label=window_label,
+        )
+    else:  # 單檔專注
+        _render_focus_view(sorted_syms, db)
 
     # ---- Google Sheets 同步快捷 ----
     st.markdown("---")
@@ -3867,13 +5052,32 @@ def page_intraday() -> None:
         "盤前 8:30 流程: 新聞 (鉅亨網) → LLM 萃取題材 → 合併候選股 → 算當沖分 → LLM 戰情簡報。"
         " 一鍵跑完整流程: `uv run stock-intraday`。"
     )
+    _llm_caption(
+        "「🤖 重抓新聞 + 重跑」「🤖 用快取重跑」**至少各呼叫 2 次 Gemini** "
+        "(theme_radar 萃取題材 + intraday_brief 寫戰情簡報)。"
+        "「載入最新」純讀檔，不會消耗 LLM。"
+    )
 
     from bot.intraday_pipeline import load_latest_intraday, run_intraday
 
     cs = st.columns([2, 1, 1, 1])
-    if cs[1].button("載入最新", use_container_width=True, key="intra_load"):
+    if cs[1].button(
+        "載入最新 (不呼叫 LLM)",
+        use_container_width=True,
+        key="intra_load",
+        help="只讀取最近一次跑完的 intraday report，不會呼叫 Gemini。",
+    ):
         st.session_state["intra_report"] = load_latest_intraday(PROJECT_ROOT)
-    if cs[2].button("重抓新聞 + 重跑", type="primary", use_container_width=True, key="intra_refresh"):
+    if cs[2].button(
+        "🤖 重抓新聞 + 重跑",
+        type="primary",
+        use_container_width=True,
+        key="intra_refresh",
+        help=(
+            "重抓鉅亨網新聞，跑 theme_radar + intraday_brief 兩次 LLM 呼叫。"
+            "\n\n" + LLM_HINT_DIRECT
+        ),
+    ):
         env_values = load_env()
         from bot.config import Settings as S
         # 確保 GEMINI_API_KEY 從 .env 載到 process env
@@ -3890,7 +5094,15 @@ def page_intraday() -> None:
             )
         from bot.intraday_pipeline import _report_to_json
         st.session_state["intra_report"] = _report_to_json(report)
-    if cs[3].button("用快取重跑", use_container_width=True, key="intra_cached_run"):
+    if cs[3].button(
+        "🤖 用快取重跑",
+        use_container_width=True,
+        key="intra_cached_run",
+        help=(
+            "新聞用快取 (省抓取時間)，但仍會跑 theme_radar + intraday_brief 兩次 LLM。"
+            "\n\n" + LLM_HINT_DIRECT
+        ),
+    ):
         env_values = load_env()
         from bot.config import Settings as S
         import os
@@ -4012,6 +5224,274 @@ def page_intraday() -> None:
 
 
 # ======================================================================
+# 頁面: 明日當沖關注
+# ======================================================================
+
+
+def page_next_day_watch() -> None:
+    st.title("🌙 明日當沖關注")
+    st.caption(
+        "盤後 14:00-18:00 跑 draft 初版、隔日凌晨 02:00-06:00 跑 update 更新版。"
+        "綜合「題材延續 + 強勢承接 + 明日事件」三大來源，產出明日預備清單。"
+        " 一鍵跑：`uv run stock-nextday` 或 `uv run stock-nextday --mode update`。"
+    )
+    _llm_caption(
+        "「🤖 跑 draft 初版」與「🤖 跑 update 更新版」**各呼叫 2 次 Gemini** "
+        "(next_day_radar 萃題材 + next_day_brief 寫簡報)。"
+        "「載入最新」純讀檔，不會消耗 LLM。"
+    )
+
+    from bot.next_day_watch_pipeline import (
+        load_latest_next_day,
+        next_trading_day,
+        run_next_day_watch,
+    )
+
+    today = dt.date.today()
+    target = next_trading_day(today)
+
+    cs = st.columns([2, 1, 1, 1])
+    cs[0].caption(
+        f"目前 {today.isoformat()} ｜ 目標 明日交易日 **{target.isoformat()}**"
+    )
+
+    if cs[1].button(
+        "載入最新 (不呼叫 LLM)",
+        use_container_width=True,
+        key="nextday_load",
+        help="只讀取最近一次跑完的 next_day_watch 報告，不會呼叫 Gemini。",
+    ):
+        st.session_state["nextday_report"] = load_latest_next_day(PROJECT_ROOT)
+
+    if cs[2].button(
+        "🤖 跑 draft (盤後初版)",
+        type="primary",
+        use_container_width=True,
+        key="nextday_draft",
+        help=(
+            "盤後跑：用今日收盤資料 + 美股盤後 macro。"
+            "跑 next_day_radar + next_day_brief 兩次 LLM。\n\n" + LLM_HINT_DIRECT
+        ),
+    ):
+        env_values = load_env()
+        from bot.config import Settings as S
+        import os
+        for k, v in env_values.items():
+            if v and not os.environ.get(k):
+                os.environ[k] = v
+        s = S()
+        with st.spinner("跑明日預備清單 (draft) — 預估 60-120 秒..."):
+            report = run_next_day_watch(
+                mode="draft",
+                project_root=PROJECT_ROOT,
+                settings=s,
+                force_refresh_news=True,
+            )
+        from bot.next_day_watch_pipeline import _report_to_json
+        st.session_state["nextday_report"] = _report_to_json(report)
+
+    if cs[3].button(
+        "🤖 跑 update (凌晨更新)",
+        use_container_width=True,
+        key="nextday_update",
+        help=(
+            "凌晨美股收盤後跑：強制重抓 macro (含今夜美股實際走勢)。"
+            "跑 next_day_radar + next_day_brief 兩次 LLM。\n\n" + LLM_HINT_DIRECT
+        ),
+    ):
+        env_values = load_env()
+        from bot.config import Settings as S
+        import os
+        for k, v in env_values.items():
+            if v and not os.environ.get(k):
+                os.environ[k] = v
+        s = S()
+        with st.spinner("跑明日預備清單 (update) — 重抓 macro，預估 60-120 秒..."):
+            report = run_next_day_watch(
+                mode="update",
+                project_root=PROJECT_ROOT,
+                settings=s,
+                force_refresh_macro=True,
+            )
+        from bot.next_day_watch_pipeline import _report_to_json
+        st.session_state["nextday_report"] = _report_to_json(report)
+
+    if "nextday_report" not in st.session_state:
+        st.session_state["nextday_report"] = load_latest_next_day(PROJECT_ROOT)
+
+    data = st.session_state.get("nextday_report")
+    if not data:
+        st.warning(
+            "尚無明日預備清單。請點「🤖 跑 draft (盤後初版)」，"
+            "或在終端機執行 `uv run stock-nextday`。"
+        )
+        return
+
+    # ---- 頂部 KPI ----
+    mode_label = {"draft": "盤後 draft", "update": "凌晨 update"}.get(
+        str(data.get("mode", "")), data.get("mode", "?")
+    )
+    st.caption(
+        f"目標日: **{data.get('target_date', '-')}** ｜ "
+        f"模式: **{mode_label}** ｜ "
+        f"市場氛圍: **{str(data.get('market_tone', '-')).upper()}** ｜ "
+        f"題材 {len(data.get('carry_themes', []))} ｜ "
+        f"事件 {len(data.get('event_focus', []))} ｜ "
+        f"候選 {len(data.get('rankings', []))}"
+    )
+    if data.get("errors"):
+        st.error("管線錯誤: " + " / ".join(data["errors"][:3]))
+
+    overall = data.get("overall_brief", "")
+    if overall:
+        st.info(overall)
+
+    # ---- LLM 戰情簡報 ----
+    if data.get("brief_md"):
+        with st.expander("🤖 明日預備簡報 (LLM 寫)", expanded=True):
+            st.markdown(data["brief_md"])
+            st.caption(
+                f"prompt: {data.get('brief_prompt_id','')} "
+                f"v{data.get('brief_prompt_version','')}"
+            )
+
+    # ---- 三大來源 ----
+    tab_themes, tab_events, tab_strong = st.tabs([
+        "🔥 題材延續", "🗓 明日事件", "💪 強勢承接 (LLM)",
+    ])
+
+    with tab_themes:
+        themes = data.get("carry_themes") or []
+        if not themes:
+            st.info("尚未萃取題材")
+        else:
+            cols = st.columns(min(3, len(themes)))
+            for i, t in enumerate(themes):
+                col = cols[i % len(cols)]
+                heat = int(t.get("heat", 0))
+                with col:
+                    st.markdown(
+                        f"#### {t.get('theme', '')}  "
+                        f"{'🔥' * heat}{'·' * (5-heat)}"
+                    )
+                    st.caption(
+                        f"{t.get('category','')} ｜ 熱度 {heat}/5"
+                    )
+                    for d in (t.get("drivers") or [])[:2]:
+                        st.markdown(f"- {d}")
+                    cands = t.get("candidate_tickers") or []
+                    if cands:
+                        chip_lines = []
+                        for c in cands[:6]:
+                            tk = c.get("ticker", "")
+                            nm = (c.get("name") or "")[:6]
+                            role = c.get("role", "")
+                            chip_lines.append(f"`{tk}` {nm} ({role})")
+                        st.markdown("**標的:** " + "  ".join(chip_lines))
+                    for r in (t.get("risks") or [])[:1]:
+                        st.caption(f"⚠ {r}")
+
+    with tab_events:
+        events = data.get("event_focus") or []
+        if not events:
+            st.info("尚未抓到明日法說/事件")
+        else:
+            for ev in events:
+                st.markdown(
+                    f"#### {ev.get('event','')} ｜ {ev.get('event_time','未指定')}"
+                )
+                st.caption(ev.get("expected_impact", "") or "")
+                tickers_rows = []
+                for ct in ev.get("tickers", []) or []:
+                    tickers_rows.append({
+                        "代號": ct.get("ticker", ""),
+                        "名稱": ct.get("name", ""),
+                        "立場": ct.get("side", ""),
+                    })
+                if tickers_rows:
+                    st.dataframe(
+                        pd.DataFrame(tickers_rows),
+                        hide_index=True, use_container_width=True,
+                    )
+
+    with tab_strong:
+        sc_list = data.get("strong_carry_llm") or []
+        if not sc_list:
+            st.info("LLM 未挑出強勢承接 (可能今日量縮或全市場偏弱)")
+        else:
+            rows = []
+            for sc in sc_list:
+                rows.append({
+                    "代號": sc.get("ticker", ""),
+                    "名稱": sc.get("name", ""),
+                    "今日漲跌%": sc.get("today_pct", 0),
+                    "量比": sc.get("volume_ratio", 0),
+                    "觀察等級": sc.get("watch_level", ""),
+                    "原因": sc.get("reason", ""),
+                })
+            st.dataframe(
+                pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                column_config={
+                    "今日漲跌%": st.column_config.NumberColumn(format="%+.2f%%"),
+                    "量比": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+
+    # ---- 排序候選股 ----
+    st.markdown("### 📋 明日預備排行 (按 next_day_score)")
+    rankings = data.get("rankings") or []
+    if rankings:
+        rows = []
+        for r in rankings:
+            prem = r.get("adr_premium_pct")
+            rows.append({
+                "代號": r["ticker"],
+                "名稱": r.get("name", ""),
+                "明日分": r.get("next_day_score", 0),
+                "強勢分": r.get("strength_score", 0),
+                "今日%": r.get("today_pct_change", 0),
+                "量比": r.get("volume_ratio", 0),
+                "題材": r.get("theme", ""),
+                "事件": r.get("event", ""),
+                "進場邏輯": r.get("entry_logic", ""),
+                "ADR 溢價%": prem if prem is not None else float("nan"),
+                "籌碼": r.get("chip_summary_text", ""),
+                "來源": ",".join(r.get("sources") or []),
+                "備註": r.get("note", "")[:30],
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(
+            df, hide_index=True, use_container_width=True,
+            column_config={
+                "明日分": st.column_config.ProgressColumn(
+                    "明日分", min_value=0, max_value=100, format="%.1f",
+                ),
+                "強勢分": st.column_config.ProgressColumn(
+                    "強勢分", min_value=0, max_value=100, format="%.0f",
+                ),
+                "今日%": st.column_config.NumberColumn(format="%+.2f%%"),
+                "量比": st.column_config.NumberColumn(format="%.2f"),
+                "ADR 溢價%": st.column_config.NumberColumn(format="%+.2f%%"),
+            },
+        )
+
+        st.markdown("##### 跳轉到深入分析")
+        pick = st.selectbox(
+            "選一檔看 360 度視角",
+            ["(none)"] + [f"{r['ticker']} {r.get('name','')}" for r in rankings[:10]],
+            key="nextday_pick",
+        )
+        if pick != "(none)":
+            tk = pick.split()[0]
+            if st.button(f"分析 {pick}", type="primary", key="nextday_detail_btn"):
+                st.session_state["detail_ticker"] = tk
+                st.session_state.pop("detail_cache", None)
+                st.session_state.pop("detail_cache_key", None)
+                st.session_state["page"] = "個股深入分析"
+                st.rerun()
+
+
+# ======================================================================
 # 頁面: 美股 / 跨市場
 # ======================================================================
 
@@ -4108,13 +5588,22 @@ def page_macro() -> None:
     # ---- LLM 跨市場簡報 ----
     st.markdown("---")
     st.markdown("### LLM 跨市場簡報 (美股 → 台股早盤影響)")
+    st.caption(
+        "🤖 此區塊的「產出簡報」按鈕會呼叫 Gemini (`us_market_brief` prompt)。"
+        "上方指數/ADR/供應鏈資料皆走 yfinance + 本地 JSON，不消耗 LLM。"
+    )
 
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
     if not api_key:
         st.info("尚未設定 GEMINI_API_KEY，無法產出 LLM 簡報")
     else:
-        if st.button("呼叫 Gemini 產出簡報", type="primary", key="macro_brief"):
+        if st.button(
+            "🤖 呼叫 Gemini 產出簡報",
+            type="primary",
+            key="macro_brief",
+            help=LLM_HINT_DIRECT,
+        ):
             from bot.llm_analyzer import GeminiClient, gemini_call
 
             client = GeminiClient(
@@ -4179,6 +5668,7 @@ PAGES = {
     # 研究與分析
     "功能總覽": page_overview,
     "今日當沖戰情室": page_intraday,
+    "明日當沖關注": page_next_day_watch,
     "K 線看板": page_board,
     "個股總覽": page_watchlist,
     "個股深入分析": page_ticker_detail,
@@ -4205,7 +5695,7 @@ PAGES = {
 }
 
 NAV_GROUPS = {
-    "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "K 線看板", "個股總覽", "個股深入分析", "自動化管線"],
+    "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "明日當沖關注", "K 線看板", "個股總覽", "個股深入分析", "自動化管線"],
     "📡 監控與訊號": ["美股 / 跨市場", "跟單訊號", "主動 ETF 追蹤", "LLM 法說分析"],
     "⚡ 執行與紀錄": ["啟動 / 監控", "🛡 風控中心", "交易可行性檢查", "交易紀錄", "報表分析"],
     "⚙️ 系統與診斷": ["組態設定", "資料庫 / 雲端同步", "Prompt 管理",
@@ -4259,12 +5749,25 @@ def main_app() -> None:
     try:
         env_values_for_sb = load_env()
         if env_values_for_sb.get("GEMINI_API_KEY"):
-            st.sidebar.markdown(_badge("LLM 已啟用", "green"), unsafe_allow_html=True)
+            st.sidebar.markdown(
+                _badge("🤖 LLM 已啟用 (會收費)", "purple"),
+                unsafe_allow_html=True,
+            )
         else:
-            st.sidebar.markdown(_badge("LLM 未啟用", "red"), unsafe_allow_html=True)
+            st.sidebar.markdown(_badge("LLM 未啟用", "gray"), unsafe_allow_html=True)
         try:
             reg = get_registry(PROJECT_ROOT / "prompts")
             st.sidebar.caption(f"Prompt 載入: {len(reg.list_ids())} 個")
+        except Exception:
+            pass
+        try:
+            today_log = get_call_logger().read(dt.date.today(), limit=10000)
+            tokens_in = sum(r.tokens_in or 0 for r in today_log)
+            tokens_out = sum(r.tokens_out or 0 for r in today_log)
+            st.sidebar.caption(
+                f"今日 LLM 呼叫: {len(today_log)} 筆 "
+                f"({tokens_in:,}→{tokens_out:,} tokens)"
+            )
         except Exception:
             pass
     except Exception:

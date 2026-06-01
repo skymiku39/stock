@@ -95,6 +95,13 @@ class LlmCallLogger:
                     f.write("\n")
         except Exception:
             self.logger.exception("LLM call log 寫入失敗")
+
+        # Best-effort: 同步寫入 stock_db.llm_analysis_history 供 Google Sheet 同步。
+        # 失敗時不影響呼叫流程 (JSONL 已落地)。
+        try:
+            _mirror_to_stock_db(rec, logger=self.logger)
+        except Exception:
+            self.logger.debug("LLM analysis mirror 失敗", exc_info=True)
         return rec
 
     # ------------------------------------------------------------------
@@ -151,6 +158,97 @@ class LlmCallLogger:
         for d in ds:
             for r in self.read(d, limit=10_000):
                 yield r
+
+
+# ----------------------------------------------------------------------
+# Mirror to stock_db.llm_analysis_history (for Google Sheet sync)
+# ----------------------------------------------------------------------
+
+
+def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
+    """把單筆 LLM 呼叫鏡像到 stock_db.llm_analysis_history。
+
+    解析 output 嘗試抽出 sentiment / sentiment_score / summary / drivers / risks。
+    失敗時欄位留空。
+    """
+    try:
+        from bot.stock_db import LlmAnalysisRow, get_db
+    except Exception:
+        return  # stock_db 模組無法載入時 silently skip
+
+    md = rec.metadata or {}
+    ticker = str(md.get("ticker") or md.get("symbol") or "")
+
+    sentiment = ""
+    sentiment_score = 0.0
+    confidence = 0.0
+    summary = ""
+    drivers = ""
+    risks = ""
+    try:
+        if rec.output:
+            cleaned = rec.output.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip("`")
+                if cleaned.lower().startswith("json"):
+                    cleaned = cleaned[4:].strip()
+            parsed: Any = None
+            try:
+                parsed = json.loads(cleaned)
+            except Exception:
+                # try to find outermost {...}
+                start = cleaned.find("{")
+                end = cleaned.rfind("}")
+                if start >= 0 and end > start:
+                    try:
+                        parsed = json.loads(cleaned[start : end + 1])
+                    except Exception:
+                        parsed = None
+            if isinstance(parsed, dict):
+                sentiment = str(parsed.get("sentiment", "") or parsed.get("report_tone", ""))
+                try:
+                    sentiment_score = float(
+                        parsed.get("sentiment_score", parsed.get("report_score", 0.0)) or 0.0
+                    )
+                except Exception:
+                    sentiment_score = 0.0
+                try:
+                    confidence = float(parsed.get("confidence", 0.0) or 0.0)
+                except Exception:
+                    confidence = 0.0
+                summary = str(parsed.get("summary", "") or parsed.get("interpretation", ""))[:1500]
+                ds = parsed.get("growth_drivers") or []
+                if isinstance(ds, list):
+                    drivers = "; ".join(str(d) for d in ds)[:1500]
+                rs = parsed.get("risks") or []
+                if isinstance(rs, list):
+                    risks = "; ".join(str(r) for r in rs)[:1500]
+    except Exception:
+        logger.debug("LLM output 解析失敗 (mirror)", exc_info=True)
+
+    row = LlmAnalysisRow(
+        id=f"{rec.ts}_{rec.prompt_id}_{ticker or 'NA'}",
+        ts=rec.ts,
+        ticker=ticker,
+        prompt_id=rec.prompt_id,
+        prompt_version=rec.prompt_version,
+        model=rec.model,
+        sentiment=sentiment,
+        sentiment_score=sentiment_score,
+        confidence=confidence,
+        summary=summary,
+        drivers=drivers,
+        risks=risks,
+        raw_output=(rec.output or "")[:8000],
+        latency_ms=int(rec.latency_ms or 0),
+        tokens_in=int(rec.tokens_in or 0),
+        tokens_out=int(rec.tokens_out or 0),
+        success=1 if rec.success else 0,
+        error=str(rec.error or "")[:1000],
+        source=str(md.get("task") or md.get("source") or "llm_call"),
+    )
+    db = get_db()
+    db.upsert_llm_analysis(row)
 
 
 # ----------------------------------------------------------------------

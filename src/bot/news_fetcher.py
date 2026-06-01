@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -179,6 +180,7 @@ def _cache_path(date: dt.date, root: Optional[Path]) -> Path:
 
 def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[List[NewsItem]]:
     p = _cache_path(date, root)
+    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return None
     try:
@@ -195,6 +197,7 @@ def _save_cache(items: List[NewsItem], date: dt.date, root: Optional[Path]) -> P
         {"asof": date.isoformat(), "items": [asdict(i) for i in items]},
         ensure_ascii=False, indent=2,
     ), encoding="utf-8")
+    mirror_file_to_cloud(p, root=root)
     return p
 
 

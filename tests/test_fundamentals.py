@@ -8,6 +8,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+from typing import Any, Dict, List
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -36,12 +38,16 @@ from bot.quarterly import (
     summarize_quarterly,
 )
 from bot.technicals import (
+    _enumerate_months,
     add_kd,
     add_macd,
     add_moving_averages,
     add_rsi,
     compute_indicators,
     derive_signals,
+    extend_kline_backward,
+    fetch_kline_range,
+    get_kline_coverage,
 )
 
 
@@ -345,3 +351,179 @@ class TestTechnicalIndicators:
         labels = {s.label for s in sigs}
         assert "MACD" in labels
         assert "月線位置" in labels
+
+
+# ----------------------------------------------------------------------
+# K 線批次抓取 (fetch_kline_range / extend_kline_backward / coverage)
+# ----------------------------------------------------------------------
+
+
+def _fake_month_rows(ticker: str, year: int, month: int) -> List[Dict[str, Any]]:
+    """虛擬 K 線：每月 5 根 K 棒。"""
+    out = []
+    for d in (3, 7, 14, 21, 28):
+        try:
+            iso = dt.date(year, month, d).isoformat()
+        except ValueError:
+            continue
+        out.append({
+            "date": iso,
+            "open": 100.0 + d,
+            "high": 102.0 + d,
+            "low": 99.0 + d,
+            "close": 101.0 + d,
+            "volume": 1000.0 + d,
+        })
+    return out
+
+
+class TestEnumerateMonths:
+    def test_includes_endpoints(self) -> None:
+        months = _enumerate_months(dt.date(2024, 11, 5), dt.date(2025, 2, 10))
+        assert months == [(2024, 11), (2024, 12), (2025, 1), (2025, 2)]
+
+    def test_same_month(self) -> None:
+        months = _enumerate_months(dt.date(2025, 3, 1), dt.date(2025, 3, 28))
+        assert months == [(2025, 3)]
+
+    def test_year_boundary(self) -> None:
+        months = _enumerate_months(dt.date(2024, 12, 1), dt.date(2025, 1, 1))
+        assert months == [(2024, 12), (2025, 1)]
+
+
+class TestFetchKlineRange:
+    def test_writes_csv_and_progress_called(self, tmp_path: Path) -> None:
+        captured = []
+
+        def fake_fetch(ticker, y, m, market=None, session=None, logger=None):
+            return _fake_month_rows(ticker, y, m)
+
+        def on_progress(idx, total, label, fetched):
+            captured.append((idx, total, label, fetched))
+
+        with patch("bot.technicals.fetch_monthly_kline", side_effect=fake_fetch):
+            df = fetch_kline_range(
+                "2330",
+                start_date=dt.date(2024, 11, 1),
+                end_date=dt.date(2025, 1, 31),
+                root=tmp_path,
+                save_to_db=False,
+                request_delay_sec=0,
+                on_progress=on_progress,
+            )
+
+        assert not df.empty
+        # 3 個月 × 5 根 = 15 (除非月底超出，但本例 11~1 月都有 28 號)
+        assert len(df) == 15
+        # progress 應該被呼叫 3 次
+        assert len(captured) == 3
+        # CSV 寫入
+        csv_path = tmp_path / "data" / "technicals" / "2330" / "daily_kline.csv"
+        assert csv_path.exists()
+        loaded = pd.read_csv(csv_path)
+        assert len(loaded) == 15
+
+    def test_skip_existing_months(self, tmp_path: Path) -> None:
+        # 先寫一份 cache：2024/12 已有資料
+        csv_dir = tmp_path / "data" / "technicals" / "2330"
+        csv_dir.mkdir(parents=True)
+        pd.DataFrame(_fake_month_rows("2330", 2024, 12)).to_csv(
+            csv_dir / "daily_kline.csv", index=False,
+        )
+
+        calls = []
+
+        def fake_fetch(ticker, y, m, market=None, session=None, logger=None):
+            calls.append((y, m))
+            return _fake_month_rows(ticker, y, m)
+
+        with patch("bot.technicals.fetch_monthly_kline", side_effect=fake_fetch):
+            fetch_kline_range(
+                "2330",
+                start_date=dt.date(2024, 11, 1),
+                end_date=dt.date(2025, 1, 31),
+                root=tmp_path,
+                save_to_db=False,
+                skip_existing_months=True,
+                request_delay_sec=0,
+            )
+
+        # 2024/12 是 cache 的邊界 (本例 cache 只含 12) → 邊界月會被重抓
+        # 11 月與 1 月一定要抓
+        assert (2024, 11) in calls
+        assert (2025, 1) in calls
+
+    def test_direction_backward_iterates_newest_first(self, tmp_path: Path) -> None:
+        order = []
+
+        def fake_fetch(ticker, y, m, market=None, session=None, logger=None):
+            order.append((y, m))
+            return _fake_month_rows(ticker, y, m)
+
+        with patch("bot.technicals.fetch_monthly_kline", side_effect=fake_fetch):
+            fetch_kline_range(
+                "2330",
+                start_date=dt.date(2024, 11, 1),
+                end_date=dt.date(2025, 1, 31),
+                root=tmp_path,
+                save_to_db=False,
+                request_delay_sec=0,
+                direction="backward",
+            )
+
+        assert order == [(2025, 1), (2024, 12), (2024, 11)]
+
+    def test_empty_when_start_after_end(self, tmp_path: Path) -> None:
+        with patch("bot.technicals.fetch_monthly_kline", return_value=[]):
+            df = fetch_kline_range(
+                "2330",
+                start_date=dt.date(2025, 3, 1),
+                end_date=dt.date(2025, 1, 1),
+                root=tmp_path,
+                save_to_db=False,
+            )
+        assert df.empty
+
+
+class TestGetKlineCoverage:
+    def test_returns_none_when_no_cache(self, tmp_path: Path) -> None:
+        assert get_kline_coverage("9999", root=tmp_path) is None
+
+    def test_reads_csv_cache(self, tmp_path: Path) -> None:
+        csv_dir = tmp_path / "data" / "technicals" / "2330"
+        csv_dir.mkdir(parents=True)
+        rows = _fake_month_rows("2330", 2020, 1) + _fake_month_rows("2330", 2025, 5)
+        pd.DataFrame(rows).to_csv(csv_dir / "daily_kline.csv", index=False)
+        cov = get_kline_coverage("2330", root=tmp_path)
+        assert cov is not None
+        assert cov["earliest"] == "2020-01-03"
+        assert cov["latest"] == "2025-05-28"
+        assert cov["rows"] == 10
+
+
+class TestExtendBackward:
+    def test_uses_anchor_from_cache(self, tmp_path: Path) -> None:
+        csv_dir = tmp_path / "data" / "technicals" / "2330"
+        csv_dir.mkdir(parents=True)
+        # cache 最早是 2024/01
+        pd.DataFrame(_fake_month_rows("2330", 2024, 1)).to_csv(
+            csv_dir / "daily_kline.csv", index=False,
+        )
+
+        called_months = []
+
+        def fake_fetch(ticker, y, m, market=None, session=None, logger=None):
+            called_months.append((y, m))
+            return _fake_month_rows(ticker, y, m)
+
+        with patch("bot.technicals.fetch_monthly_kline", side_effect=fake_fetch):
+            extend_kline_backward(
+                "2330", years_back=2, root=tmp_path,
+                save_to_db=False, request_delay_sec=0,
+            )
+
+        # 應該呼叫 2022/01 ~ 2023/12 之間月份
+        assert any(y == 2022 for y, _ in called_months)
+        assert any(y == 2023 for y, _ in called_months)
+        # 不應該觸到 2024 (anchor 之後)
+        assert all(y < 2024 for y, _ in called_months)

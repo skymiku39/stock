@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
+from bot.cloud_file_cache import (
+    mirror_file_to_cloud,
+    restore_file_from_cloud,
+    restore_tree_from_cloud,
+)
 from bot.utils import get_logger, mk_folder, now_tw
 
 if TYPE_CHECKING:
@@ -166,6 +171,7 @@ def load_active_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
     對舊版 JSON (沒有 holdings_url 欄位) 也能相容。
     """
     p = list_path(root)
+    restore_file_from_cloud(p, root=root)
     if p.exists():
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
@@ -185,6 +191,7 @@ def save_active_etfs(etfs: Iterable[ActiveEtf], root: Optional[Path] = None) -> 
     mk_folder(str(p.parent))
     data = [dataclasses.asdict(e) for e in etfs]
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    mirror_file_to_cloud(p, root=root)
     return p
 
 
@@ -204,6 +211,7 @@ def holdings_path(symbol: str, date: dt.date, root: Optional[Path] = None) -> Pa
 
 def list_holdings_dates(symbol: str, root: Optional[Path] = None) -> List[dt.date]:
     d = holdings_dir(symbol, root)
+    restore_tree_from_cloud(d, root=root)
     if not d.exists():
         return []
     dates: List[dt.date] = []
@@ -227,6 +235,7 @@ def load_holdings(
             return None
         date = dates[0]
     p = holdings_path(symbol, date, root)
+    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return None
     holdings: List[Holding] = []
@@ -256,6 +265,7 @@ def save_holdings(snap: HoldingsSnapshot, root: Optional[Path] = None) -> Path:
         writer.writeheader()
         for h in snap.holdings:
             writer.writerow(dataclasses.asdict(h))
+    mirror_file_to_cloud(p, root=root)
     return p
 
 

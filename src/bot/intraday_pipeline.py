@@ -23,6 +23,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bot.cloud_file_cache import (
+    mirror_file_to_cloud,
+    restore_file_from_cloud,
+    restore_tree_from_cloud,
+)
 from bot.config import Settings
 from bot.llm_analyzer import GeminiClient, gemini_call
 from bot.market_macro import (
@@ -178,8 +183,11 @@ def _score_candidate(
     chip_dict: Optional[Dict[str, Any]] = None
     try:
         summary = build_chip_summary(
-            row.ticker, project_root,
-            lookback_days=chip_lookback, today=now_tw().date(),
+            row.ticker,
+            end_date=now_tw().date(),
+            days=chip_lookback,
+            root=project_root,
+            logger=log,
         )
         if summary:
             chip_dict = summary_to_dict(summary)
@@ -363,12 +371,16 @@ def run_intraday(
     out_dir = root / "data" / "intraday" / today.isoformat()
     mk_folder(str(out_dir))
     try:
-        (out_dir / "report.json").write_text(
+        report_path = out_dir / "report.json"
+        report_path.write_text(
             json.dumps(_report_to_json(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        mirror_file_to_cloud(report_path, root=root)
         if report.brief_md:
-            (out_dir / "intraday_brief.md").write_text(report.brief_md, encoding="utf-8")
+            brief_path = out_dir / "intraday_brief.md"
+            brief_path.write_text(report.brief_md, encoding="utf-8")
+            mirror_file_to_cloud(brief_path, root=root)
     except Exception:
         log.exception("intraday 持久化失敗")
     report.output_dir = str(out_dir)
@@ -409,12 +421,14 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
 def _consensus_tickers_today(root: Path) -> List[str]:
     """從最近一次 pipeline run 取共識 top tickers。"""
     base = root / "data" / "pipeline_runs"
+    restore_tree_from_cloud(base, root=root)
     if not base.exists():
         return []
     runs = sorted([d for d in base.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
     if not runs:
         return []
     rj = runs[0] / "run.json"
+    restore_file_from_cloud(rj, root=root)
     if not rj.exists():
         return []
     try:
@@ -457,11 +471,13 @@ def _report_to_json(r: IntradayReport) -> Dict[str, Any]:
 
 def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     base = (root or Path.cwd()) / "data" / "intraday"
+    restore_tree_from_cloud(base, root=root)
     if not base.exists():
         return None
     days = sorted([d for d in base.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
     for d in days:
         p = d / "report.json"
+        restore_file_from_cloud(p, root=root)
         if p.exists():
             try:
                 return json.loads(p.read_text(encoding="utf-8"))

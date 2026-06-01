@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -49,6 +50,20 @@ ENDPOINTS = {
     "block_trade": (
         "https://www.twse.com.tw/rwd/zh/block/BFIAUU"
         "?date={date_compact}&selectType=S&response=json"
+    ),
+}
+
+# 上櫃 (TPEx) 端點 — 使用 YYYY/MM/DD 日期格式，回傳 {tables:[{fields,data}]}
+ENDPOINTS_TPEX = {
+    # 三大法人買賣明細 (sect=EW 為一般股票，含 ETF)
+    "tpex_insti": (
+        "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade"
+        "?type=Daily&sect=EW&date={date_slash}&response=json"
+    ),
+    # 融資融券餘額
+    "tpex_margin": (
+        "https://www.tpex.org.tw/www/zh-tw/margin/balance"
+        "?date={date_slash}&response=json"
     ),
 }
 
@@ -82,7 +97,8 @@ class ChipSummary:
     investment_trust_net: float = 0.0
     dealer_net: float = 0.0
     margin_buy_change_pct: float = 0.0
-    short_borrow_change_pct: float = 0.0
+    short_borrow_change_pct: float = 0.0   # 借券賣出餘額變動率 %
+    short_sell_change_pct: float = 0.0     # 融券餘額變動率 %
     block_trade_net: float = 0.0
     rows: List[ChipDailyRow] = field(default_factory=list)
 
@@ -107,6 +123,7 @@ def _new_session() -> requests.Session:
         ),
         "Accept-Language": "zh-TW,zh;q=0.9",
         "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.tpex.org.tw/",
     })
     return s
 
@@ -123,6 +140,8 @@ def _fetch_endpoint(
     log = logger or get_logger("chips")
     sess = session or _new_session()
     path = _cache_path(name, date, root)
+    if use_cache:
+        restore_file_from_cloud(path, root=root)
     if use_cache and path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -140,6 +159,7 @@ def _fetch_endpoint(
             return None
         mk_folder(str(path.parent))
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        mirror_file_to_cloud(path, root=root)
         time.sleep(0.5)  # 對 TWSE 友善
         return data
     except Exception:
@@ -296,6 +316,89 @@ def _parse_block(data: Dict[str, Any]) -> Dict[str, float]:
 
 
 # ----------------------------------------------------------------------
+# 上櫃 (TPEx) 籌碼
+# ----------------------------------------------------------------------
+
+
+def _fetch_tpex_chip(
+    name: str,
+    date: dt.date,
+    *,
+    session: Optional[requests.Session] = None,
+    root: Optional[Path] = None,
+    use_cache: bool = True,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[Dict[str, Any]]:
+    """抓上櫃 TPEx 籌碼端點 (name in ENDPOINTS_TPEX)，回傳 tables[0]。"""
+    log = logger or get_logger("chips")
+    sess = session or _new_session()
+    path = _cache_path(name, date, root)
+    if use_cache:
+        restore_file_from_cloud(path, root=root)
+    if use_cache and path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    url = ENDPOINTS_TPEX[name].format(date_slash=date.strftime("%Y/%m/%d"))
+    try:
+        resp = sess.get(url, timeout=20)
+        if resp.status_code != 200:
+            log.warning("%s HTTP %d (%s)", name, resp.status_code, url)
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        tables = data.get("tables") if isinstance(data, dict) else None
+        if not tables:
+            return None
+        table = tables[0] or {}
+        mk_folder(str(path.parent))
+        path.write_text(json.dumps(table, ensure_ascii=False), encoding="utf-8")
+        mirror_file_to_cloud(path, root=root)
+        time.sleep(0.5)
+        return table
+    except Exception:
+        log.exception("%s 抓取失敗 (%s)", name, url)
+        return None
+
+
+def _parse_tpex_insti(table: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
+    """上櫃三大法人 (24 欄)：外資合計超=idx10、投信超=idx13、自營商合計超=idx22 (單位：股)。"""
+    out: Dict[str, ChipDailyRow] = {}
+    rows = table.get("data") or []
+    for row in rows:
+        if len(row) < 23:
+            continue
+        ticker = str(row[0]).strip()
+        if not ticker:
+            continue
+        out[ticker] = ChipDailyRow(
+            ticker=ticker,
+            name=str(row[1]).strip(),
+            foreign_net=_to_float(row[10]) / 1000.0,        # 外資及陸資合計買賣超
+            investment_trust_net=_to_float(row[13]) / 1000.0,  # 投信買賣超
+            dealer_net=_to_float(row[22]) / 1000.0,         # 自營商合計買賣超
+        )
+    return out
+
+
+def _parse_tpex_margin(table: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
+    """上櫃融資融券：資餘額=idx6、券餘額=idx14 (單位：張)。回傳 {ticker:(margin,short)}。"""
+    out: Dict[str, tuple[float, float]] = {}
+    rows = table.get("data") or []
+    for row in rows:
+        if len(row) < 15:
+            continue
+        ticker = str(row[0]).strip()
+        if not ticker:
+            continue
+        out[ticker] = (_to_float(row[6]), _to_float(row[14]))
+    return out
+
+
+# ----------------------------------------------------------------------
 # 公開 API
 # ----------------------------------------------------------------------
 
@@ -327,6 +430,22 @@ def fetch_daily_chips(
     for ticker, b in borrow_map.items():
         row = rows.setdefault(ticker, ChipDailyRow(ticker=ticker))
         row.borrow_balance = b
+
+    # ---- 上櫃 (TPEx) 合併 (代號不與上市重疊) ----
+    tpex_insti = _fetch_tpex_chip("tpex_insti", date, session=sess, root=root, use_cache=use_cache, logger=log)
+    tpex_margin = _fetch_tpex_chip("tpex_margin", date, session=sess, root=root, use_cache=use_cache, logger=log)
+    if tpex_insti:
+        for ticker, irow in _parse_tpex_insti(tpex_insti).items():
+            row = rows.setdefault(ticker, ChipDailyRow(ticker=ticker))
+            row.name = row.name or irow.name
+            row.foreign_net = irow.foreign_net
+            row.investment_trust_net = irow.investment_trust_net
+            row.dealer_net = irow.dealer_net
+    if tpex_margin:
+        for ticker, (m, s) in _parse_tpex_margin(tpex_margin).items():
+            row = rows.setdefault(ticker, ChipDailyRow(ticker=ticker))
+            row.margin_balance = m
+            row.short_balance = s
 
     return rows
 
@@ -364,6 +483,8 @@ def build_chip_summary(
 
     first_margin: Optional[float] = None
     last_margin: Optional[float] = None
+    first_borrow: Optional[float] = None
+    last_borrow: Optional[float] = None
     first_short: Optional[float] = None
     last_short: Optional[float] = None
 
@@ -379,20 +500,20 @@ def build_chip_summary(
             dealer_total += row.dealer_net
             if first_margin is None:
                 first_margin = row.margin_balance
-                first_short = row.borrow_balance
+                first_borrow = row.borrow_balance
+                first_short = row.short_balance
             last_margin = row.margin_balance
-            last_short = row.borrow_balance
+            last_borrow = row.borrow_balance
+            last_short = row.short_balance
         block = _fetch_endpoint("block_trade", d, session=sess, root=root, logger=logger)
         if block:
             bmap = _parse_block(block)
             block_total += bmap.get(ticker, 0.0)
 
-    margin_pct = 0.0
-    short_pct = 0.0
-    if first_margin and first_margin > 0 and last_margin is not None:
-        margin_pct = 100.0 * (last_margin - first_margin) / first_margin
-    if first_short and first_short > 0 and last_short is not None:
-        short_pct = 100.0 * (last_short - first_short) / first_short
+    def _pct_change(first: Optional[float], last: Optional[float]) -> float:
+        if first and first > 0 and last is not None:
+            return 100.0 * (last - first) / first
+        return 0.0
 
     return ChipSummary(
         ticker=ticker,
@@ -400,8 +521,9 @@ def build_chip_summary(
         foreign_net=foreign_total,
         investment_trust_net=trust_total,
         dealer_net=dealer_total,
-        margin_buy_change_pct=margin_pct,
-        short_borrow_change_pct=short_pct,
+        margin_buy_change_pct=_pct_change(first_margin, last_margin),
+        short_borrow_change_pct=_pct_change(first_borrow, last_borrow),
+        short_sell_change_pct=_pct_change(first_short, last_short),
         block_trade_net=block_total,
         rows=rows,
     )
@@ -430,6 +552,7 @@ def summary_to_dict(s: ChipSummary) -> Dict[str, Any]:
         "dealer_net": s.dealer_net,
         "margin_buy_change_pct": s.margin_buy_change_pct,
         "short_borrow_change_pct": s.short_borrow_change_pct,
+        "short_sell_change_pct": s.short_sell_change_pct,
         "block_trade_net": s.block_trade_net,
         "rows": [asdict(r) for r in s.rows],
     }

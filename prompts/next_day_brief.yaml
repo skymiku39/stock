@@ -1,0 +1,79 @@
+id: next_day_brief
+version: "1.0"
+description: 把明日預備題材 + 強勢承接 + 事件焦點 + 量化分數，整合成「明日當沖預備清單」中文簡報
+model_hint: gemini-2.5-flash
+max_output_tokens: 3000
+temperature: 0.25
+inputs:
+  - name: target_date
+    required: true
+  - name: mode
+    required: true
+  - name: themes_json
+    required: true
+    desc: next_day_radar 萃取的 carry_themes / event_focus / strong_carry 全部 JSON
+  - name: ranked_candidates_json
+    required: true
+    desc: 候選股排序結果 (含 next_day_score、今日漲幅、量比、強勢度、事件)
+  - name: macro_summary
+    required: false
+  - name: catalyst_text
+    required: false
+output_format: markdown
+template: |
+  你是當沖戰情室的「**盤後策略長**」。請依以下資料寫一份「{target_date} 明日當沖預備清單」(Markdown 中文)。
+  本次模式：**{mode}** (draft=盤後初版 / update=凌晨更新版)
+
+  輸出結構 (請嚴格遵守)：
+
+  ## 1. 明日定調 (3-4 句)
+     - 結合今日台股收盤、美股盤後/盤中、VIX、外資期貨多空 → 給出明日多空判斷
+     - 給出建議「全力做多 / 選擇性做多 / 觀望 / 拉回承接 / 反彈做空」其中之一
+     - 若 mode=update，額外註明今夜美股走勢與 draft 版的偏差調整
+
+  ## 2. 三大焦點 (列點)
+     - **題材延續：** 1-2 個明日續熱題材 + 核心受惠股 (≤3 檔/題材)
+     - **強勢承接：** 2-3 檔今日強勢、明日可能開高的個股 (代號 + 進場邏輯)
+     - **事件驅動：** 明日法說/財報/權息對應的個股
+
+  ## 3. 明日預備首選 Top 6 (表格)
+     代號 | 名稱 | 來源 | 明日分 | 進場邏輯 | 觀察位 (≤10 字) | 風險警示
+     - 從 ranked_candidates_json 取 next_day_score 前 6 名
+     - 「來源」標明 carry_theme / strong_carry / event 其一
+     - 「觀察位」可用今日收盤價、5/10/20MA 等
+
+  ## 4. 進場/停損規則
+     - 統一規則：開盤 5 分鐘觀察、不追高超過 +2%、停損 -1%、停利 +2%
+     - 強勢承接型：拉回 -0.5% 內承接，停損跌破今日收盤 -1%
+     - 事件型：開盤後 30 分內進場為佳，避開法說即將公布前後 5 分鐘
+     - ADR 溢價 > 5% 可放寬至 -1.5%/+3%
+
+  ## 5. 隔夜風險警示
+     - 列 2-3 條今夜或明日要特別注意的事件 (例：FOMC、台指期結算、ADR 大漲跌、消息面)
+     - 若 mode=draft，提示「凌晨會有 update 版根據實際美股走勢調整」
+
+  撰寫原則：
+  - 完全使用繁體中文
+  - 不可編造未提供的資料；表格中的「明日分」直接套 ranked_candidates_json 的 next_day_score
+  - 用機構盤後策略會口吻：精煉、可執行、含具體數字
+  - 篇幅 700-1000 字
+
+  ## 美股盤後/盤中
+  ```
+  {macro_summary}
+  ```
+
+  ## 明日事件
+  ```
+  {catalyst_text}
+  ```
+
+  ## 明日題材 / 事件 / 強勢承接
+  ```json
+  {themes_json}
+  ```
+
+  ## 候選股排序 (前 20 名)
+  ```json
+  {ranked_candidates_json}
+  ```

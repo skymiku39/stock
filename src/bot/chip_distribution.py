@@ -32,6 +32,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from bot.cloud_file_cache import (
+    mirror_file_to_cloud,
+    restore_file_from_cloud,
+    restore_tree_from_cloud,
+)
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -172,6 +177,7 @@ def fetch_distribution_all(
     sess = session or _session()
     today = now_tw().date()
     cache_path = _root_dir(root) / f"raw_{today.isoformat()}.json"
+    restore_file_from_cloud(cache_path, root=root)
     if use_cache and cache_path.exists():
         try:
             age = time.time() - cache_path.stat().st_mtime
@@ -184,14 +190,49 @@ def fetch_distribution_all(
         if resp.status_code != 200:
             log.warning("TDCC HTTP %d", resp.status_code)
             return []
-        data = resp.json()
+        text = resp.content.decode("utf-8-sig", errors="ignore")
+        data: List[Dict[str, Any]]
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                data = parsed
+            else:
+                data = []
+        except Exception:
+            # 自 2025 起 TDCC OpenData 改回 CSV (header: 資料日期,證券代號,持股分級,人數,股數,占集保庫存數比例%)
+            data = _parse_tdcc_csv(text, log)
     except Exception:
         log.exception("TDCC 抓取失敗")
         return []
-    if not isinstance(data, list):
+    if not isinstance(data, list) or not data:
         return []
     cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    mirror_file_to_cloud(cache_path, root=root)
     return data
+
+
+def _parse_tdcc_csv(text: str, logger: logging.Logger) -> List[Dict[str, Any]]:
+    """把 TDCC CSV 轉為與舊版 JSON 對應的 list-of-dict 結構。"""
+    import csv as _csv
+    import io as _io
+
+    out: List[Dict[str, Any]] = []
+    try:
+        reader = _csv.DictReader(_io.StringIO(text))
+        for row in reader:
+            cleaned: Dict[str, Any] = {}
+            for k, v in row.items():
+                if k is None:
+                    continue
+                key = str(k).strip().strip("\ufeff")
+                cleaned[key] = (str(v).strip() if v is not None else "")
+            if cleaned:
+                out.append(cleaned)
+    except Exception:
+        logger.exception("TDCC CSV 解析失敗")
+        return []
+    logger.info("TDCC CSV 解析 -> %d 列", len(out))
+    return out
 
 
 def parse_distribution_for_ticker(
@@ -215,7 +256,13 @@ def parse_distribution_for_ticker(
             label = str(r.get("HoldingsLevel") or "")
         holders = _to_int(r.get("人數") or r.get("number_of_holders"))
         shares = _to_float(r.get("股數") or r.get("number_of_shares"))
-        pct = _to_float(r.get("占集保庫存數比例(%)") or r.get("percent_of_holdings"))
+        # 不同年份/格式 TDCC 欄位名: "占集保庫存數比例(%)" / "占集保庫存數比例%" / percent_of_holdings
+        pct = _to_float(
+            r.get("占集保庫存數比例(%)")
+            or r.get("占集保庫存數比例%")
+            or r.get("占集保庫存數比例 %")
+            or r.get("percent_of_holdings")
+        )
         levels.append(DistributionLevel(
             level=lvl, label=label or str(lvl),
             holders=holders, shares=shares, pct=pct,
@@ -284,6 +331,7 @@ def build_distribution_snapshot(
             root=root, session=session, logger=log,
         )
     else:
+        restore_tree_from_cloud(_root_dir(root), root=root)
         latest_cache = sorted(_root_dir(root).glob("raw_*.json"), reverse=True)
         if not latest_cache:
             raw = []
@@ -297,6 +345,7 @@ def build_distribution_snapshot(
         return None
     # append to history
     hist_path = _ticker_dir(ticker, root) / "history.json"
+    restore_file_from_cloud(hist_path, root=root)
     history: List[Dict[str, Any]] = []
     if hist_path.exists():
         try:
@@ -320,13 +369,16 @@ def build_distribution_snapshot(
     hist_path.write_text(
         json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8",
     )
+    mirror_file_to_cloud(hist_path, root=root)
 
     # 個股目前一週完整明細
+    detail_path = _ticker_dir(ticker, root) / f"{snap.week_date or 'latest'}.json"
     detail_path = _ticker_dir(ticker, root) / f"{snap.week_date or 'latest'}.json"
     detail_path.write_text(
         json.dumps(snapshot_to_dict(snap), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    mirror_file_to_cloud(detail_path, root=root)
     return snap
 
 
@@ -336,6 +388,7 @@ def load_distribution_trend(
     root: Optional[Path] = None,
 ) -> DistributionTrend:
     hist_path = _ticker_dir(ticker, root) / "history.json"
+    restore_file_from_cloud(hist_path, root=root)
     if not hist_path.exists():
         return DistributionTrend(ticker=ticker)
     try:

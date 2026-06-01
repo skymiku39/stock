@@ -23,7 +23,9 @@
 - **Web 儀表板** -- `stock-dashboard` 啟動 Streamlit 介面，一站瀏覽所有功能
 - **主動式 ETF 跟單** -- 28+ 檔主動式 ETF 持股快照、共識加碼/新建倉/抬轎候選計算
 - **MOPS 法說會爬蟲** -- 抓法人說明會行事曆與個股重大訊息
-- **Gemini LLM 分析** -- 免費 API 解析法說會語意、提取情緒/Capex/毛利率指引
+- **🤖 全自動法說研究** -- 自動抓行事曆 + 上網搜尋 (DuckDuckGo + Google News) + 鉅亨新聞 + LLM 結構化分析，不需貼逐字稿
+- **法說會行事曆自動快取** -- 上月 / 本月 / 下月 / +2 月四個月份自動每日更新，dashboard 進入即用
+- **Gemini LLM 分析** -- 免費 API 解析法說會語意、提取情緒/Capex/毛利率指引/催化劑展望
 - **言行反查** -- 對比管理階層語意 vs 籌碼面，偵測疑似出貨/吸籌
 - **Prompt 版本化管理** -- 所有 LLM prompt 集中於 `prompts/*.yaml`，UI 可直接編輯
 - **LLM 呼叫全紀錄** -- 每次呼叫的 input/output/延遲/tokens 自動寫入 JSONL
@@ -32,21 +34,23 @@
 - **大戶 vs 散戶結構** -- TDCC 集保戶股權分散表 (週) 自動拉取與趨勢追蹤
 - **基本面 360 度** -- 月營收 (YoY/MoM)、PER/PBR/殖利率、歷年股利、季度 EPS、三率
 - **技術面指標** -- TWSE STOCK_DAY 日 K + MA/MACD/RSI/KD/布林 + 訊號摘要
+- **K 線型態判讀** -- 單根 K 棒自動分類為 16 種型態 (大/中/小紅黑K、鎚子/倒鎚、紡錘、十字/T/倒T/一字線)，附偏多偏空與市場訊號
 - **Q1～Q4 季報節奏** -- 滾動 EPS、季度營收聚合、季節性焦點框架
 - **一鍵研究管線** -- `stock-auto-research` 把 ETF×籌碼×法說×LLM×每日簡報全部串連
-- **K 線看板 (Stock Board)** -- 多檔股票一覽，每檔附 mini K 線縮圖、1/5/20 日漲跌幅、量比，可一鍵更新所有 K 線並直接推送到 Google Sheets
+- **K 線看板 (Stock Board)** -- 三種顯示模式 (縮圖 grid / 並排大圖 / 單檔專注)、9 段時間範圍 (1 個月 ~ 10 年 / 自訂日期)、可手動 Y 軸縮放、批次分月往前抓 1/2/3/5/10 年歷史，並直接推送到 Google Sheets
 - **個股總覽 Watchlist** -- 表格化呈現多檔個股，四時間框架評分排序篩選
 - **個股深入分析** -- 單檔股票完整 KPI + 4 張量表卡 + 6 個分頁 (分析/原資料/分析數據/購買策略/現況/歷史)
 - **評分量表系統** -- 六個 factor × 四時間框架 (當沖/短/中/長) 加權算分，附完整策略 (進場/停損/停利/部位)
 - **本地 SQLite 冷/溫資料庫** -- 集中管理公司基本面、ETF Meta、月營收、季報、watchlist、**歷史日 K 線**；Cache-Aside 降低 API 用量
 - **歷史 K 線入庫** -- TWSE 抓到的 OHLCV 自動寫入 `price_history` table，跨機可同步、可離線分析
 - **Google Sheets 雲端同步** -- 多台電腦/手機共用同一份資料 (含歷史 K 線)；推/拉/智能同步三鍵搞定，可接 Google Forms 從手機新增股票
+- **Google Drive 快取鏡像** -- 可設定 `GOOGLE_CACHE_DIR`，讓已抓取的 JSON/CSV/PDF 快取在多台電腦間共用，避免重複抓 TWSE/MOPS/yfinance
 
 ## 可以買賣的市場與限制
 
 | 市場 | 角色 | 自動下單 | 資料來源 |
 |------|------|:--------:|---------|
-| **台股** (上市 / 上櫃) | 真實/模擬交易 | ✅ (透過永豐 Shioaji) | Shioaji 即時行情 + TWSE OpenAPI |
+| **台股** (上市 / 上櫃) | 真實/模擬交易 | ✅ (透過永豐 Shioaji) | Shioaji 即時行情 + TWSE / TPEx OpenAPI (日K、月營收、估值、季報、籌碼皆涵蓋上市與上櫃) |
 | **美股 / ADR** | 純分析 | ❌ | yfinance (盤後快照) |
 | **加權指 / SOX / VIX** | 純分析 (跨市場連動) | ❌ | yfinance |
 | 期貨、選擇權、興櫃 | — | ❌ (未實作) | — |
@@ -306,9 +310,10 @@ uv run streamlit run src/bot/dashboard.py
 | 報表分析 | 自動列出 `data/reports/` 的 report/signal CSV，含篩選、走勢圖、下載 |
 | 交易紀錄 | 列出 `data/trades_*.csv`，自動加總買賣金額並繪圖 |
 | **⚡ 今日當沖戰情室** | 鉅亨網新聞 → LLM 萃取題材 → 候選股 → 當沖分排序 → LLM 戰情簡報 (主題驅動選股) |
-| **📊 K 線看板** | 多檔股票一覽：摘要表 (1/5/20 日 %、量比、近 60 高/低) + mini K 線縮圖 + 完整 K 線 + 一鍵更新 + Push price_history 到 Sheets |
+| **🌙 明日當沖關注** | 盤後/凌晨跑：題材延續 + 今日強勢承接 + 明日法說事件 → next_day_score 排序 → LLM 明日預備清單 (draft / update 雙版本) |
+| **📊 K 線看板** | 三模式 (縮圖 grid / 並排大圖 / 單檔專注) + 9 段時間範圍 (1m~10y / 自訂) + 手動 Y 軸 + 多面板選擇 (K/量/MACD/RSI/KD/布林) + 分月批次往前抓 1~10 年 + Push price_history 到 Sheets + 摘要表「K 線型態」欄 (16 種型態自動判讀) |
 | **個股總覽** | 自訂 Watchlist 表格，四時間框架 × 9 factor 加權評分 (含美股連動)、排序、過濾、CSV 匯出 |
-| **個股深入分析** | 單檔 360 度視角，11 個分頁：分析 / 基本面 / 技術面 / 籌碼面 / 股利政策 / 季報 Q1-Q4 / **美股連動** / 原始資料 / 購買策略 / 目前狀況 / 歷史狀況 |
+| **個股深入分析** | 單檔 360 度視角，11 個分頁：分析 / 基本面 / **技術面 (含 K 線型態判讀 + 近 10 根型態表)** / 籌碼面 / 股利政策 / 季報 Q1-Q4 / **美股連動** / 原始資料 / 購買策略 / 目前狀況 / 歷史狀況 |
 | 自動化管線 | 一鍵跑完 ETF + 籌碼 + 法說 + **美股** + LLM + 每日簡報 + 跨市場簡報 |
 | **美股 / 跨市場** | S&P/NASDAQ/SOX/VIX/加權 + 重點美股 + ADR 溢價 + LLM 跨市場簡報 + 供應鏈對照表編輯 |
 | 主動 ETF 追蹤 | 28+ 檔主動式 ETF 清單、URL 設定、一鍵自動抓取、CSV 匯入、Top10 權重圖 |
@@ -350,6 +355,82 @@ uv run stock-gemini-test
 `stock-gemini-test` 會讀取 `.env`、建立 Gemini client、送出一段短 prompt，
 並回報模型、延遲與 token metadata；成功後再執行下方自動化研究管線。
 
+### 🤖 全自動 LLM 個股研究 (新)
+
+「LLM 法說分析」過去要使用者手動貼逐字稿；新版**全程無人值守**：
+
+```bash
+uv run stock-llm-research                  # 跑 watchlist 所有檔
+uv run stock-llm-research 2330,2317,3231   # 指定多檔
+uv run stock-llm-research --upcoming       # 加入「未來 14 天有法說會」的個股
+uv run stock-llm-research --refresh        # 略過 12h 快取，強制重打 LLM
+uv run stock-llm-research --no-web         # 略過網路搜尋 (省 API)
+```
+
+流程：
+1. **自動更新 MOPS 法說會行事曆** (上月 / 本月 / 下月 / +2 月)
+2. 對每檔 ticker 自動彙整素材：
+   * MOPS 重大訊息近一年
+   * 鉅亨網今日新聞 (含此股代號的)
+   * **DuckDuckGo HTML 搜尋** + **Google News RSS** (多個 query 聚合)
+   * 部分高品質網頁抓主要原文
+   * 此股近一年舉行過 / 未來 60 天即將舉行的法說會
+3. 餵 Gemini `research_ticker` prompt → 結構化 JSON
+4. 若有籌碼面資料 → 自動跑 `logic_check` 言行反查
+5. 結果寫到 `data/auto_llm/<ticker>.json` 並 append `data/auto_llm/research_log.jsonl`
+
+每個 ticker 12 小時內不會重複打 API；可用 `--refresh` 強制。
+
+### 📅 法說會行事曆自動快取
+
+```bash
+uv run stock-calendar-update                # 自動抓上月 / 本月 / 下月 / +2 月
+uv run stock-calendar-update --upcoming 14  # 抓完印出未來 14 天的法說會
+```
+
+結果存在 `data/calendar/conferences_<YYYY-MM>.json`，dashboard、
+`stock-llm-research`、`stock-auto-research` 都會直接吃這份快取。
+
+排程建議 (Windows Task Scheduler / cron 每天 06:30)：
+```
+uv run stock-calendar-update --upcoming 14
+uv run stock-llm-research --upcoming
+```
+
+dashboard 「LLM 法說分析」頁進入時也會自動 ensure 行事曆「24 小時內」是新鮮的；
+過期才重抓，可手動點 「🔄 立即重抓」按鈕強制。
+
+### 🤖 哪些操作會呼叫 LLM (消耗 Gemini API 額度)？
+
+> 所有「會打 Gemini」的按鈕在 dashboard 都已加上 **🤖** 前綴，
+> 滑鼠懸停 (`help=`) 還會顯示詳細消耗說明。側欄會顯示今日累計 LLM 呼叫筆數與 tokens。
+
+| 觸發點 | 操作 / 按鈕 | 呼叫類型 | 大致次數 |
+|--------|------------|---------|---------|
+| 🤖 LLM 法說分析 (頁) | 用 Gemini 分析 / 執行反查 | **直接** | 1-2 次 / 按 |
+| 🤖 自動化管線 (頁) | 立即執行管線 (LLM toggle 開) | **直接** | 數次 ~ 數十次 (依焦點數) |
+| 🤖 主動 ETF 追蹤 (頁) | 立即抓取所有 (有 URL 的) | **直接** | 每檔 ETF 1 次 |
+| 🤖 今日當沖戰情室 (頁) | 重抓新聞 + 重跑 / 用快取重跑 | **直接** | 至少 2 次 (theme_radar + intraday_brief) |
+| 🤖 明日當沖關注 (頁) | 跑 draft (盤後) / 跑 update (凌晨) | **直接** | 至少 2 次 (next_day_radar + next_day_brief) |
+| 🤖 美股 / 跨市場 (頁) | 呼叫 Gemini 產出簡報 | **直接** | 1 次 |
+| 🤖 個股深入分析 (頁) | 分析 / 強制重抓全部資料 | **隱式自動** | 該檔缺 LLM 法說時自動 1 次 (12h 快取) |
+| 🤖 個股總覽 (頁) | 計算評分 | **隱式自動** | 對每檔缺 LLM 法說的個股各 1 次 |
+| `stock-auto-research` (CLI) | 整段流程 | **直接** | 焦點檔數 + 1 (每日簡報) |
+| `stock-intraday` (CLI) | 整段流程 | **直接** | 至少 2 次 |
+| `stock-nextday` (CLI) | `--mode draft / update` | **直接** | 至少 2 次 (next_day_radar + next_day_brief) |
+| `stock-macro-update --brief` (CLI) | `--brief` flag | **直接** | 1 次 |
+| Prompt 管理 / LLM 呼叫紀錄 (頁) | 編輯 / 檢視 | ❌ 不呼叫 | 0 |
+| 其他頁面 (組態/資料庫/風控/報表/...) | — | ❌ 不呼叫 | 0 |
+
+**控管方式**：
+
+* **想完全不消耗 LLM**：清空 `.env` 的 `GEMINI_API_KEY`。
+  所有自動 LLM 都會 graceful-skip，「直接」按鈕會被 disable 或退回純規則式。
+* **想知道實際用了多少**：到 dashboard 「⚙️ LLM 呼叫紀錄」頁
+  按日期看每筆 input / output / 延遲 / tokens；側欄會即時顯示今日累計。
+* **想避免重複呼叫**：自動 LLM 預設 12 小時內共用快取
+  (`data/auto_llm/<ticker>.json`)，重複按「分析」不會重打。
+
 ### 一鍵自動化研究管線
 
 把所有功能串成單一 pipeline：
@@ -361,14 +442,19 @@ uv run stock-auto-research --pdf 2330=tsmc.pdf   # 額外送一份法說會 PDF
 ```
 
 執行流程：
+0. **法說會行事曆自動更新** — 抓 MOPS 上月/本月/下月/+2 月，
+   並把「未來 14 天有法說會」的個股全部納入焦點清單
 1. **ETF 持股自動抓取** — 依 `data/active_etfs.json` 中每檔 ETF 的 `holdings_url`
    抓網頁，餵給 Gemini 的 `extract_etf_holdings` prompt 抽出結構化 JSON，
    存為 `data/etf_holdings/<symbol>/<YYYY-MM-DD>.csv`
 2. **共識計算** — 計算 Top 共識持股、共識新建倉、共識加碼
-3. **焦點個股** — 自動取「被 ≥N 檔 ETF 持有」+「新建倉/共識加碼」+ 使用者額外指定
+3. **焦點個股** — 取「被 ≥N 檔 ETF 持有」+「新建倉/共識加碼」
+   +「未來 14 天有法說會」+ 使用者額外指定
 4. **籌碼面自動拉取** — 對每個焦點個股呼叫 TWSE OpenAPI，
    取近 N 日外資/投信/自營商/借券/融資/鉅額交易
 5. **法說會 LLM 解析** — 若有提供逐字稿/PDF，呼叫 `analyze_presentation` prompt
+5a. **🤖 自動研究 (新)** — 對所有焦點個股自動「行事曆 + 上網搜尋 + LLM」，
+   不需要逐字稿；結果寫到 `data/auto_llm/<ticker>.json`
 6. **言行反查** — 配對 (法說情緒, 籌碼動向) 呼叫 `logic_check`
 7. **每日簡報** — 把所有結果送進 `daily_brief` prompt，產出 Markdown 報告
 
@@ -419,6 +505,63 @@ uv run stock-intraday --limit 30       # 候選 30 檔
 - `src/bot/intraday_cli.py` — `stock-intraday` 入口
 - `prompts/theme_radar.yaml` — LLM 萃取題材 (輸出 JSON)
 - `prompts/intraday_brief.yaml` — LLM 寫戰情簡報 (輸出 Markdown)
+
+---
+
+### 🌙 明日當沖關注 (next_day_watch_pipeline.py)
+
+**定位**：與「今日當沖戰情室」互補。今日當沖在盤前 08:30 跑，
+明日當沖關注則在 **盤後 14:00-18:00**（draft 初版）與 **隔日凌晨 02:00-06:00**（update 更新版）跑，
+專為「明日當沖預備」設計，綜合三大候選來源：
+
+1. **題材延續 (carry_themes)** — 沿用今日 / 今晚熱門題材，挑明日續熱的補漲、二線、設備代工
+2. **強勢承接 (strong_carry)** — 今日收盤漲幅 > 0、量比放大、外資/投信買超的個股 (規則層自動掃描 + LLM 篩選)
+3. **明日事件 (event_focus)** — 法說 / 財報 / 權息 / 政策事件對應受惠股 (來源：`conference_calendar` + 新聞)
+
+```
+[今日新聞] + [今日 K 線/籌碼掃描 (watchlist + ETF + 明日法說)] + [美股 macro] + [明日法說]
+                │
+                ▼
+        ┌───────────────────┐
+        │ LLM next_day_radar │ → carry_themes / event_focus / strong_carry
+        └───────────────────┘
+                │
+                ▼
+    合併池 + 算 next_day_score (50% 強勢 + 30% 題材熱 + 20% 事件加分)
+                │
+                ▼
+        ┌────────────────────┐
+        │ LLM next_day_brief │ → 明日預備清單 (定調 + 三大焦點 + Top 6 + 進場規則)
+        └────────────────────┘
+```
+
+**CLI (建議排程：每天 14:30 跑 draft、隔日 02:30 跑 update)**
+
+```bash
+uv run stock-nextday                       # 預設 draft (盤後初版)
+uv run stock-nextday --mode update         # 凌晨更新版 (自動 force_refresh_macro)
+uv run stock-nextday --refresh-news        # 強制重抓新聞
+uv run stock-nextday --limit 30            # 排序輸出 30 檔
+uv run stock-nextday --scan-limit 80       # 強勢承接掃描範圍 80 檔
+```
+
+**儀表板 → 研究與分析 → 明日當沖關注**：
+- 三顆按鈕：載入最新 / 跑 draft / 跑 update
+- 上方：目標明日交易日 + 模式 + 市場氛圍
+- 中段：三大來源分頁 (題材延續 / 明日事件 / 強勢承接 LLM)
+- 下段：候選股表格 (明日分 / 強勢分 / 今日% / 量比 / 題材 / 事件 / 進場邏輯)
+- 底部：完整 LLM 預備清單簡報 (Markdown)
+
+**輸出**：
+- `data/next_day_watch/<明日日期>/report.json` (draft)
+- `data/next_day_watch/<明日日期>/report_update.json` (update)
+- `data/next_day_watch/<明日日期>/next_day_brief.md` / `next_day_brief_update.md`
+
+**新增模組**:
+- `src/bot/next_day_watch_pipeline.py` — 主流程編排 + next_day_score 規則層
+- `src/bot/next_day_watch_cli.py` — `stock-nextday` 入口
+- `prompts/next_day_radar.yaml` — LLM 萃題材/事件/強勢承接 (JSON)
+- `prompts/next_day_brief.yaml` — LLM 寫明日預備清單 (Markdown)
 
 ---
 
@@ -507,6 +650,7 @@ Windows Task Scheduler 範例：每天 06:30 跑一次 `uv run stock-macro-updat
 ```
 prompts/
   analyze_presentation.yaml    # 解析法說會逐字稿
+  research_ticker.yaml         # 🤖 全自動研究 (行事曆+搜尋+新聞 → 結構化 JSON)
   logic_check.yaml             # 言行反查
   extract_etf_holdings.yaml    # 從 HTML/PDF 抽 ETF 持股 JSON
   daily_brief.yaml             # 每日盤後簡報
@@ -547,9 +691,15 @@ src/bot/
   chip_distribution.py     # TDCC 集保戶股權分散 (大戶 vs 散戶)
   fundamentals_fetcher.py  # TWSE 月營收/PER/PBR/殖利率/股利 + 季報手動匯入
   technicals.py            # TWSE 日K + MA/MACD/RSI/KD/布林 + 訊號摘要
+  candle_patterns.py       # 單根 K 棒型態辨識 (16 種型態 + 偏多偏空 + 市場訊號)
   quarterly.py             # Q1-Q4 季度框架 + 滾動 EPS + 季度營收聚合
   market_macro.py          # 美股/加權/VIX/ADR 溢價抓取 + 供應鏈對照查詢 (yfinance)
   macro_update.py          # stock-macro-update CLI (抓 macro + 可選 LLM 簡報)
+  web_search.py            # 免註冊網頁搜尋 (DuckDuckGo HTML + Google News RSS) + 抓網頁文字
+  conference_calendar.py   # 法說會行事曆自動抓取與本地快取 (上月/本月/下月/+2 月)
+  conference_calendar_cli.py # stock-calendar-update CLI 入口
+  auto_llm.py              # 全自動 LLM 個股研究 (行事曆 + 搜尋 + 新聞 + LLM + 反查)
+  llm_research_cli.py      # stock-llm-research CLI 入口
   preflight.py             # 交易可行性檢查邏輯 (六大區塊體檢)
   preflight_cli.py         # stock-preflight CLI 入口
   risk_guard.py            # 資金/風險守門員 (12 道閘門 + Kill Switch)
@@ -565,6 +715,7 @@ src/bot/
   cloud_sync.py            # Google Sheets 雙向同步 (push / pull / 智能 sync，含 price_history)
 prompts/
   analyze_presentation.yaml
+  research_ticker.yaml         # 全自動研究 (行事曆+搜尋+新聞 → 結構化 JSON)
   logic_check.yaml
   extract_etf_holdings.yaml
   daily_brief.yaml
@@ -588,16 +739,62 @@ tests/
 
 ## K 線看板 (Stock Board)
 
-「📊 K 線看板」頁面把多檔股票的 K 線一次攤開，省去逐檔點開的步驟。功能要點：
+「📊 K 線看板」頁面把多檔股票的 K 線一次攤開，省去逐檔點開的步驟。重構後支援多種看板模式、長時段歷史以及批次往前抓取。
 
-| 區塊 | 內容 |
-|------|------|
-| **監控池來源** | `Watchlist` / `DB 已有資料的全部 symbol` / `自訂` (手動輸入代號) |
-| **摘要表** | 收盤、1/5/20 日漲跌 %、量比、近 60 高/低、`vol_ratio`，可依任一欄排序、只看上漲、下載 CSV |
-| **mini K 線縮圖** | 每檔以紅綠蠟燭呈現近 30/60/120/250 日走勢，2/3/4 欄可選 |
-| **完整 K 線** | 下拉選一檔 → MA(5/20/60) 疊圖 + 成交量子圖 + 原始 OHLCV 表 |
-| **一鍵更新所有 K 線** | 依清單逐檔呼叫 TWSE STOCK_DAY 取近 6 個月日 K，寫進 `price_history` SQLite table |
-| **Push / Pull price_history** | 直接把這張 table 推到 Google Sheets，多機共用同一份歷史資料 |
+### 三種顯示模式
+
+| 模式 | 適用情境 |
+|------|----------|
+| **縮圖 grid** (預設) | 多檔一覽，每檔 mini 蠟燭縮圖；2/3/4/6 欄可調 |
+| **並排大圖** | 選 2~4 檔做完整 K + 量比較；可手動 Y 軸統一刻度 |
+| **單檔專注** | 進入「完整 K 線工作台」，含時間範圍/Y軸/面板選擇/往前抓取等所有控制 |
+
+### 時間範圍 (9 段)
+
+`近 1 個月` / `近 3 個月` / `近 6 個月` (預設) / `近 1 年` / `近 2 年` / `近 3 年` / `近 5 年` / `近 10 年` / `全部` / `自訂日期`。
+單檔專注模式 (含「個股深入分析 → 技術面」) 還可選 **自訂起訖日**。
+
+### 面板選擇
+
+可任選顯示：📈 K 線 + 均線 / 📊 成交量 / MACD / RSI / KD / 布林通道。
+排列方式三選一：**堆疊** (預設) / **分頁** / **並排兩欄**。
+
+### Y 軸範圍
+
+預設自動 (`Scale(zero=False)`)，需要放大細節時切「手動」可填入 min/max。
+並排大圖模式亦支援統一 Y 軸，方便跨檔比較。
+
+### 一鍵更新所有 K 線 (分月抓取)
+
+選清單後點「🔄 一鍵更新所有 K 線」，可選範圍 3 個月 / 6 個月 / 1 年 / 2 年 / 3 年 / 5 年 / 10 年。
+底層呼叫 `fetch_kline_range()` **分月** 抓 + 進度條，新增資料同步寫進 `price_history` 與 `data/technicals/<ticker>/daily_kline.csv`。
+
+### ⏪ 批量往更早抓取 (5/10 年歷史)
+
+不想一次抓滿 10 年？用「批量往更早抓取」展開區：
+
+- **往前 N 年**: 1 / 2 / 3 / 5 / 10
+- **每月請求間隔**: 0.2~2.0 秒 (預設 0.5 s，避免 TWSE rate limit)
+- **進度顯示**: 外圈是「目前抓到第幾檔」，內圈是「該檔抓到第幾個月」，可隨時關閉視窗
+- **斷點續抓**: 已存在的月份預設跳過 (邊界月仍會重抓，保證資料一致)
+
+實際抓取邏輯：
+
+```text
+fetch_kline_range(ticker, start_date, end_date,
+                  direction="backward", request_delay_sec=0.5,
+                  on_progress=cb)
+```
+分月迴圈 + `time.sleep(delay)` + 進度回呼 + 自動合併到既有 CSV/DB。
+
+```python
+from bot.technicals import (
+    fetch_kline_range, extend_kline_backward, get_kline_coverage,
+)
+cov = get_kline_coverage("2330")  # {'earliest': '2024-01-02', 'latest': '2026-05-28', 'rows': 580}
+# 從現有最早日期再往前抓 5 年
+extend_kline_backward("2330", years_back=5, request_delay_sec=0.6)
+```
 
 底層儲存：所有 K 線存在 `data/stock.db` 的 `price_history` table，schema 為
 `(symbol, date) PK + open / high / low / close / volume / source / note / updated_at`。
@@ -673,7 +870,7 @@ dashboard 的「個股深入分析」頁採用 **3D + 催化劑** 視角，把�
 | RSI(14) + 超買超賣 | `technicals.add_rsi` | 同上 |
 | KD (Stochastic 9,3,3) | `technicals.add_kd` | 同上 |
 | 布林通道 (20, 2σ) | `technicals.add_bollinger` | 同上 |
-| 日 K + 均線 + 成交量 + MACD + RSI 多面板圖 | dashboard 技術面分頁 | Altair |
+| 日 K + 均線 + 成交量 + MACD + RSI + KD + 布林多面板圖；可自訂時間範圍 (1m~10y / 自訂日期) 與 Y 軸範圍 | dashboard 技術面分頁 K 線工作台 | Altair |
 
 ### 三、籌碼面 (Chip)：追蹤主力資金流向
 

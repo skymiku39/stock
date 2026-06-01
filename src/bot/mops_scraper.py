@@ -22,6 +22,7 @@ from urllib.parse import urljoin
 
 import requests
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder
 
 try:
@@ -300,6 +301,9 @@ def download_file(
     """串流下載檔案。"""
     log = logger or get_logger("mops")
     sess = session or _new_session()
+    restore_file_from_cloud(dest)
+    if dest.exists():
+        return dest
     try:
         mk_folder(str(dest.parent))
         with sess.get(url, stream=True, timeout=30) as r:
@@ -309,6 +313,7 @@ def download_file(
                     if chunk:
                         f.write(chunk)
         log.info("下載完成: %s -> %s", url, dest)
+        mirror_file_to_cloud(dest)
         return dest
     except Exception:
         log.exception("檔案下載失敗: %s", url)
@@ -319,6 +324,7 @@ def extract_pdf_text(path: Path, max_pages: int = 100) -> Optional[PresentationT
     """抽 PDF 全文。若未安裝 pypdf 則回 None。"""
     if not _HAS_PYPDF:
         return None
+    restore_file_from_cloud(path)
     try:
         reader = PdfReader(str(path))
         pages = min(len(reader.pages), max_pages)

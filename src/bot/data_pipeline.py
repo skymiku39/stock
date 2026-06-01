@@ -48,6 +48,7 @@ from bot.llm_analyzer import (
     gemini_call,
     logic_check,
 )
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -76,6 +77,9 @@ class PipelineConfig:
     fetch_etf_holdings: bool = True
     fetch_chips: bool = True
     fetch_macro: bool = True
+    update_calendar: bool = True
+    auto_focus_upcoming_days: int = 14
+    auto_research_focus: bool = True
     run_llm_analysis: bool = True
     generate_brief: bool = True
     generate_us_brief: bool = True
@@ -92,6 +96,9 @@ class PipelineRun:
     ended_at: str = ""
     duration_sec: float = 0.0
     config: Dict[str, Any] = field(default_factory=dict)
+
+    calendar_summary: Dict[str, Any] = field(default_factory=dict)
+    auto_research_summary: List[Dict[str, Any]] = field(default_factory=list)
 
     etf_fetch_summary: Dict[str, Any] = field(default_factory=dict)
     consensus_top: List[Dict[str, Any]] = field(default_factory=list)
@@ -135,6 +142,9 @@ def run_full_pipeline(
             "fetch_etf_holdings": config.fetch_etf_holdings,
             "fetch_chips": config.fetch_chips,
             "fetch_macro": config.fetch_macro,
+            "update_calendar": config.update_calendar,
+            "auto_research_focus": config.auto_research_focus,
+            "auto_focus_upcoming_days": config.auto_focus_upcoming_days,
             "run_llm_analysis": config.run_llm_analysis,
             "generate_brief": config.generate_brief,
             "generate_us_brief": config.generate_us_brief,
@@ -153,9 +163,50 @@ def run_full_pipeline(
     )
 
     t0 = time.time()
+    today = started.date()
+
+    # ---- 0. 法說會行事曆自動更新 (含上月 / 本月 / 下月 / +2 月) ----
+    upcoming_calendar_tickers: List[str] = []
+    if config.update_calendar:
+        log.info("[0/6] 自動更新 MOPS 法說會行事曆 …")
+        try:
+            from bot.conference_calendar import (
+                update_calendar as _update_cal,
+                upcoming_conferences,
+                upcoming_tickers as _upcoming_tickers,
+            )
+
+            summary = _update_cal(root=config.project_root, logger=log)
+            upcoming = upcoming_conferences(
+                days=config.auto_focus_upcoming_days,
+                root=config.project_root,
+            )
+            upcoming_calendar_tickers = _upcoming_tickers(
+                days=config.auto_focus_upcoming_days, root=config.project_root,
+            )
+            run.calendar_summary = {
+                "months_fetched": summary,
+                "upcoming_count": len(upcoming),
+                "upcoming_window_days": config.auto_focus_upcoming_days,
+                "upcoming_tickers": upcoming_calendar_tickers,
+                "upcoming_preview": [
+                    {"date": e.date.isoformat(), "ticker": e.ticker,
+                     "company": e.company, "note": e.note}
+                    for e in upcoming[:30]
+                ],
+            }
+            log.info(
+                "行事曆完成: %d 個月, 未來 %d 天 %d 場 (%d 檔)",
+                len(summary), config.auto_focus_upcoming_days,
+                len(upcoming), len(upcoming_calendar_tickers),
+            )
+        except Exception as e:
+            log.exception("行事曆更新失敗")
+            run.errors.append(f"calendar: {e}")
+    else:
+        log.info("[0/6] (略) 行事曆自動更新已關閉")
 
     # ---- 1. ETF 持股自動抓取 ----
-    today = started.date()
     if config.fetch_etf_holdings:
         log.info("[1/6] 自動抓取 ETF 持股 …")
         try:
@@ -234,9 +285,16 @@ def run_full_pipeline(
             focus.add(c.ticker)
     for s in news + adds:
         focus.add(s.ticker)
+    for t in upcoming_calendar_tickers:
+        if t:
+            focus.add(t)
     focus_list = sorted(focus)
     run.focus_tickers = focus_list
-    log.info("[3/6] 焦點個股 %d 檔: %s", len(focus_list), focus_list[:10])
+    log.info(
+        "[3/6] 焦點個股 %d 檔 (含未來 %d 天法說會 %d 檔): %s",
+        len(focus_list), config.auto_focus_upcoming_days,
+        len(upcoming_calendar_tickers), focus_list[:10],
+    )
 
     # ---- 4. 籌碼面 ----
     chip_map: Dict[str, ChipSummary] = {}
@@ -282,6 +340,56 @@ def run_full_pipeline(
                 run.errors.append(f"llm_{pi.ticker}: {e}")
     else:
         log.info("[5/6] (略) 法說會 LLM 分析未啟用或無輸入")
+
+    # ---- 5a. 自動研究 (網路搜尋 + 行事曆 + LLM)：補強無逐字稿的個股 ----
+    if (
+        config.run_llm_analysis
+        and config.auto_research_focus
+        and client.enabled
+        and focus_list
+    ):
+        log.info(
+            "[5a/6] 對 %d 檔焦點個股自動研究 (網路搜尋 + 行事曆 + LLM) …",
+            len(focus_list),
+        )
+        try:
+            from bot.auto_llm import auto_analyze_ticker
+
+            already_done = {pi.ticker for pi in config.presentation_inputs}
+            for t in focus_list:
+                if t in already_done:
+                    continue
+                try:
+                    chip_ctx = (
+                        summary_to_chips_context(chip_map[t])
+                        if t in chip_map else None
+                    )
+                    res = auto_analyze_ticker(
+                        t,
+                        root=config.project_root,
+                        name_hint="",
+                        client=client,
+                        chips=chip_ctx,
+                        force_refresh=False,
+                        logger=log,
+                    )
+                    if res:
+                        run.auto_research_summary.append({
+                            "ticker": t,
+                            "sentiment": res.get("sentiment"),
+                            "sentiment_score": res.get("sentiment_score"),
+                            "confidence": res.get("confidence"),
+                            "catalyst_outlook": res.get("catalyst_outlook", "")[:160],
+                            "logic_verdict": (res.get("logic_check") or {}).get("verdict"),
+                            "source": res.get("source"),
+                        })
+                except Exception:
+                    log.exception("[%s] 自動研究例外 (繼續)", t)
+        except Exception as e:
+            log.exception("自動研究批次失敗")
+            run.errors.append(f"auto_research: {e}")
+    else:
+        log.info("[5a/6] (略) 自動研究未啟用或 LLM 未啟用")
 
     # ---- 5b. 美股 / 跨市場資料 ----
     macro_snap_dict: Dict[str, Any] = {}
@@ -399,14 +507,20 @@ def run_full_pipeline(
 
 def _persist_run(run: PipelineRun, out_dir: Path, log: logging.Logger) -> None:
     try:
-        (out_dir / "run.json").write_text(
+        run_path = out_dir / "run.json"
+        run_path.write_text(
             json.dumps(asdict(run), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        mirror_file_to_cloud(run_path)
         if run.daily_brief_md:
-            (out_dir / "daily_brief.md").write_text(run.daily_brief_md, encoding="utf-8")
+            p = out_dir / "daily_brief.md"
+            p.write_text(run.daily_brief_md, encoding="utf-8")
+            mirror_file_to_cloud(p)
         if run.us_brief_md:
-            (out_dir / "us_market_brief.md").write_text(run.us_brief_md, encoding="utf-8")
+            p = out_dir / "us_market_brief.md"
+            p.write_text(run.us_brief_md, encoding="utf-8")
+            mirror_file_to_cloud(p)
     except Exception:
         log.exception("Pipeline run 寫檔失敗")
 
@@ -415,6 +529,7 @@ def _append_manifest(run: PipelineRun, root: Path, log: logging.Logger) -> None:
     manifest = root / "data" / "pipeline_runs" / "manifest.jsonl"
     mk_folder(str(manifest.parent))
     try:
+        restore_file_from_cloud(manifest, root=root)
         with manifest.open("a", encoding="utf-8") as f:
             json.dump({
                 "run_id": run.run_id,
@@ -428,12 +543,14 @@ def _append_manifest(run: PipelineRun, root: Path, log: logging.Logger) -> None:
                 "output_dir": run.output_dir,
             }, f, ensure_ascii=False)
             f.write("\n")
+        mirror_file_to_cloud(manifest, root=root)
     except Exception:
         log.exception("manifest 寫入失敗")
 
 
 def list_pipeline_runs(root: Path) -> List[Dict[str, Any]]:
     manifest = root / "data" / "pipeline_runs" / "manifest.jsonl"
+    restore_file_from_cloud(manifest, root=root)
     if not manifest.exists():
         return []
     out: List[Dict[str, Any]] = []
@@ -452,6 +569,7 @@ def list_pipeline_runs(root: Path) -> List[Dict[str, Any]]:
 
 def load_pipeline_run(root: Path, run_id: str) -> Optional[PipelineRun]:
     p = root / "data" / "pipeline_runs" / run_id / "run.json"
+    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return None
     try:

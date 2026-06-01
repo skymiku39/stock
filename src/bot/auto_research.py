@@ -63,6 +63,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-llm", action="store_true", help="跳過 LLM 法說分析")
     parser.add_argument("--no-brief", action="store_true", help="不產出每日簡報")
     parser.add_argument(
+        "--no-calendar", action="store_true",
+        help="不自動更新法說會行事曆 (預設會自動更新)",
+    )
+    parser.add_argument(
+        "--no-auto-research", action="store_true",
+        help="不對焦點個股自動跑 LLM 研究 (預設啟用)",
+    )
+    parser.add_argument(
+        "--upcoming-days", type=int, default=14,
+        help="把未來 N 天有法說會的個股自動納入焦點 (預設 14)",
+    )
+    parser.add_argument(
         "--pdf", action="append", default=[],
         help="附加一份法說會 PDF/TXT，格式 <ticker>=<path>，可重複",
     )
@@ -114,6 +126,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         chip_lookback_days=args.days,
         fetch_etf_holdings=not args.no_etf,
         fetch_chips=not args.no_chips,
+        update_calendar=not args.no_calendar,
+        auto_focus_upcoming_days=args.upcoming_days,
+        auto_research_focus=(not args.no_auto_research) and bool(settings.gemini_api_key),
         run_llm_analysis=(not args.no_llm) and bool(settings.gemini_api_key),
         generate_brief=(not args.no_brief) and bool(settings.gemini_api_key),
         min_consensus_for_focus=args.min_consensus,

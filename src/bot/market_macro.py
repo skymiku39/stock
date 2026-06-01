@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -186,15 +187,60 @@ def _fetch_fx_usdtwd(yf_module: Any, logger: logging.Logger) -> float:
 # ----------------------------------------------------------------------
 
 
+# TWSE OpenAPI：全市場個股當日收盤均價 (含收盤價)。免登入、穩定。
+URL_TWSE_STOCK_DAY_AVG = (
+    "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL"
+)
+
+# 程序內快取：避免每檔 ADR 都重打一次全市場列表。
+_TW_CLOSE_CACHE: Dict[str, float] = {}
+_TW_CLOSE_CACHE_LOADED = False
+
+
+def _load_twse_close_map(logger: logging.Logger) -> Dict[str, float]:
+    """抓 TWSE 全市場收盤價對照表 {ticker: close}，程序內只抓一次。"""
+    global _TW_CLOSE_CACHE_LOADED
+    if _TW_CLOSE_CACHE_LOADED:
+        return _TW_CLOSE_CACHE
+    try:
+        import requests  # 延遲 import，維持模組輕量
+
+        resp = requests.get(
+            URL_TWSE_STOCK_DAY_AVG,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        )
+        if resp.status_code == 200:
+            for row in resp.json() or []:
+                code = str(row.get("Code") or "").strip()
+                close_raw = str(row.get("ClosingPrice") or "").replace(",", "").strip()
+                if not code or not close_raw or close_raw in ("-", "--"):
+                    continue
+                try:
+                    _TW_CLOSE_CACHE[code] = float(close_raw)
+                except ValueError:
+                    continue
+        else:
+            logger.warning("TWSE 收盤價 OpenAPI HTTP %d", resp.status_code)
+    except Exception:
+        logger.exception("TWSE 收盤價 OpenAPI 抓取失敗")
+    _TW_CLOSE_CACHE_LOADED = True
+    return _TW_CLOSE_CACHE
+
+
 def _fetch_tw_close(ticker: str, logger: logging.Logger) -> Optional[float]:
-    """先試 yfinance (例：2330.TW)；失敗時試 TWSE OpenAPI。"""
+    """先試 yfinance (例：2330.TW)；失敗時改用 TWSE OpenAPI 收盤價。"""
     yf = _import_yf()
     if yf is not None:
         for suffix in (".TW", ".TWO"):
             q = _safe_quote(yf, f"{ticker}{suffix}", logger)
             if q and q["price"] > 0:
                 return q["price"]
-    # TODO: 補 TWSE OpenAPI fallback
+    # TWSE OpenAPI fallback (免登入，yfinance 被限流時仍可取得當日收盤)
+    close_map = _load_twse_close_map(logger)
+    close = close_map.get(ticker)
+    if close and close > 0:
+        return close
     return None
 
 
@@ -209,6 +255,7 @@ def _cache_path(date: dt.date, root: Optional[Path]) -> Path:
 
 def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[MacroSnapshot]:
     p = _cache_path(date, root)
+    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return None
     try:
@@ -245,6 +292,7 @@ def _save_cache(snap: MacroSnapshot, root: Optional[Path]) -> Path:
         "adr_premiums": [asdict(x) for x in snap.adr_premiums],
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    mirror_file_to_cloud(p, root=root)
     return p
 
 
@@ -378,6 +426,7 @@ def macro_to_dict(s: MacroSnapshot) -> Dict[str, Any]:
 def load_supply_chain(root: Optional[Path] = None) -> Dict[str, Any]:
     """讀取 data/supply_chain.json (美股 → 台股供應鏈對照)。"""
     p = (root or Path.cwd()) / "data" / "supply_chain.json"
+    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return {"us_stocks": {}}
     try:
@@ -390,6 +439,7 @@ def save_supply_chain(data: Dict[str, Any], root: Optional[Path] = None) -> Path
     p = (root or Path.cwd()) / "data" / "supply_chain.json"
     mk_folder(str(p.parent))
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    mirror_file_to_cloud(p, root=root)
     return p
 
 

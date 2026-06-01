@@ -709,9 +709,9 @@ def compute_scorecard(
     for tf, weights in WEIGHTS.items():
         # 拷貝一份帶上 weight 的 factor 清單
         used_factors: List[FactorScore] = []
-        total = 0.0
         weight_sum = 0.0
         available_sum = 0.0
+        available_score_sum = 0.0
         for fkey, w in weights.items():
             f = factor_funcs[fkey]
             fc = FactorScore(
@@ -720,17 +720,24 @@ def compute_scorecard(
                 sub_scores=dict(f.sub_scores),
             )
             used_factors.append(fc)
-            total += f.score * w
             weight_sum += w
             if f.available:
                 available_sum += w
-        total = total / weight_sum if weight_sum else 50.0
+                available_score_sum += f.score * w
+        # 只用「有資料」的 factor 重新正規化權重；缺資料項不再以中性 50 稀釋總分。
+        # 若完全沒有任何資料則維持中性 50。
+        if available_sum > 0:
+            total = available_score_sum / available_sum
+        else:
+            total = 50.0
 
         action, action_label, color = _action_from_score(total)
         confidence = available_sum / weight_sum if weight_sum else 0.0
         notes: List[str] = []
         if confidence < 0.5:
-            notes.append("⚠ 資料覆蓋率不足 50%，建議補齊籌碼/LLM 後再用")
+            notes.append("⚠ 資料覆蓋率不足 50%，分數僅基於少數可用因子，請補齊資料再參考")
+        elif confidence < 0.8:
+            notes.append(f"ℹ 資料覆蓋率 {confidence:.0%}，部分因子缺資料 (已從加權中剔除)")
         if action in ("STRONG_BUY", "BUY") and any(
             f.key == "risk" and f.score < 40 for f in used_factors
         ):

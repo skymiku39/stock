@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -42,6 +43,7 @@ def _path(root: Optional[Path] = None) -> Path:
 
 def load(root: Optional[Path] = None) -> WatchList:
     p = _path(root)
+    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return WatchList()
     try:
@@ -71,6 +73,7 @@ def save(wl: WatchList, root: Optional[Path] = None) -> Path:
         ),
         encoding="utf-8",
     )
+    mirror_file_to_cloud(p, root=root)
     _sync_to_db(wl, root)
     return p
 

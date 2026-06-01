@@ -39,8 +39,11 @@ stock-dashboard = "bot.dashboard:run"
 stock-auto-research = "bot.auto_research:main"
 stock-macro-update = "bot.macro_update:main"
 stock-intraday = "bot.intraday_cli:main"
+stock-nextday = "bot.next_day_watch_cli:main"
 stock-preflight = "bot.preflight_cli:main"
 stock-gemini-test = "bot.gemini_smoke:main"
+stock-llm-research = "bot.llm_research_cli:main"
+stock-calendar-update = "bot.conference_calendar_cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,76 @@
+id: research_ticker
+version: "1.0"
+description: 個股自動研究 — 整合行事曆、MOPS 重大訊息、新聞、網路搜尋結果，輸出 JSON 研究報告
+model_hint: gemini-2.5-flash
+max_output_tokens: 2048
+temperature: 0.2
+inputs:
+  - name: ticker
+    required: true
+  - name: name
+    required: false
+    desc: 公司名稱 (供 LLM 加強情境理解)
+  - name: today
+    required: true
+    desc: 今日日期 (ISO)
+  - name: upcoming_events
+    required: false
+    desc: 「未來 30 天的法說會 / 重要事件」純文字列表
+  - name: past_events
+    required: false
+    desc: 「過去 90 天的法說會 / 重大訊息」純文字列表
+  - name: news_block
+    required: false
+    desc: 近期新聞摘要清單
+    max_chars: 6000
+  - name: web_block
+    required: false
+    desc: 網路搜尋整理 (DuckDuckGo + Google News + 部分原文)
+    max_chars: 9000
+output_format: json
+template: |
+  你是一位資深台股機構研究員。請依以下「自動上網搜尋並彙整」的素材，
+  為 {ticker} ({name}) 寫出**結構化研究報告**。今天日期：{today}。
+
+  --- 1. 即將發生的事件 / 法說會行事曆 ---
+  {upcoming_events}
+
+  --- 2. 過往法說會 / 重大訊息摘要 ---
+  {past_events}
+
+  --- 3. 新聞精選 ---
+  {news_block}
+
+  --- 4. 網路搜尋與部分原文 ---
+  {web_block}
+
+  分析準則：
+  - 「素材是否充足」直接反映在 confidence；資料少必須降到 0.2 以下
+  - 不要憑空捏造數字，若素材沒提到就在 key_metrics 留 ""
+  - 若有「即將舉行的法說會」要在 catalyst_outlook 明確點名
+  - 若新聞與行事曆出現矛盾、或言論口風變化，請寫進 risks
+  - sentiment 看「整體公開資訊基調」，不是只看單篇文章
+  - 中文撰寫；不可包含 markdown 標記、不可附加說明文字
+  - 輸出**必須**為合法 JSON 物件
+
+  JSON schema:
+  {{
+    "summary": "300 字內中文摘要，含整體基調、近期重要事件、未來看點",
+    "sentiment": "positive | neutral | negative",
+    "sentiment_score": -1.0 到 1.0,
+    "confidence": 0.0 到 1.0,
+    "key_metrics": {{
+      "revenue_guidance": "如有營收指引",
+      "gross_margin_guidance": "毛利率指引",
+      "capex": "資本支出指引",
+      "yoy": "YoY 變化",
+      "qoq": "QoQ 變化"
+    }},
+    "growth_drivers": ["3-5 個關鍵成長驅動因子"],
+    "risks": ["3-5 個風險或疑點"],
+    "capex_signal": "擴張 | 維持 | 收斂 | 未提及",
+    "margin_outlook": "上行 | 維持 | 下行 | 未提及",
+    "catalyst_outlook": "未來 30 天最值得關注的催化劑 (含日期, 沒有就填無)",
+    "news_sentiment": "近期新聞整體基調 (3 句話內)",
+    "evidence_sources": ["最關鍵的 3-5 個資料來源 site/標題，用以追溯"]
+  }}

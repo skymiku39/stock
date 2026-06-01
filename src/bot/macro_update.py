@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cloud_file_cache import mirror_file_to_cloud
 from bot.config import Settings
 from bot.market_macro import (
     fetch_macro_snapshot,
@@ -82,6 +83,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = project_root / "data" / "macro" / f"us_brief_{data.get('asof_date','today')}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(raw, encoding="utf-8")
+    mirror_file_to_cloud(out, root=project_root)
     logger.info("簡報已寫入 %s (prompt=%s v%s)", out, info.get("prompt_id"), info.get("prompt_version"))
     return 0
 

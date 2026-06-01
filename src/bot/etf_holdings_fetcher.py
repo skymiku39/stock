@@ -29,6 +29,7 @@ from bot.active_etf import (
     load_active_etfs,
     save_holdings,
 )
+from bot.cloud_file_cache import mirror_file_to_cloud
 from bot.llm_analyzer import GeminiClient, extract_json, gemini_call
 from bot.utils import get_logger, mk_folder, now_tw
 
@@ -159,6 +160,7 @@ def fetch_and_save_holdings(
             mk_folder(str(raw_dir))
             tmp = raw_dir / f"{result.snapshot_date.isoformat()}.pdf"
             raw_text = _pdf_to_text(resp.content, tmp)
+            mirror_file_to_cloud(tmp, root=root)
             result.raw_text_path = tmp
         else:
             try:
@@ -170,6 +172,7 @@ def fetch_and_save_holdings(
             mk_folder(str(raw_dir))
             tmp = raw_dir / f"{result.snapshot_date.isoformat()}.txt"
             tmp.write_text(raw_text, encoding="utf-8")
+            mirror_file_to_cloud(tmp, root=root)
             result.raw_text_path = tmp
 
         if not raw_text or len(raw_text.strip()) < 50:

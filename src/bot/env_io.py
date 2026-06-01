@@ -277,6 +277,12 @@ ENV_FIELDS: List[EnvField] = [
         help="Google Cloud 的 service account 金鑰 JSON 檔案路徑。"
              "設定步驟見 docs/cloud_sync_setup.md",
     ),
+    EnvField(
+        "GOOGLE_CACHE_DIR", "Google cache folder", "雲端快取資料夾", "str",
+        default="",
+        help="Optional Google Drive Desktop/shared folder. Cached JSON/CSV/PDF files "
+             "under data/ are mirrored here and restored before refetch.",
+    ),
 ]
 
 

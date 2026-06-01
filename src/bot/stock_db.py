@@ -150,6 +150,35 @@ class SyncMeta:
     last_error: str = ""
 
 
+@dataclass
+class LlmAnalysisRow:
+    """LLM 分析歷史紀錄 (任何 prompt、任何 ticker 的單次結果)。
+
+    可同步到 Google Sheets 供日後回放/檢視。
+    """
+
+    id: str                       # ts + prompt_id + ticker 拼出的 PK
+    ts: str                       # ISO 時戳 (台灣時區)
+    ticker: str = ""              # 對應股票 (空字串代表全市場 prompt)
+    prompt_id: str = ""           # e.g. analyze_presentation
+    prompt_version: str = ""
+    model: str = ""
+    sentiment: str = ""           # positive / neutral / negative
+    sentiment_score: float = 0.0  # -1.0 ~ 1.0
+    confidence: float = 0.0
+    summary: str = ""             # 200 字內中文摘要
+    drivers: str = ""             # 多筆用 ; 連接
+    risks: str = ""               # 多筆用 ; 連接
+    raw_output: str = ""          # 完整 JSON / 文字輸出
+    latency_ms: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    success: int = 1              # 1=成功, 0=失敗
+    error: str = ""
+    source: str = ""              # auto_llm / pipeline / manual
+    updated_at: str = ""
+
+
 # ----------------------------------------------------------------------
 # Schema (CREATE TABLE 語句)
 # ----------------------------------------------------------------------
@@ -245,6 +274,30 @@ _SCHEMA: Dict[str, str] = {
             last_error        TEXT NOT NULL DEFAULT ''
         )
     """,
+    "llm_analysis_history": """
+        CREATE TABLE IF NOT EXISTS llm_analysis_history (
+            id                 TEXT PRIMARY KEY,
+            ts                 TEXT NOT NULL DEFAULT '',
+            ticker             TEXT NOT NULL DEFAULT '',
+            prompt_id          TEXT NOT NULL DEFAULT '',
+            prompt_version     TEXT NOT NULL DEFAULT '',
+            model              TEXT NOT NULL DEFAULT '',
+            sentiment          TEXT NOT NULL DEFAULT '',
+            sentiment_score    REAL NOT NULL DEFAULT 0,
+            confidence         REAL NOT NULL DEFAULT 0,
+            summary            TEXT NOT NULL DEFAULT '',
+            drivers            TEXT NOT NULL DEFAULT '',
+            risks              TEXT NOT NULL DEFAULT '',
+            raw_output         TEXT NOT NULL DEFAULT '',
+            latency_ms         INTEGER NOT NULL DEFAULT 0,
+            tokens_in          INTEGER NOT NULL DEFAULT 0,
+            tokens_out         INTEGER NOT NULL DEFAULT 0,
+            success            INTEGER NOT NULL DEFAULT 1,
+            error              TEXT NOT NULL DEFAULT '',
+            source             TEXT NOT NULL DEFAULT '',
+            updated_at         TEXT NOT NULL DEFAULT ''
+        )
+    """,
 }
 
 ALL_TABLES: Tuple[str, ...] = tuple(_SCHEMA.keys())
@@ -257,6 +310,7 @@ SYNCABLE_TABLES: Tuple[str, ...] = (
     "quarterly_report",
     "watchlist",
     "price_history",
+    "llm_analysis_history",
 )
 
 
@@ -821,6 +875,75 @@ class StockDB:
         return out
 
     # =================================================================
+    # llm_analysis_history DAO
+    # =================================================================
+
+    def upsert_llm_analysis(self, row: LlmAnalysisRow) -> None:
+        """寫入單筆 LLM 分析歷史。"""
+        if not row.updated_at:
+            row.updated_at = now_tw().isoformat(timespec="seconds")
+        with self.transaction() as c:
+            c.execute(
+                """
+                INSERT INTO llm_analysis_history
+                  (id, ts, ticker, prompt_id, prompt_version, model,
+                   sentiment, sentiment_score, confidence, summary,
+                   drivers, risks, raw_output, latency_ms, tokens_in,
+                   tokens_out, success, error, source, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                  ts = excluded.ts,
+                  ticker = excluded.ticker,
+                  prompt_id = excluded.prompt_id,
+                  prompt_version = excluded.prompt_version,
+                  model = excluded.model,
+                  sentiment = excluded.sentiment,
+                  sentiment_score = excluded.sentiment_score,
+                  confidence = excluded.confidence,
+                  summary = excluded.summary,
+                  drivers = excluded.drivers,
+                  risks = excluded.risks,
+                  raw_output = excluded.raw_output,
+                  latency_ms = excluded.latency_ms,
+                  tokens_in = excluded.tokens_in,
+                  tokens_out = excluded.tokens_out,
+                  success = excluded.success,
+                  error = excluded.error,
+                  source = excluded.source,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    row.id, row.ts, row.ticker, row.prompt_id,
+                    row.prompt_version, row.model, row.sentiment,
+                    row.sentiment_score, row.confidence, row.summary,
+                    row.drivers, row.risks, row.raw_output,
+                    int(row.latency_ms), int(row.tokens_in),
+                    int(row.tokens_out), int(row.success), row.error,
+                    row.source, row.updated_at,
+                ),
+            )
+
+    def list_llm_analysis(
+        self,
+        *,
+        ticker: Optional[str] = None,
+        prompt_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[LlmAnalysisRow]:
+        sql = "SELECT * FROM llm_analysis_history WHERE 1=1"
+        args: List[Any] = []
+        if ticker:
+            sql += " AND ticker = ?"
+            args.append(ticker)
+        if prompt_id:
+            sql += " AND prompt_id = ?"
+            args.append(prompt_id)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(int(limit))
+        rows = self.conn.execute(sql, args).fetchall()
+        return [_row_to_dc(LlmAnalysisRow, r) for r in rows]
+
+    # =================================================================
     # sync_meta DAO
     # =================================================================
 
@@ -949,6 +1072,7 @@ __all__ = [
     "ALL_TABLES",
     "SYNCABLE_TABLES",
     "EtfMeta",
+    "LlmAnalysisRow",
     "MonthlyRevenue",
     "PriceBar",
     "QuarterlyReport",

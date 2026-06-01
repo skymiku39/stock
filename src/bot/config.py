@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     # Service Account JSON 檔案路徑 (推薦) 或 JSON 字串。
     # 取得方式請見 docs/cloud_sync_setup.md
     google_sa_json_path: str = ""
+    # Optional Google Drive Desktop / shared cloud folder used to mirror
+    # fetched JSON/CSV/PDF cache files across machines.
+    google_cache_dir: str = ""
 
     @field_validator("report_poll_seconds")
     @classmethod

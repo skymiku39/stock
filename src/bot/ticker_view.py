@@ -307,6 +307,17 @@ def build_snapshot(
                 }
         except Exception:
             pass
+        # 仍然沒有 → 直接跑近 N 日 summary（TWSE 公開資料，免費）
+        if snap.chip_summary is None:
+            try:
+                log.info("[%s] 籌碼面快取為空，自動抓近 %d 日", ticker, chip_days)
+                summary = build_chip_summary(
+                    ticker, days=chip_days, root=project_root,
+                )
+                snap.chip_summary = summary_to_dict(summary)
+                snap.chip_summary_obj = summary
+            except Exception:
+                log.exception("[%s] 自動抓籌碼面失敗", ticker)
 
     # ---- 4. 來源檔案清單 ----
     sources: List[Dict[str, str]] = []
@@ -364,6 +375,7 @@ def build_snapshot(
         snap.unrealized_pl = round((snap.price - avg) * qty * 1000.0, 0)  # 假設 1 張 = 1000 股
 
     # ---- 6. 基本面 (月營收、估值、股利、季報) ----
+    # 先試讀快取；快取為空（首次查或之前抓失敗）自動再抓一次，避免使用者誤以為「無資料」。
     try:
         snap.fundamentals = build_fundamental_snapshot(
             ticker,
@@ -371,12 +383,19 @@ def build_snapshot(
             root=project_root,
             refresh=refresh_fundamentals,
         )
+        if (
+            not refresh_fundamentals
+            and (snap.fundamentals is None or not snap.fundamentals.has_data)
+        ):
+            log.info("[%s] 基本面快取為空，自動抓取一次", ticker)
+            snap.fundamentals = build_fundamental_snapshot(
+                ticker,
+                name_hint=snap.name,
+                root=project_root,
+                refresh=True,
+            )
         if snap.fundamentals and snap.fundamentals.name and not snap.name:
             snap.name = snap.fundamentals.name
-        # 用估值的現價回填 (若 chip_summary 沒給)
-        if snap.fundamentals and snap.fundamentals.valuation:
-            # OpenAPI 沒有現價，只有殖利率；現價仍依賴外部塞入
-            pass
     except Exception:
         log.exception("[%s] 基本面 snapshot 失敗", ticker)
 
@@ -388,6 +407,14 @@ def build_snapshot(
             root=project_root,
             refresh=refresh_technicals,
         )
+        if not refresh_technicals and not tech_snap.has_data:
+            log.info("[%s] 技術面快取為空，自動抓取一次", ticker)
+            tech_snap, _ = build_technical_snapshot(
+                ticker,
+                months=technical_months,
+                root=project_root,
+                refresh=True,
+            )
         snap.technicals = tech_snap
         if tech_snap.has_data:
             if snap.price <= 0:
@@ -398,16 +425,20 @@ def build_snapshot(
         log.exception("[%s] 技術面 snapshot 失敗", ticker)
 
     # ---- 8. 集保大戶/散戶 ----
+    # TDCC 每週公布、資料免費；無快取時自動抓一次，避免使用者誤以為「無資料」。
     try:
-        if refresh_distribution:
-            cur = build_distribution_snapshot(ticker, root=project_root)
-        else:
-            cur = None
         trend = load_distribution_trend(ticker, root=project_root)
+        cur: Optional[DistributionWeekly] = None
+        need_refresh = refresh_distribution or not trend.weeks
+        if need_refresh:
+            try:
+                cur = build_distribution_snapshot(ticker, root=project_root)
+                if cur is not None:
+                    trend = load_distribution_trend(ticker, root=project_root)
+            except Exception:
+                log.exception("[%s] 自動抓 TDCC 失敗", ticker)
         if cur is None and trend.weeks:
-            # 沒 refresh 就用 trend 中最新的 row 做 cur (沒 levels 明細)
-            last = trend.weeks[-1]
-            cur = last
+            cur = trend.weeks[-1]
         snap.distribution = cur
         snap.distribution_trend = trend
         label, detail, score = interpret_distribution(trend)
@@ -427,6 +458,37 @@ def build_snapshot(
             )
     except Exception:
         log.exception("[%s] 季報 view 整合失敗", ticker)
+
+    # ---- 9.5 自動 LLM 法說分析（無逐字稿時用 MOPS + 鉅亨新聞自動跑）----
+    # ⚠ 隱式 LLM 呼叫點：dashboard 的「個股深入分析」「個股總覽 → 計算評分」
+    #    都會走到這裡，呼叫 Gemini 並消耗 token (12 小時內快取)。
+    # 條件：尚未有 pipeline 法說分析、且設了 GEMINI_API_KEY。
+    # 未設 API Key 時 auto_analyze_ticker 會回 None，graceful-skip，不會收費。
+    if snap.llm_analysis is None:
+        try:
+            from bot.auto_llm import auto_analyze_ticker
+            auto = auto_analyze_ticker(
+                ticker, root=project_root, name_hint=snap.name, logger=log,
+            )
+            if auto:
+                snap.llm_analysis = auto
+        except Exception:
+            log.exception("[%s] 自動 LLM 分析失敗", ticker)
+
+    # ---- 9.6 把不會變動的基本資料持久化到 stock_db (供 Google Sheet 同步) ----
+    try:
+        if snap.name or (snap.fundamentals and snap.fundamentals.name):
+            from bot.stock_db import StockInfo, get_db
+            db = get_db()
+            existing = db.get_stock_info(ticker)
+            name_to_save = snap.name or (snap.fundamentals.name if snap.fundamentals else "")
+            if existing is None or existing.name != name_to_save:
+                info = existing or StockInfo(symbol=ticker)
+                if name_to_save:
+                    info.name = name_to_save
+                db.upsert_stock_info(info)
+    except Exception:
+        log.debug("[%s] stock_info 持久化失敗", ticker, exc_info=True)
 
     # ---- 10. 美股 / 跨市場連動 ----
     try:

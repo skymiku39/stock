@@ -205,3 +205,24 @@ uv sync --extra cloud
   ```
 * 想要更細的衝突解決 (row-level merge)？可以在 `cloud_sync.py` 自己加一個
   `merge(table)` 方法，比對 PK 後依 `updated_at` 逐 row 取最新。
+
+## Google cache folder (cross-machine fetch cache)
+
+Use `GOOGLE_CACHE_DIR` when two machines should reuse fetched JSON/CSV/PDF
+artifacts instead of refetching them from TWSE, MOPS, yfinance, news sources,
+or ETF pages.
+
+Recommended setup:
+
+```env
+GOOGLE_CACHE_DIR=G:/My Drive/stock-cloud-cache
+```
+
+Behavior:
+
+- When a fetcher writes a cache file under `data/`, the app mirrors it to the
+  same relative path under `GOOGLE_CACHE_DIR`.
+- Before a fetcher calls the external source, it restores the local file from
+  `GOOGLE_CACHE_DIR` if the local file is missing or older.
+- Keep `data/stock.db` local on each machine. Use Google Sheets for structured
+  SQLite table sync, and use `GOOGLE_CACHE_DIR` for large/raw file caches.

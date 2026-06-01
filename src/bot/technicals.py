@@ -16,11 +16,12 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -31,6 +32,12 @@ from bot.utils import get_logger, mk_folder, now_tw
 URL_STOCK_DAY = (
     "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
     "?response=json&date={ym}01&stockNo={ticker}"
+)
+
+# 上櫃 (TPEx) 個股單月日K
+URL_TPEX_STOCK_DAY = (
+    "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
+    "?code={ticker}&date={year:04d}/{month:02d}/01&response=json"
 )
 
 
@@ -51,6 +58,20 @@ def _cache_dir(ticker: str, root: Optional[Path] = None) -> Path:
     base = (root or Path.cwd()) / "data" / "technicals" / ticker
     mk_folder(str(base))
     return base
+
+
+def _resolve_market(
+    ticker: str,
+    root: Optional[Path],
+    *,
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """判斷個股市場別；未知一律當上市 (維持既有行為)。"""
+    try:
+        from bot.market_meta import TPEX, detect_market
+        return TPEX if detect_market(ticker, root=root, logger=logger) == TPEX else "twse"
+    except Exception:
+        return "twse"
 
 
 def _roc_to_iso(roc: str) -> Optional[dt.date]:
@@ -86,13 +107,20 @@ def fetch_monthly_kline(
     year: int,
     month: int,
     *,
+    market: str = "twse",
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
 ) -> List[Dict[str, Any]]:
-    """抓 TWSE 單月個股日K (民國月份；TWSE 端點接受西元，但路徑要 YYYYMMDD)。
+    """抓單月個股日K。
 
-    回傳 list[{date, open, high, low, close, volume, ...}]，依日期升冪。
+    Args:
+        market: 'twse' (上市) 或 'tpex' (上櫃)；其他值一律視為上市。
+
+    回傳 list[{date, open, high, low, close, volume(張)}]，依日期升冪。
     """
+    if market == "tpex":
+        return _fetch_tpex_monthly_kline(ticker, year, month, session=session, logger=logger)
+
     log = logger or get_logger("technicals")
     sess = session or _session()
     ym = f"{year:04d}{month:02d}"
@@ -146,6 +174,75 @@ def fetch_monthly_kline(
     return out
 
 
+def _fetch_tpex_monthly_kline(
+    ticker: str,
+    year: int,
+    month: int,
+    *,
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+) -> List[Dict[str, Any]]:
+    """抓 TPEx 上櫃單月個股日K。
+
+    TPEx 回傳格式：{tables:[{fields:[日期,成交張數,成交仟元,開盤,最高,最低,收盤,漲跌,筆數], data:[...]}]}
+    日期為民國 (115/05/04)；成交張數已是「張」。
+    """
+    log = logger or get_logger("technicals")
+    sess = session or _session()
+    url = URL_TPEX_STOCK_DAY.format(ticker=ticker, year=year, month=month)
+    try:
+        resp = sess.get(url, timeout=20)
+        if resp.status_code != 200:
+            log.warning("%s %04d/%02d 上櫃K線 HTTP %d", ticker, year, month, resp.status_code)
+            return []
+        data = resp.json()
+        time.sleep(0.4)
+    except Exception:
+        log.exception("%s %04d/%02d 上櫃K線抓取失敗", ticker, year, month)
+        return []
+
+    tables = data.get("tables") if isinstance(data, dict) else None
+    if not tables:
+        return []
+    table = tables[0] or {}
+    fields = table.get("fields") or []
+    rows = table.get("data") or []
+    if not fields or not rows:
+        return []
+
+    def idx(*kw: str) -> int:
+        for i, f in enumerate(fields):
+            fs = str(f).replace(" ", "")
+            for k in kw:
+                if k in fs:
+                    return i
+        return -1
+
+    i_date = idx("日期")
+    i_vol = idx("成交張數", "成交股數")
+    i_open = idx("開盤")
+    i_high = idx("最高")
+    i_low = idx("最低")
+    i_close = idx("收盤")
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if i_date < 0 or i_date >= len(r):
+            continue
+        d = _roc_to_iso(str(r[i_date]).strip())
+        if not d:
+            continue
+        out.append({
+            "date": d.isoformat(),
+            "open": _to_float(r[i_open]) if i_open >= 0 else 0.0,
+            "high": _to_float(r[i_high]) if i_high >= 0 else 0.0,
+            "low": _to_float(r[i_low]) if i_low >= 0 else 0.0,
+            "close": _to_float(r[i_close]) if i_close >= 0 else 0.0,
+            "volume": _to_float(r[i_vol]) if i_vol >= 0 else 0.0,  # TPEx 已是「張」
+        })
+    out.sort(key=lambda x: x["date"])
+    return out
+
+
 def fetch_recent_kline(
     ticker: str,
     *,
@@ -170,7 +267,9 @@ def fetch_recent_kline(
     log = logger or get_logger("technicals")
     end = end_date or now_tw().date()
     sess = session or _session()
+    market = _resolve_market(ticker, root, logger=log)
     cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
+    restore_file_from_cloud(cache_path, root=root)
 
     existing: Optional[pd.DataFrame] = None
     if incremental and cache_path.exists():
@@ -202,7 +301,7 @@ def fetch_recent_kline(
     rows: List[Dict[str, Any]] = []
     for (y, m) in months_back:
         rows.extend(fetch_monthly_kline(
-            ticker, y, m, session=sess, logger=log,
+            ticker, y, m, market=market, session=sess, logger=log,
         ))
 
     if not rows and existing is not None and not existing.empty:
@@ -220,6 +319,7 @@ def fetch_recent_kline(
     merged = merged.drop_duplicates(subset=["date"], keep="last")
     merged = merged.sort_values("date").reset_index(drop=True)
     merged.to_csv(cache_path, index=False, encoding="utf-8")
+    mirror_file_to_cloud(cache_path, root=root)
 
     if save_to_db and not merged.empty:
         # 只寫入新抓到的那些日期 (若 incremental) 或全部 (若無 cache)
@@ -274,6 +374,225 @@ def _save_df_to_db(
     except Exception:
         log.exception("%s 寫入 DB 例外", ticker)
         return 0
+
+
+# ----------------------------------------------------------------------
+# 長區間 / 分批向過去抓取
+# ----------------------------------------------------------------------
+
+
+def _enumerate_months(start: dt.date, end: dt.date) -> List[Tuple[int, int]]:
+    """[start, end] 之間（含）所有月份 (year, month)，由舊到新。"""
+    out: List[Tuple[int, int]] = []
+    cur = start.replace(day=1)
+    last = end.replace(day=1)
+    while cur <= last:
+        out.append((cur.year, cur.month))
+        # 推到下個月 1 號
+        if cur.month == 12:
+            cur = dt.date(cur.year + 1, 1, 1)
+        else:
+            cur = dt.date(cur.year, cur.month + 1, 1)
+    return out
+
+
+def get_kline_coverage(
+    ticker: str,
+    *,
+    root: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """回傳目前 K 線快取範圍 (earliest, latest, rows)。優先讀 DB，否則讀 CSV。
+
+    若無資料回 None。
+    """
+    df = load_kline_from_db(ticker, root=root)
+    if df is None or df.empty:
+        cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
+        restore_file_from_cloud(cache_path, root=root)
+        if cache_path.exists():
+            try:
+                df = pd.read_csv(cache_path, dtype={"date": str})
+                df = _coerce_df(df)
+            except Exception:
+                df = pd.DataFrame()
+    if df is None or df.empty:
+        return None
+    earliest = str(df["date"].min())
+    latest = str(df["date"].max())
+    return {
+        "earliest": earliest,
+        "latest": latest,
+        "rows": int(len(df)),
+    }
+
+
+def fetch_kline_range(
+    ticker: str,
+    *,
+    start_date: dt.date,
+    end_date: Optional[dt.date] = None,
+    root: Optional[Path] = None,
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+    save_to_db: bool = True,
+    skip_existing_months: bool = True,
+    on_progress: Optional[Callable[[int, int, str, int], None]] = None,
+    request_delay_sec: float = 0.4,
+    direction: str = "backward",  # "backward" (新→舊) 或 "forward" (舊→新)
+) -> pd.DataFrame:
+    """抓 [start_date, end_date] 之間的所有日 K，分月 fetch + 進度回呼。
+
+    Args:
+        skip_existing_months: True 時若該月在 cache 中已有任何資料就跳過 (但仍會抓 cache 邊界月)
+        on_progress: 接收 (current, total, label, fetched_rows) 的 callback
+        direction: backward = 從最近月份往過去抓 (符合 TWSE 限制較快)；forward = 從最早往現在抓
+        request_delay_sec: 每次 HTTP 之間 sleep；避免被 TWSE rate limit
+
+    回傳合併後的完整 DataFrame。
+    """
+    log = logger or get_logger("technicals")
+    sess = session or _session()
+    market = _resolve_market(ticker, root, logger=log)
+    end = end_date or now_tw().date()
+    if start_date > end:
+        return pd.DataFrame()
+
+    cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
+    restore_file_from_cloud(cache_path, root=root)
+    existing: Optional[pd.DataFrame] = None
+    if cache_path.exists():
+        try:
+            existing = pd.read_csv(cache_path, dtype={"date": str})
+            existing = _coerce_df(existing)
+        except Exception:
+            existing = None
+
+    existing_months: set[Tuple[int, int]] = set()
+    if existing is not None and not existing.empty and skip_existing_months:
+        for d in existing["date"].tolist():
+            try:
+                dd = dt.date.fromisoformat(str(d)[:10])
+                existing_months.add((dd.year, dd.month))
+            except Exception:
+                continue
+
+    months = _enumerate_months(start_date, end)
+    if direction == "backward":
+        months.reverse()
+
+    total = len(months)
+    rows: List[Dict[str, Any]] = []
+    fetched_months = 0
+    for idx, (y, m) in enumerate(months, start=1):
+        # 邊界月：cache 中可能只有部分日期 → 不跳過邊界月
+        is_boundary = False
+        if existing is not None and not existing.empty:
+            min_d = dt.date.fromisoformat(str(existing["date"].min())[:10])
+            max_d = dt.date.fromisoformat(str(existing["date"].max())[:10])
+            is_boundary = (
+                (y, m) == (min_d.year, min_d.month)
+                or (y, m) == (max_d.year, max_d.month)
+            )
+        if (y, m) in existing_months and not is_boundary:
+            if on_progress:
+                on_progress(idx, total, f"{y}/{m:02d} 已有快取", 0)
+            continue
+
+        label = f"{y}/{m:02d}"
+        try:
+            month_rows = fetch_monthly_kline(
+                ticker, y, m, market=market, session=sess, logger=log,
+            )
+        except Exception as e:
+            log.warning("%s %s 抓取例外：%s", ticker, label, e)
+            month_rows = []
+
+        rows.extend(month_rows)
+        fetched_months += 1 if month_rows else 0
+        if on_progress:
+            on_progress(idx, total, label, len(month_rows))
+
+        if request_delay_sec > 0:
+            time.sleep(request_delay_sec)
+
+    if not rows:
+        # 沒抓到新的，回傳原有
+        if existing is not None and not existing.empty:
+            return existing.sort_values("date").reset_index(drop=True)
+        return pd.DataFrame()
+
+    new_df = pd.DataFrame(rows)
+    if existing is not None and not existing.empty:
+        merged = pd.concat([existing, new_df], ignore_index=True)
+    else:
+        merged = new_df
+    merged = _coerce_df(merged)
+    merged = merged.drop_duplicates(subset=["date"], keep="last")
+    merged = merged.sort_values("date").reset_index(drop=True)
+    merged.to_csv(cache_path, index=False, encoding="utf-8")
+    mirror_file_to_cloud(cache_path, root=root)
+
+    if save_to_db and not merged.empty:
+        try:
+            fresh_dates = {r["date"] for r in rows}
+            fresh = merged[merged["date"].isin(fresh_dates)]
+            _save_df_to_db(ticker, fresh, root=root, logger=log)
+        except Exception:
+            log.exception("%s 寫入 price_history DB 失敗 (忽略)", ticker)
+
+    return merged
+
+
+def extend_kline_backward(
+    ticker: str,
+    *,
+    years_back: int = 5,
+    root: Optional[Path] = None,
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+    save_to_db: bool = True,
+    on_progress: Optional[Callable[[int, int, str, int], None]] = None,
+    request_delay_sec: float = 0.4,
+) -> pd.DataFrame:
+    """從目前 cache 中「最早日期」再往前回補 N 年（若無 cache 則以今天為起點）。
+
+    這是 K 線看板「往前抓 5 年/10 年」按鈕的後端。
+    """
+    cov = get_kline_coverage(ticker, root=root)
+    if cov:
+        try:
+            anchor = dt.date.fromisoformat(cov["earliest"])
+        except Exception:
+            anchor = now_tw().date()
+    else:
+        anchor = now_tw().date()
+    target_start = anchor.replace(day=1)
+    # 往前 N 年
+    try:
+        target_start = target_start.replace(year=target_start.year - years_back)
+    except ValueError:
+        target_start = target_start.replace(
+            year=target_start.year - years_back, day=28,
+        )
+    # 結束在 anchor 所在月的「前一個月」末日 (避免重抓 anchor 月)
+    if cov:
+        end_date = anchor.replace(day=1) - dt.timedelta(days=1)
+    else:
+        end_date = now_tw().date()
+    if end_date < target_start:
+        return pd.DataFrame()
+    return fetch_kline_range(
+        ticker,
+        start_date=target_start,
+        end_date=end_date,
+        root=root,
+        session=session,
+        logger=logger,
+        save_to_db=save_to_db,
+        on_progress=on_progress,
+        request_delay_sec=request_delay_sec,
+        direction="backward",
+    )
 
 
 def load_kline_from_db(
@@ -522,6 +841,19 @@ def derive_signals(df_with_indicators: pd.DataFrame) -> List[TechnicalSignal]:
                    + ("（多頭排列）" if bull else "（空頭排列）" if bear else ""),
         ))
 
+    # K 線型態 (單根 K 棒，依「量化通」16 種型態分類)
+    try:
+        from bot.candle_patterns import classify_latest
+        cp = classify_latest(df_with_indicators)
+        if cp is not None:
+            signals.append(TechnicalSignal(
+                label=f"K線型態：{cp.name}",
+                bullish=cp.bias,
+                detail=cp.meaning,
+            ))
+    except Exception:
+        pass
+
     return signals
 
 
@@ -557,6 +889,12 @@ class TechnicalSnapshot:
     signals: List[Dict[str, Any]] = field(default_factory=list)
     rows: int = 0
     technical_score: float = 50.0   # 0-100 (給 scoring.py 用)
+    # K 線型態 (最新一根 K 棒)
+    candle_pattern_id: str = ""
+    candle_pattern: str = ""        # 中文型態名
+    candle_category: str = ""       # 實體 / 上影線 / 下影線 / 上下影線 / 十字線
+    candle_bias: Optional[bool] = None
+    candle_meaning: str = ""
 
     @property
     def has_data(self) -> bool:
@@ -587,6 +925,7 @@ def build_technical_snapshot(
         df = load_kline_from_db(ticker, months=months, root=root)
         if df is None or df.empty:
             cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
+            restore_file_from_cloud(cache_path, root=root)
             if not cache_path.exists():
                 df = pd.DataFrame()
             else:
@@ -632,6 +971,20 @@ def build_technical_snapshot(
     sigs = derive_signals(df_ind)
     snap.signals = [asdict(s) for s in sigs]
     snap.technical_score = _score_from_signals(sigs, snap)
+
+    # K 線型態 (最新一根)
+    try:
+        from bot.candle_patterns import classify_latest
+        cp = classify_latest(df_ind)
+        if cp is not None:
+            snap.candle_pattern_id = cp.pattern_id
+            snap.candle_pattern = cp.name
+            snap.candle_category = cp.category
+            snap.candle_bias = cp.bias
+            snap.candle_meaning = cp.meaning
+    except Exception:
+        pass
+
     return snap, df_ind
 
 
@@ -687,6 +1040,9 @@ def snapshot_to_dict(s: TechnicalSnapshot) -> Dict[str, Any]:
 __all__ = [
     "TechnicalSignal",
     "TechnicalSnapshot",
+    "extend_kline_backward",
+    "fetch_kline_range",
+    "get_kline_coverage",
     "add_bollinger",
     "add_kd",
     "add_macd",
