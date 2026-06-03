@@ -70,6 +70,10 @@ from bot.portfolio import (  # noqa: E402
     fetch_broker_positions,
     load_bot_portfolio,
 )
+from bot.portfolio_analysis import (  # noqa: E402
+    build_portfolio_analysis_bundle,
+    bundle_to_json,
+)
 from bot import watchlist as wl  # noqa: E402
 from bot.stock_db import (  # noqa: E402
     ALL_TABLES,
@@ -2929,6 +2933,244 @@ def _portfolio_warnings(df: pd.DataFrame) -> List[str]:
     return warnings
 
 
+def _collect_portfolio_analysis_bundle(
+    *,
+    df: pd.DataFrame,
+    broker_snapshot: Any,
+    warnings: List[str],
+    max_holdings: int,
+    auto_fill_missing: bool,
+    refresh_chips: bool,
+    refresh_fundamentals: bool,
+    refresh_technicals: bool,
+    refresh_distribution: bool,
+    auto_ticker_llm: bool,
+) -> Dict[str, Any]:
+    ranked = df.sort_values("權重%", ascending=False).head(max_holdings)
+    rows = ranked.to_dict("records")
+    snapshots: Dict[str, Dict[str, Any]] = {}
+
+    status = st.status("蒐集目前持股分析資料包", expanded=True)
+    status.write(
+        f"準備蒐集 {len(rows)} 檔：券商庫存、本工具標記、個股快照、"
+        "基本面、技術面、籌碼、TDCC、ETF 共識與既有 LLM。"
+    )
+    if auto_fill_missing:
+        status.write("缺資料補抓已開啟：本地缺資料時會呼叫外部公開資料源。")
+    else:
+        status.write("local-first：優先使用 SQLite/CSV/JSON 快取，不主動補抓缺漏資料。")
+    if auto_ticker_llm:
+        status.write("個股 LLM 素材補強已開啟：缺少個股研究快取時，可能逐檔呼叫 Gemini。")
+
+    progress = st.progress(0.0, text="尚未開始")
+    try:
+        for idx, row in enumerate(rows, 1):
+            symbol = str(row.get("代號", "")).strip()
+            progress.progress(
+                (idx - 1) / max(len(rows), 1),
+                text=f"[{idx}/{len(rows)}] {symbol}: 蒐集個股資料包",
+            )
+            snap = build_snapshot(
+                symbol,
+                PROJECT_ROOT,
+                name_hint=str(row.get("名稱", "") or ""),
+                refresh_chips=refresh_chips,
+                refresh_fundamentals=refresh_fundamentals,
+                refresh_technicals=refresh_technicals,
+                refresh_distribution=refresh_distribution,
+                auto_fill_missing=auto_fill_missing,
+                auto_llm=auto_ticker_llm,
+                macro_cache_only=not auto_fill_missing,
+            )
+            snapshots[symbol] = snapshot_to_dict(snap)
+        progress.progress(1.0, text=f"完成 {len(rows)} 檔資料蒐集")
+        bundle = build_portfolio_analysis_bundle(
+            rows=rows,
+            snapshots=snapshots,
+            broker_meta={
+                "broker": getattr(broker_snapshot, "broker", ""),
+                "account": getattr(broker_snapshot, "account", ""),
+                "asof": getattr(broker_snapshot, "asof", ""),
+                "simulation": getattr(broker_snapshot, "simulation", False),
+            },
+            warnings=warnings,
+        )
+        _save_portfolio_bundle(bundle)
+        status.update(label=f"資料包完成：{len(bundle.get('holdings', []))} 檔", state="complete", expanded=False)
+        return bundle
+    except Exception:
+        status.update(label="資料包蒐集失敗", state="error", expanded=True)
+        raise
+
+
+def _save_portfolio_bundle(bundle: Dict[str, Any]) -> Path:
+    out_dir = _project_path("data", "portfolio_analysis")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = out_dir / f"portfolio_bundle_{stamp}.json"
+    path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "latest_bundle.json").write_text(
+        json.dumps(bundle, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _save_portfolio_llm_result(markdown: str, info: Dict[str, Any]) -> Path:
+    out_dir = _project_path("data", "portfolio_analysis")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = out_dir / f"portfolio_analysis_{stamp}.md"
+    header = (
+        f"<!-- prompt={info.get('prompt_id', '')} "
+        f"version={info.get('prompt_version', '')} "
+        f"model={info.get('model', '')} -->\n\n"
+    )
+    path.write_text(header + markdown, encoding="utf-8")
+    (out_dir / "latest_analysis.md").write_text(header + markdown, encoding="utf-8")
+    return path
+
+
+def _render_portfolio_analysis_section(
+    *,
+    df: pd.DataFrame,
+    broker_snapshot: Any,
+    warnings: List[str],
+    env_values: Dict[str, str],
+) -> None:
+    st.markdown("### 資料蒐集與 LLM 投組分析")
+    st.caption(
+        "先把券商庫存與每檔持股證據整理成資料包；確認資料覆蓋率後，再用 Gemini 做整體投組分析。"
+    )
+
+    with st.container(border=True):
+        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 1, 1])
+        max_holdings = int(c1.number_input(
+            "分析檔數",
+            min_value=1,
+            max_value=max(1, len(df)),
+            value=min(12, max(1, len(df))),
+            step=1,
+            key="portfolio_bundle_limit",
+        ))
+        auto_fill_missing = c2.toggle(
+            "缺資料補抓",
+            value=False,
+            key="portfolio_bundle_auto_fill",
+            help="本地缺資料時才呼叫外部公開資料源；會比 local-first 慢。",
+        )
+        refresh_tech = c3.toggle("更新技術面", value=False, key="portfolio_bundle_tech")
+        refresh_fund = c4.toggle("更新基本面", value=False, key="portfolio_bundle_fund")
+        refresh_chips = c5.toggle("更新籌碼", value=False, key="portfolio_bundle_chips")
+        refresh_dist = c6.toggle("更新TDCC", value=False, key="portfolio_bundle_dist")
+
+        l1, l2 = st.columns([1, 2])
+        auto_ticker_llm = l1.toggle(
+            "補個股 LLM 素材",
+            value=False,
+            key="portfolio_bundle_ticker_llm",
+            help="缺少個股研究快取時可能逐檔呼叫 Gemini，適合正式分析前補資料。",
+        )
+        l2.caption(
+            "資料包會寫入 `data/portfolio_analysis/latest_bundle.json`，"
+            "LLM 結果會寫入 `data/portfolio_analysis/latest_analysis.md`。"
+        )
+
+        if st.button(
+            "蒐集 / 更新分析資料包",
+            type="primary",
+            use_container_width=True,
+            key="portfolio_collect_bundle",
+            disabled=df.empty,
+        ):
+            bundle = _collect_portfolio_analysis_bundle(
+                df=df,
+                broker_snapshot=broker_snapshot,
+                warnings=warnings,
+                max_holdings=max_holdings,
+                auto_fill_missing=auto_fill_missing,
+                refresh_chips=refresh_chips,
+                refresh_fundamentals=refresh_fund,
+                refresh_technicals=refresh_tech,
+                refresh_distribution=refresh_dist,
+                auto_ticker_llm=auto_ticker_llm,
+            )
+            st.session_state["portfolio_analysis_bundle"] = bundle
+            st.session_state.pop("portfolio_analysis_result", None)
+
+    bundle = st.session_state.get("portfolio_analysis_bundle")
+    if bundle:
+        quality = pd.DataFrame(bundle.get("data_quality", []))
+        qsum = bundle.get("data_quality_summary", {})
+        q1, q2, q3 = st.columns(3)
+        q1.metric("資料覆蓋率", f"{float(qsum.get('average_coverage_score', 0)) * 100:.0f}%")
+        q2.metric("資料包持股", f"{len(bundle.get('holdings', []))} 檔")
+        q3.metric("缺口類型", f"{len(qsum.get('missing_counts', {}))} 種")
+        if not quality.empty:
+            st.dataframe(
+                quality,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "coverage_score": st.column_config.ProgressColumn(
+                        "覆蓋率", min_value=0, max_value=1, format="%.0%",
+                    ),
+                    "weight_pct": st.column_config.NumberColumn("權重%", format="%.1f%%"),
+                },
+            )
+        st.download_button(
+            "下載 LLM 資料包 JSON",
+            data=bundle_to_json(bundle, max_chars=200_000).encode("utf-8"),
+            file_name=f"portfolio_bundle_{dt.date.today().isoformat()}.json",
+            mime="application/json",
+        )
+
+        api_key = env_values.get("GEMINI_API_KEY", "")
+        model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
+        if not api_key:
+            st.warning("尚未設定 `GEMINI_API_KEY`，可以先蒐集資料包，但無法產生 LLM 投組分析。")
+        if st.button(
+            _llm_button_label("分析目前持股"),
+            use_container_width=True,
+            disabled=not api_key,
+            key="portfolio_llm_analyze",
+            help=LLM_HINT_DIRECT,
+        ):
+            from bot.llm_analyzer import GeminiClient, gemini_call
+
+            client = GeminiClient(api_key=api_key, model=model)
+            with st.spinner("Gemini 正在讀取資料包並分析投組..."):
+                raw, info = gemini_call(
+                    "portfolio_analysis",
+                    client=client,
+                    registry=get_registry(PROJECT_ROOT / "prompts"),
+                    metadata={
+                        "task": "portfolio_analysis",
+                        "symbols": [h.get("symbol") for h in bundle.get("holdings", [])],
+                    },
+                    today=dt.date.today().isoformat(),
+                    broker_asof=str((bundle.get("broker") or {}).get("asof", "")),
+                    portfolio_json=bundle_to_json(bundle),
+                )
+            markdown = raw or "(LLM 未產出內容)"
+            result_path = _save_portfolio_llm_result(markdown, info)
+            st.session_state["portfolio_analysis_result"] = {
+                "markdown": markdown,
+                "info": info,
+                "path": str(result_path),
+            }
+
+    result = st.session_state.get("portfolio_analysis_result")
+    if result:
+        info = result.get("info", {})
+        st.markdown("#### LLM 投組分析")
+        st.caption(
+            f"prompt: `{info.get('prompt_id', '')}` v{info.get('prompt_version', '')} · "
+            f"model: `{info.get('model', '')}` · saved: `{result.get('path', '')}`"
+        )
+        st.markdown(result.get("markdown", ""))
+
+
 def page_portfolio() -> None:
     st.title("目前持股分析")
     st.caption(
@@ -3111,6 +3353,13 @@ def page_portfolio() -> None:
             with st.expander("風險與資料品質提醒", expanded=True):
                 for item in warnings:
                     st.warning(item)
+
+        _render_portfolio_analysis_section(
+            df=df,
+            broker_snapshot=snap,
+            warnings=warnings,
+            env_values=env_values,
+        )
 
         picks = df["代號"].astype(str).tolist()
         jump_col1, jump_col2 = st.columns([3, 1])
