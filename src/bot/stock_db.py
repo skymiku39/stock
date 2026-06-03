@@ -179,6 +179,27 @@ class LlmAnalysisRow:
     updated_at: str = ""
 
 
+@dataclass
+class LlmDailyReportRow:
+    """每日 LLM 報告紀錄，供 dashboard 依日期回放。
+
+    PK = (report_type, report_date, mode)。intraday 的 report_date 是
+    asof 日期；next_day_watch 的 report_date 是 target_date。
+    """
+
+    report_type: str                # intraday / next_day_watch
+    report_date: str                # ISO YYYY-MM-DD
+    mode: str = ""                  # intraday="", next_day_watch=draft/update
+    asof: str = ""
+    generated_at: str = ""
+    market_tone: str = ""
+    prompt_id: str = ""
+    prompt_version: str = ""
+    brief_md: str = ""
+    payload_json: str = ""          # full report JSON
+    updated_at: str = ""
+
+
 # ----------------------------------------------------------------------
 # Schema (CREATE TABLE 語句)
 # ----------------------------------------------------------------------
@@ -298,6 +319,22 @@ _SCHEMA: Dict[str, str] = {
             updated_at         TEXT NOT NULL DEFAULT ''
         )
     """,
+    "llm_daily_reports": """
+        CREATE TABLE IF NOT EXISTS llm_daily_reports (
+            report_type        TEXT NOT NULL,
+            report_date        TEXT NOT NULL,
+            mode               TEXT NOT NULL DEFAULT '',
+            asof               TEXT NOT NULL DEFAULT '',
+            generated_at       TEXT NOT NULL DEFAULT '',
+            market_tone        TEXT NOT NULL DEFAULT '',
+            prompt_id          TEXT NOT NULL DEFAULT '',
+            prompt_version     TEXT NOT NULL DEFAULT '',
+            brief_md           TEXT NOT NULL DEFAULT '',
+            payload_json       TEXT NOT NULL DEFAULT '',
+            updated_at         TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (report_type, report_date, mode)
+        )
+    """,
 }
 
 ALL_TABLES: Tuple[str, ...] = tuple(_SCHEMA.keys())
@@ -311,6 +348,7 @@ SYNCABLE_TABLES: Tuple[str, ...] = (
     "watchlist",
     "price_history",
     "llm_analysis_history",
+    "llm_daily_reports",
 )
 
 
@@ -944,6 +982,94 @@ class StockDB:
         return [_row_to_dc(LlmAnalysisRow, r) for r in rows]
 
     # =================================================================
+    # llm_daily_reports DAO
+    # =================================================================
+
+    def upsert_llm_daily_report(self, row: LlmDailyReportRow) -> None:
+        """寫入每日 LLM 報告。"""
+        now_iso = now_tw().isoformat(timespec="seconds")
+        if not row.generated_at:
+            row.generated_at = now_iso
+        if not row.updated_at:
+            row.updated_at = now_iso
+        with self.transaction() as c:
+            c.execute(
+                """
+                INSERT INTO llm_daily_reports
+                  (report_type, report_date, mode, asof, generated_at,
+                   market_tone, prompt_id, prompt_version, brief_md,
+                   payload_json, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(report_type, report_date, mode) DO UPDATE SET
+                  asof = excluded.asof,
+                  generated_at = excluded.generated_at,
+                  market_tone = excluded.market_tone,
+                  prompt_id = excluded.prompt_id,
+                  prompt_version = excluded.prompt_version,
+                  brief_md = excluded.brief_md,
+                  payload_json = excluded.payload_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    row.report_type, row.report_date, row.mode, row.asof,
+                    row.generated_at, row.market_tone, row.prompt_id,
+                    row.prompt_version, row.brief_md, row.payload_json,
+                    row.updated_at,
+                ),
+            )
+
+    def get_llm_daily_report(
+        self,
+        report_type: str,
+        report_date: str,
+        *,
+        mode: str = "",
+    ) -> Optional[LlmDailyReportRow]:
+        row = self.conn.execute(
+            """
+            SELECT * FROM llm_daily_reports
+            WHERE report_type = ? AND report_date = ? AND mode = ?
+            """,
+            (report_type, report_date, mode),
+        ).fetchone()
+        return _row_to_dc(LlmDailyReportRow, row) if row else None
+
+    def get_latest_llm_daily_report(
+        self,
+        report_type: str,
+        *,
+        mode: Optional[str] = None,
+    ) -> Optional[LlmDailyReportRow]:
+        sql = "SELECT * FROM llm_daily_reports WHERE report_type = ?"
+        args: List[Any] = [report_type]
+        if mode is not None:
+            sql += " AND mode = ?"
+            args.append(mode)
+        sql += " ORDER BY report_date DESC, generated_at DESC LIMIT 1"
+        row = self.conn.execute(sql, args).fetchone()
+        return _row_to_dc(LlmDailyReportRow, row) if row else None
+
+    def list_llm_daily_reports(
+        self,
+        *,
+        report_type: Optional[str] = None,
+        mode: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[LlmDailyReportRow]:
+        sql = "SELECT * FROM llm_daily_reports WHERE 1=1"
+        args: List[Any] = []
+        if report_type:
+            sql += " AND report_type = ?"
+            args.append(report_type)
+        if mode is not None:
+            sql += " AND mode = ?"
+            args.append(mode)
+        sql += " ORDER BY report_date DESC, generated_at DESC LIMIT ?"
+        args.append(int(limit))
+        rows = self.conn.execute(sql, args).fetchall()
+        return [_row_to_dc(LlmDailyReportRow, r) for r in rows]
+
+    # =================================================================
     # sync_meta DAO
     # =================================================================
 
@@ -1073,6 +1199,7 @@ __all__ = [
     "SYNCABLE_TABLES",
     "EtfMeta",
     "LlmAnalysisRow",
+    "LlmDailyReportRow",
     "MonthlyRevenue",
     "PriceBar",
     "QuarterlyReport",

@@ -16,6 +16,7 @@ from bot.stock_db import (
     SYNCABLE_TABLES,
     EtfMeta,
     MonthlyRevenue,
+    LlmDailyReportRow,
     PriceBar,
     QuarterlyReport,
     StockDB,
@@ -245,6 +246,69 @@ class TestPriceHistory:
         assert len(rows_2454) == 3
         assert all(b.symbol == "2330" for b in rows_2330)
         assert all(b.symbol == "2454" for b in rows_2454)
+
+
+class TestLlmDailyReports:
+    def test_table_is_syncable(self) -> None:
+        assert "llm_daily_reports" in ALL_TABLES
+        assert "llm_daily_reports" in SYNCABLE_TABLES
+
+    def test_upsert_then_get_by_date_and_mode(self, db: StockDB) -> None:
+        db.upsert_llm_daily_report(LlmDailyReportRow(
+            report_type="intraday",
+            report_date="2026-06-02",
+            mode="",
+            asof="2026-06-02",
+            market_tone="neutral",
+            prompt_id="intraday_brief",
+            payload_json='{"asof":"2026-06-02"}',
+        ))
+
+        got = db.get_llm_daily_report("intraday", "2026-06-02", mode="")
+
+        assert got is not None
+        assert got.report_type == "intraday"
+        assert got.report_date == "2026-06-02"
+        assert got.market_tone == "neutral"
+        assert got.generated_at
+        assert got.updated_at
+
+    def test_upsert_separates_next_day_modes(self, db: StockDB) -> None:
+        db.upsert_llm_daily_report(LlmDailyReportRow(
+            report_type="next_day_watch",
+            report_date="2026-06-03",
+            mode="draft",
+            payload_json='{"mode":"draft"}',
+        ))
+        db.upsert_llm_daily_report(LlmDailyReportRow(
+            report_type="next_day_watch",
+            report_date="2026-06-03",
+            mode="update",
+            payload_json='{"mode":"update"}',
+        ))
+
+        draft = db.get_llm_daily_report("next_day_watch", "2026-06-03", mode="draft")
+        update = db.get_llm_daily_report("next_day_watch", "2026-06-03", mode="update")
+
+        assert draft is not None and draft.payload_json == '{"mode":"draft"}'
+        assert update is not None and update.payload_json == '{"mode":"update"}'
+
+    def test_latest_daily_report(self, db: StockDB) -> None:
+        db.upsert_llm_daily_report(LlmDailyReportRow(
+            report_type="intraday",
+            report_date="2026-06-01",
+            payload_json='{"asof":"2026-06-01"}',
+        ))
+        db.upsert_llm_daily_report(LlmDailyReportRow(
+            report_type="intraday",
+            report_date="2026-06-02",
+            payload_json='{"asof":"2026-06-02"}',
+        ))
+
+        latest = db.get_latest_llm_daily_report("intraday", mode="")
+
+        assert latest is not None
+        assert latest.report_date == "2026-06-02"
 
 
 class TestSyncMeta:

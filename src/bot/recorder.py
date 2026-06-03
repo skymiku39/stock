@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from bot.ownership import infer_owner_tag
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -21,6 +22,7 @@ class TradeRecorder:
 
     def record_deal(self, msg: dict) -> None:
         """從 Shioaji StockDeal callback msg 擷取欄位並暫存。"""
+        custom_field = msg.get("custom_field", "")
         self._records.append({
             "datetime": now_tw().isoformat(timespec="seconds"),
             "symbol": msg.get("code", ""),
@@ -28,7 +30,8 @@ class TradeRecorder:
             "price": float(msg.get("price", 0)),
             "quantity": int(msg.get("quantity", 0)),
             "ordno": msg.get("ordno", ""),
-            "custom_field": msg.get("custom_field", ""),
+            "custom_field": custom_field,
+            "owner_tag": infer_owner_tag(custom_field=custom_field),
         })
 
     @property

@@ -1,6 +1,6 @@
 id: daily_brief
-version: "1.0"
-description: 整合 ETF 共識訊號 + 法說會分析 + 籌碼面，產出當日一頁紙
+version: "1.1"
+description: 整合 ETF 共識訊號 + 法說會分析 + 籌碼面 + 期貨領先指標，產出當日一頁紙
 model_hint: gemini-2.5-flash
 max_output_tokens: 3000
 temperature: 0.3
@@ -16,6 +16,9 @@ inputs:
   - name: chips_summary_json
     required: true
     desc: 主要監控標的的籌碼面摘要 JSON
+  - name: macro_summary
+    required: false
+    desc: 美股/VIX/ADR 溢價 + 台指期正逆價差 (期貨領先指標) 摘要文字
 output_format: markdown
 template: |
   你是一位資深投資組合經理，請依以下資料撰寫一份「{date} 每日盤後簡報」(Markdown 格式)，
@@ -27,8 +30,16 @@ template: |
   3. **法說會解讀重點** (對當日有分析的標的，列摘要 + 情緒 + 言行反查結果)
   4. **籌碼面警訊** (列出外資/投信/借券異動明顯的標的)
   5. **明日操作建議** (買/賣/觀望，必須說明依據)
+     - 以「現貨股票為主」決策；台指期正逆價差 (若 macro 有提供) 僅作為**情緒領先指標輔助**：
+       正價差過大＝市場過熱(進場保守)；逆價差擴大＝偏保守(留意系統風險)，惟 6-8 月除權息旺季
+       偏逆價差屬正常，須扣除蒸發點數，勿據此誤判為偏空。
 
   輸出語氣：機構研究報告，避免過度樂觀或悲觀，少用形容詞、多用數據。
+
+  ## 總經 / 期貨領先指標
+  ```
+  {macro_summary}
+  ```
 
   ## ETF 共識訊號
   ```json

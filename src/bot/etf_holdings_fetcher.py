@@ -122,6 +122,25 @@ def _has_lxml() -> bool:
         return False
 
 
+# 第三方/發行商頁面在「新掛牌尚未公開持股」時常見的提示字樣。
+_NO_DATA_MARKERS = (
+    "查無資料",
+    "查無持股",
+    "尚無資料",
+    "暫無資料",
+    "無持股資料",
+    "no data",
+    "no holdings",
+    "data not available",
+)
+
+
+def _looks_like_no_data(text: str) -> bool:
+    """判斷頁面是否屬於「新掛牌尚無公開持股」而非真正抓取失敗。"""
+    low = text.lower()
+    return any(m.lower() in low for m in _NO_DATA_MARKERS)
+
+
 # ----------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------
@@ -179,6 +198,16 @@ def fetch_and_save_holdings(
             result.error = "raw_text_too_short"
             log.warning("[%s] 原始內容過短 (%d 字)", etf.symbol, len(raw_text))
             return result
+
+        # 新掛牌 ETF：發行商/第三方頁面常顯示「查無資料」。
+        # 直接標記為 no_data_yet，省去無謂的 LLM 呼叫，待日後資料出現自動補齊。
+        if _looks_like_no_data(raw_text):
+            result.error = "no_data_yet"
+            log.info(
+                "[%s] 來源顯示查無持股 (新掛牌尚未公開)，標記 no_data_yet 待後續自動補齊",
+                etf.symbol,
+            )
+            return result
     except Exception as e:
         result.error = f"fetch_failed: {e}"
         log.exception("[%s] 下載失敗", etf.symbol)
@@ -215,13 +244,23 @@ def fetch_and_save_holdings(
             if not isinstance(item, dict):
                 continue
             ticker = str(item.get("ticker") or "").strip()
-            if not ticker or not re.match(r"^\w{4,6}\.?\w*$", ticker):
-                continue
+            name = str(item.get("name") or "").strip()
+            try:
+                weight = float(item.get("weight_pct") or 0)
+            except (ValueError, TypeError):
+                weight = 0.0
+            # 台股 4-6 位數 / 美股代號等「乾淨代號」直接接受；
+            # 海外個股可能無代號 → 只要有公司名與權重即保留 (ticker 退化為公司名)。
+            clean_ticker = bool(ticker) and bool(re.match(r"^[A-Za-z0-9.\-]{1,12}$", ticker))
+            if not clean_ticker:
+                if not name or weight <= 0:
+                    continue
+                ticker = (ticker or name)[:40]
             try:
                 holdings.append(Holding(
                     ticker=ticker,
-                    name=str(item.get("name") or ""),
-                    weight_pct=float(item.get("weight_pct") or 0),
+                    name=name,
+                    weight_pct=weight,
                     shares=float(item.get("shares") or 0),
                     value=float(item.get("value") or 0),
                 ))
@@ -278,11 +317,16 @@ def fetch_all_active_etfs(
         except Exception:
             log.exception("[%s] 例外", e.symbol)
             results.append(FetchResult(etf=e, error="exception"))
+    n_ok = sum(1 for r in results if r.success)
+    n_pending = sum(1 for r in results if r.error == "no_data_yet")
+    n_fail = sum(1 for r in results if not r.success and r.error != "no_data_yet")
     log.info(
-        "ETF 持股自動抓取完成：%d 成功 / %d 失敗",
-        sum(1 for r in results if r.success),
-        sum(1 for r in results if not r.success),
+        "ETF 持股自動抓取完成：%d 成功 / %d 新掛牌待補(no_data_yet) / %d 失敗",
+        n_ok, n_pending, n_fail,
     )
+    if n_pending:
+        pend = ", ".join(r.etf.symbol for r in results if r.error == "no_data_yet")
+        log.info("新掛牌尚無公開持股，待後續排程自動補齊：%s", pend)
     return results
 
 

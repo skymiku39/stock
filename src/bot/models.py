@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass, field
 
+from bot.ownership import BOT_OWNER_TAG
+
 
 @dataclass
 class PositionInfo:
@@ -11,6 +13,7 @@ class PositionInfo:
     symbol: str
     avg_price: float
     quantity: int
+    owner_tag: str = BOT_OWNER_TAG
     entry_time: datetime.datetime = field(default_factory=datetime.datetime.now)
 
     def update(self, filled_price: float, filled_qty: int) -> None:

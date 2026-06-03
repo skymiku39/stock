@@ -41,6 +41,9 @@ from bot.scoring import compute_scorecard
 from bot.utils import get_logger, mk_folder, now_tw
 
 
+REPORT_TYPE = "intraday"
+
+
 # ----------------------------------------------------------------------
 # 模型
 # ----------------------------------------------------------------------
@@ -53,6 +56,11 @@ class CandidateRow:
     theme: str = ""
     theme_heat: int = 0
     role: str = ""
+    today_close: Optional[float] = None
+    today_pct_change: float = 0.0
+    volume: float = 0.0
+    volume_ratio: float = 0.0
+    technical_score: float = 50.0
     day_trade_score: float = 0.0
     action: str = "HOLD"
     us_market_score: float = 50.0
@@ -98,6 +106,12 @@ def _macro_summary_text(macro: Dict[str, Any]) -> str:
     if prem:
         for p in prem:
             bits.append(f"ADR {p.get('adr_symbol')} 溢價 {p.get('premium_pct', 0):+.2f}%")
+    fb = macro.get("futures_basis")
+    if isinstance(fb, dict) and fb.get("state") and fb.get("state") != "unknown":
+        bits.append(
+            f"台指期{fb.get('state')} {fb.get('basis', 0):+.0f}點"
+            f"({fb.get('basis_pct', 0):+.2f}%, 近月OI {fb.get('open_interest', 0):,.0f})"
+        )
     return "; ".join(bits) or "(無 macro)"
 
 
@@ -167,24 +181,79 @@ def _build_candidate_pool(
     return pool
 
 
+def _technical_for_ticker(
+    ticker: str,
+    *,
+    today: dt.date,
+    project_root: Path,
+    refresh: bool,
+    log: logging.Logger,
+) -> Optional[Dict[str, Any]]:
+    try:
+        from bot.technicals import build_technical_snapshot, snapshot_to_dict
+        snap, _df = build_technical_snapshot(
+            ticker,
+            months=4,
+            root=project_root,
+            refresh=refresh,
+            logger=log,
+        )
+    except Exception:
+        log.debug("[%s] technical snapshot 失敗", ticker, exc_info=True)
+        return None
+
+    has_data = bool(getattr(snap, "has_data", False) or getattr(snap, "rows", 0))
+    if not has_data:
+        return None
+
+    last_date = str(getattr(snap, "last_date", "") or "")
+    try:
+        last_d = dt.date.fromisoformat(last_date)
+    except Exception:
+        return None
+
+    # 盤前通常只能拿到上一交易日 K 線；假日後最多容忍 4 天。
+    if (today - last_d).days > 4:
+        log.debug("[%s] technical snapshot 過舊: %s", ticker, last_date)
+        return None
+
+    try:
+        return snapshot_to_dict(snap)
+    except Exception:
+        return {
+            "ticker": ticker,
+            "last_date": last_date,
+            "last_close": getattr(snap, "last_close", 0.0),
+            "pct_change_1d": getattr(snap, "pct_change_1d", 0.0),
+            "volume_last": getattr(snap, "volume_last", 0.0),
+            "vol_ma20": getattr(snap, "vol_ma20", None),
+            "technical_score": getattr(snap, "technical_score", 50.0),
+            "rows": getattr(snap, "rows", 0),
+        }
+
+
 def _score_candidate(
     row: CandidateRow,
     *,
     macro: Dict[str, Any],
     supply_chain: Dict[str, Any],
     project_root: Path,
+    today: Optional[dt.date] = None,
     chip_lookback: int = 5,
+    refresh_technicals: bool = True,
     log: logging.Logger,
 ) -> CandidateRow:
-    """跑 day_trade 評分，只填當沖需要的少數欄位 (不跑完整 snapshot 以省時)。"""
+    """跑 day_trade 評分，只填當沖戰情室需要的欄位。"""
     from bot.chips_fetcher import build_chip_summary, summary_to_dict
+
+    asof = today or now_tw().date()
 
     # 籌碼摘要
     chip_dict: Optional[Dict[str, Any]] = None
     try:
         summary = build_chip_summary(
             row.ticker,
-            end_date=now_tw().date(),
+            end_date=asof,
             days=chip_lookback,
             root=project_root,
             logger=log,
@@ -197,6 +266,28 @@ def _score_candidate(
     except Exception:
         log.debug("[%s] chip summary 失敗", row.ticker)
 
+    # 技術面 / 今日量價
+    technical_dict = _technical_for_ticker(
+        row.ticker,
+        today=asof,
+        project_root=project_root,
+        refresh=refresh_technicals,
+        log=log,
+    )
+    price = 0.0
+    pct_change = 0.0
+    volume = 0.0
+    if technical_dict:
+        price = float(technical_dict.get("last_close", 0.0) or 0.0)
+        pct_change = float(technical_dict.get("pct_change_1d", 0.0) or 0.0)
+        volume = float(technical_dict.get("volume_last", 0.0) or 0.0)
+        vol_ma20 = float(technical_dict.get("vol_ma20", 0.0) or 0.0)
+        row.today_close = price or None
+        row.today_pct_change = pct_change
+        row.volume = volume
+        row.volume_ratio = round(volume / vol_ma20, 2) if vol_ma20 > 0 else 0.0
+        row.technical_score = float(technical_dict.get("technical_score", 50.0) or 50.0)
+
     # 美股關聯
     related = related_us_stocks_for_tw(row.ticker, supply_chain, project_root)
 
@@ -208,11 +299,12 @@ def _score_candidate(
             row.adr_premium_pct = float(p.get("premium_pct", 0) or 0)
             break
 
-    # day_trade 評分 (沒抓技術面/基本面 — 當沖以美股 + 籌碼為主)
+    # day_trade 評分：技術面權重最高，搭配美股連動與籌碼。
     card = compute_scorecard(
         ticker=row.ticker, name=row.name,
-        price=0.0, pct_change=0.0, volume=0.0,
+        price=price, pct_change=pct_change, volume=volume,
         chip_summary=chip_dict,
+        technical_snapshot=technical_dict,
         macro_snapshot=macro,
         related_us_stocks=related,
         adr_premium=adr_prem,
@@ -235,6 +327,7 @@ def run_intraday(
     news_limit: int = 120,
     candidate_limit: int = 25,
     force_refresh_news: bool = False,
+    force_refresh_technicals: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> IntradayReport:
     log = logger or get_logger("intraday")
@@ -333,7 +426,10 @@ def run_intraday(
         _score_candidate(
             row,
             macro=macro, supply_chain=supply_chain,
-            project_root=root, log=log,
+            project_root=root,
+            today=today,
+            refresh_technicals=force_refresh_technicals,
+            log=log,
         )
     rankings = sorted(
         pool.values(),
@@ -367,13 +463,16 @@ def run_intraday(
 
     report.duration_sec = round(time.time() - t0, 2)
 
-    # ---- 持久化 ----
     out_dir = root / "data" / "intraday" / today.isoformat()
+    report.output_dir = str(out_dir)
+
+    # ---- 持久化 ----
     mk_folder(str(out_dir))
+    report_json = _report_to_json(report)
     try:
         report_path = out_dir / "report.json"
         report_path.write_text(
-            json.dumps(_report_to_json(report), ensure_ascii=False, indent=2),
+            json.dumps(report_json, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         mirror_file_to_cloud(report_path, root=root)
@@ -383,7 +482,7 @@ def run_intraday(
             mirror_file_to_cloud(brief_path, root=root)
     except Exception:
         log.exception("intraday 持久化失敗")
-    report.output_dir = str(out_dir)
+    _persist_report_json_to_db(report_json, root=root, log=log)
 
     log.info(
         "Intraday 完成 (%.1fs, %d 題材, %d 候選, 錯誤 %d)",
@@ -470,7 +569,19 @@ def _report_to_json(r: IntradayReport) -> Dict[str, Any]:
 
 
 def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    base = (root or Path.cwd()) / "data" / "intraday"
+    root_path = root or Path.cwd()
+    try:
+        from bot.stock_db import StockDB
+        db = StockDB.open(root=root_path)
+        data = _daily_report_row_to_payload(
+            db.get_latest_llm_daily_report(REPORT_TYPE, mode="")
+        )
+        if data:
+            return data
+    except Exception:
+        get_logger("intraday").debug("load latest intraday from DB failed", exc_info=True)
+
+    base = root_path / "data" / "intraday"
     restore_tree_from_cloud(base, root=root)
     if not base.exists():
         return None
@@ -480,15 +591,100 @@ def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]
         restore_file_from_cloud(p, root=root)
         if p.exists():
             try:
-                return json.loads(p.read_text(encoding="utf-8"))
+                data = json.loads(p.read_text(encoding="utf-8"))
+                _persist_report_json_to_db(data, root=root_path, log=get_logger("intraday"))
+                return data
             except Exception:
                 continue
     return None
 
 
+def load_intraday_by_date(
+    root: Optional[Path] = None,
+    report_date: Optional[dt.date | str] = None,
+) -> Optional[Dict[str, Any]]:
+    """依 asof 日期讀取當沖報告，不會觸發 LLM 生成。"""
+    root_path = root or Path.cwd()
+    if report_date is None:
+        date_iso = now_tw().date().isoformat()
+    elif hasattr(report_date, "isoformat"):
+        date_iso = report_date.isoformat()  # type: ignore[union-attr]
+    else:
+        date_iso = str(report_date)
+
+    try:
+        from bot.stock_db import StockDB
+        db = StockDB.open(root=root_path)
+        data = _daily_report_row_to_payload(
+            db.get_llm_daily_report(REPORT_TYPE, date_iso, mode="")
+        )
+        if data:
+            return data
+    except Exception:
+        get_logger("intraday").debug("load intraday from DB failed", exc_info=True)
+
+    p = root_path / "data" / "intraday" / date_iso / "report.json"
+    restore_file_from_cloud(p, root=root_path)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        _persist_report_json_to_db(data, root=root_path, log=get_logger("intraday"))
+        return data
+    except Exception:
+        get_logger("intraday").debug("load intraday file failed: %s", p, exc_info=True)
+        return None
+
+
+def _daily_report_row_to_payload(row: Any) -> Optional[Dict[str, Any]]:
+    if row is None or not row.payload_json:
+        return None
+    try:
+        payload = json.loads(row.payload_json)
+    except Exception:
+        return None
+    if row.brief_md and not payload.get("brief_md"):
+        payload["brief_md"] = row.brief_md
+    payload.setdefault("_db_generated_at", row.generated_at)
+    payload.setdefault("_db_updated_at", row.updated_at)
+    payload.setdefault("_db_report_date", row.report_date)
+    return payload
+
+
+def _persist_report_json_to_db(
+    data: Dict[str, Any],
+    *,
+    root: Path,
+    log: logging.Logger,
+) -> None:
+    report_date = str(data.get("asof") or "").strip()
+    if not report_date:
+        return
+    try:
+        from bot.stock_db import LlmDailyReportRow, StockDB
+        db = StockDB.open(root=root)
+        db.upsert_llm_daily_report(
+            LlmDailyReportRow(
+                report_type=REPORT_TYPE,
+                report_date=report_date,
+                mode="",
+                asof=str(data.get("asof") or ""),
+                generated_at=now_tw().isoformat(timespec="seconds"),
+                market_tone=str(data.get("market_tone") or ""),
+                prompt_id=str(data.get("brief_prompt_id") or ""),
+                prompt_version=str(data.get("brief_prompt_version") or ""),
+                brief_md=str(data.get("brief_md") or ""),
+                payload_json=json.dumps(data, ensure_ascii=False),
+            )
+        )
+    except Exception:
+        log.exception("intraday DB 持久化失敗")
+
+
 __all__ = [
     "CandidateRow",
     "IntradayReport",
+    "load_intraday_by_date",
     "load_latest_intraday",
     "run_intraday",
 ]

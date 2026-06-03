@@ -292,7 +292,7 @@ def _check_login(
         accounts = api.login(
             api_key=settings.api_key,
             secret_key=settings.secret_key,
-            fetch_contract=False,
+            contracts_timeout=10_000,
         )
         out.append(CheckResult(
             "Shioaji 登入", "ok",
@@ -300,11 +300,34 @@ def _check_login(
             extra={"accounts_count": len(accounts) if accounts else 0},
         ))
     except Exception as e:
-        out.append(CheckResult(
-            "Shioaji 登入", "fail",
-            f"登入失敗: {e}",
-            "檢查 API_KEY / SECRET_KEY；若是真實環境需先在永豐 e leader 開通 Shioaji",
-        ))
+        msg = str(e)
+        low = msg.lower()
+        if "not allow" in low and "ip" in low:
+            # IP 白名單阻擋：金鑰綁定的允許 IP 不含目前對外 IP。與程式碼無關。
+            import re as _re
+            m = _re.search(r"ip:\s*([0-9a-fA-F:.]+)", msg)
+            bad_ip = m.group(1) if m else "你目前的對外 IP"
+            out.append(CheckResult(
+                "Shioaji 登入", "fail",
+                f"IP 白名單阻擋：{bad_ip} 不在這把 API 金鑰允許的 IP 清單內 (status 400)",
+                f"到永豐 e leader → API 金鑰管理，編輯這把金鑰的「IP 限制」："
+                f"家用浮動 IP 建議直接「不綁定 IP / 移除限制」，"
+                f"或把 {bad_ip} 加入允許清單。這是金鑰設定問題，非程式碼問題。",
+                extra={"reason": "ip_whitelist", "blocked_ip": bad_ip},
+            ))
+        elif "permission" in low or "401" in low:
+            out.append(CheckResult(
+                "Shioaji 登入", "fail",
+                f"API 金鑰權限不足: {msg[:120]}",
+                "到永豐 e leader → API 金鑰管理：勾選「下單」權限後重新產生金鑰",
+                extra={"reason": "no_trade_permission"},
+            ))
+        else:
+            out.append(CheckResult(
+                "Shioaji 登入", "fail",
+                f"登入失敗: {e}",
+                "檢查 API_KEY / SECRET_KEY；若是真實環境需先在永豐 e leader 開通 Shioaji",
+            ))
         return out, api, None
 
     stock_account = getattr(api, "stock_account", None)
@@ -370,7 +393,17 @@ def _check_account(
     # 商品檔 — 模擬環境不會有完整檔，info 即可
     try:
         api.fetch_contracts(contract_download=True)
-        c = api.Contracts.Stocks.get("2330")
+        stocks = api.Contracts.Stocks
+        c = (
+            stocks.get("2330")
+            or stocks.TSE.get("2330")
+            or stocks.OTC.get("2330")
+        )
+        if c is None:
+            try:
+                c = stocks["2330"]
+            except Exception:
+                c = None
         if c is not None:
             out.append(CheckResult(
                 "商品檔 (Contracts)", "ok",

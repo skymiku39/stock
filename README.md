@@ -80,6 +80,21 @@ uv run stock-preflight --json         # 給 CI / 通知用
 或在儀表板 **⚡ 執行與紀錄 → 🩺 交易可行性檢查** 點「立刻檢查」，
 會顯示 6 個分區、每項通過/警告/阻擋狀態與修復建議。
 
+### T4 DLL 實機驗證
+
+若要驗證永豐 T4 DLL，先在 `.env` 填入 `T4_LOGIN_ID`、`T4_LOGIN_PASSWORD`、
+`T4_PERSON_ID`、`T4_CA_PATH`、`T4_CA_PASSWORD`，再執行：
+
+```bash
+uv run stock-t4-validate
+uv run stock-t4-validate --read-queries
+uv run stock-t4-validate --exam1st      # 會留下官方首次測試紀錄
+uv run stock-t4-validate --order-test   # 會送出真實 T4 stock_order2 測試單
+```
+
+`stock-t4-validate` 會輸出 DLL 版本、帳號清單、CA 驗章、主動回報與受旗標保護的
+官方測試/下單結果；未完成登入、CA 與至少一個官方 order-path 測試前，不應把主交易路由切成 T4。
+
 ## 🛡 資金/風險控制 (12 道閘門 + Kill Switch)
 
 所有「實際下單」路徑都必經 `RiskGuard.check_entry()`，要全部通過才能送單；
@@ -99,6 +114,14 @@ uv run stock-preflight --json         # 給 CI / 通知用
 | `MAX_LOT_PER_SYMBOL` | 2 | 單檔最多持有張數 |
 | `MAX_OPEN_POSITIONS` | 0 (不限) | 同時最多 N 檔在倉 |
 | `BLACKLIST_SYMBOLS` | (空) | 永遠不下單的代號，逗號分隔 |
+
+### B2. 出場授權 (`.env`)
+
+| 設定 | 預設 | 說明 |
+|------|------|------|
+| `SELL_PROFIT_TARGETS` | (空) | 每檔使用者指定賣出門檻；例 `2330:8,0050:5.5` |
+
+本工具送出的買單會標記 `AIBUY`，成交紀錄會寫入 `owner_tag=AI`。自動賣出只會處理這類 AI 標籤部位；若某檔有設定 `SELL_PROFIT_TARGETS`，則必須達到該報酬率門檻後才會賣，未達標時停損、移動停利與收盤全出場都會被擋下。
 
 ### C. 損失熔斷 (`.env`) - **🚨 最重要**
 
@@ -263,6 +286,7 @@ cp .env.example .env
 | `STOP_LOSS_PCT` | 停損百分比 | `-3.0` |
 | `TAKE_PROFIT_PCT` | 停利門檻百分比 | `6.0` |
 | `TRAILING_STOP_PCT` | 移動停利回撤百分比 | `2.0` |
+| `SELL_PROFIT_TARGETS` | 每檔使用者指定賣出門檻，例如 `2330:8` | (空) |
 | `MAX_FUND` | 總資金上限 | `500000` |
 | `MAX_LOT_PER_SYMBOL` | 每檔最大張數 | `2` |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token | (選填) |
@@ -598,6 +622,41 @@ uv run stock-macro-update --no-cache --brief
 ```
 
 Windows Task Scheduler 範例：每天 06:30 跑一次 `uv run stock-macro-update --brief` (cwd 設專案根目錄)。
+
+---
+
+### 持續自動更新 + 盤中監測 (stock-scheduler)
+
+讓資料更新與盤中監測**持續在背景自動跑**，不必開著儀表板：
+
+```bash
+uv run stock-scheduler            # 常駐執行 (Ctrl+C 結束)
+uv run stock-scheduler --once     # 到期任務各跑一次即結束 (搭配 Windows 工作排程器)
+uv run stock-scheduler --dry-run  # 只印排程計畫，不實際執行
+```
+
+- **macro** 任務：定期呼叫 `stock-macro-update` 刷新行情/總經 (預設每 30 分，不打 LLM)。
+- **research** 任務：定期呼叫 `stock-auto-research` 跑完整研究管線 (預設每 240 分，含 LLM 簡報)。
+  也會自動回頭重抓**新掛牌 ETF** 的持股，一旦來源公開即補齊 CSV。
+- **monitor** 托管 (選用，`SCHEDULER_SUPERVISE_MONITOR=true`)：開盤自動啟動 `stock-bot` 監測子行程、收盤自動停止。
+- 各任務間隔、是否只在交易時段執行，皆由 `.env` 的 `SCHEDULER_*` 控制 (見 `.env.example`)。
+
+> 要 24/7 常駐，建議用 Windows 工作排程器在登入時啟動 `uv run stock-scheduler`，
+> 或每 N 分鐘觸發 `uv run stock-scheduler --once`。
+
+### 零股下單流程測試 (stock-oddlot-test)
+
+在 **Shioaji 模擬環境**下完整跑一次「盤中零股」買→查→賣流程，驗證下單程式碼路徑，
+**不會送出任何真實委託** (強制 `simulation=true`，偵測到非模擬即中止)：
+
+```bash
+uv run stock-oddlot-test                      # 預設 2330，買賣各 10 股
+uv run stock-oddlot-test --symbol 0050 --shares 5
+uv run stock-oddlot-test --no-sell            # 只測買進
+```
+
+> 註：若 API 金鑰僅有「行情(Data)」權限，下單會回 401「Token doesn't have permission」，
+> 此時需到永豐 Shioaji API 後台為金鑰開通「下單」權限 (程式流程本身已驗證正常)。
 
 **儀表板「美股 / 跨市場」頁**：六個指數 KPI、美股漲跌排序表、ADR 溢價表、LLM 簡報按鈕、供應鏈 JSON 編輯器。
 
@@ -981,6 +1040,14 @@ class MyCustomStrategy(BaseStrategy):
 
 然後在 `main.py` 中替換 `MyStrategy` 為你的策略類別即可。
 三種模式皆可使用，watch/report 模式會自動以虛擬成交記錄訊號。
+
+## 策略規劃文件
+
+- **[docs/futures-spot-strategy.md](docs/futures-spot-strategy.md)** -- 「期貨為輔、現貨為主」的 AI 自動化交易策略架構：
+  期貨 QA 精華（盤前跌開盤漲現象、4 大期貨觀察指標）+ 三套自動化策略（夜盤跳空捕捉 / 外資籌碼防禦網 / 本地 LLM 情緒分析）+ 與現有系統的落地路徑。
+  其中「台指期正逆價差」已作為**期貨領先指標**整合進當沖 / 投資分析的 LLM prompts。
+- **[docs/data-sources.md](docs/data-sources.md)** -- 所有外部資料源清單（URL、用途、是否需憑證、失敗 fallback）
+  與一鍵只讀健康度驗證 `uv run stock-validate` 的用法。
 
 ## 參考
 

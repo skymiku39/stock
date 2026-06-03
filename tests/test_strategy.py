@@ -9,6 +9,7 @@ import pytest
 
 from bot.config import Settings
 from bot.models import MarketTick, PositionInfo
+from bot.ownership import BOT_BUY_FIELD, bot_sell_field
 from bot.strategy import MyStrategy
 
 
@@ -152,6 +153,63 @@ class TestVirtualPosition:
         assert len(sells) == 1
         assert sells[0].reason == "sl"
 
+    def test_user_sell_target_triggers_virtual_sell(self) -> None:
+        settings = _make_settings(
+            run_mode="watch",
+            sell_profit_targets={"2330": 4.0},
+            enter_cutoff_time="09:30",
+            exit_time="13:15",
+        )
+        strategy = MyStrategy(broker=MagicMock(), settings=settings)
+        strategy._prev_close["2330"] = 100.0
+        strategy.positions["2330"] = PositionInfo(
+            symbol="2330", avg_price=100.0, quantity=1,
+        )
+
+        with patch("bot.strategy.now_tw_time") as mock_time:
+            mock_time.return_value = datetime.time(10, 0)
+            strategy.on_tick(_make_tick(symbol="2330", price=104.1, prev_close=100.0))
+
+        sells = [s for s in strategy.signal_recorder._signals if s.action == "would-sell"]
+        assert len(sells) == 1
+        assert sells[0].reason == "target"
+        assert "2330" not in strategy.positions
+
+    def test_user_sell_target_blocks_other_sell_before_target(self) -> None:
+        settings = _make_settings(
+            run_mode="watch",
+            sell_profit_targets={"2330": 8.0},
+            stop_loss_pct=-3.0,
+            enter_cutoff_time="09:30",
+            exit_time="13:15",
+        )
+        strategy = MyStrategy(broker=MagicMock(), settings=settings)
+        strategy._prev_close["2330"] = 100.0
+        strategy.positions["2330"] = PositionInfo(
+            symbol="2330", avg_price=100.0, quantity=1,
+        )
+
+        with patch("bot.strategy.now_tw_time") as mock_time:
+            mock_time.return_value = datetime.time(10, 0)
+            strategy.on_tick(_make_tick(symbol="2330", price=96.0, prev_close=100.0))
+
+        assert strategy.signal_recorder.signal_count == 0
+        assert "2330" in strategy.positions
+
+    def test_non_ai_position_cannot_auto_sell(self) -> None:
+        settings = _make_settings(run_mode="watch")
+        strategy = MyStrategy(broker=MagicMock(), settings=settings)
+        strategy.positions["2330"] = PositionInfo(
+            symbol="2330", avg_price=100.0, quantity=1, owner_tag="MANUAL",
+        )
+        strategy._last_price["2330"] = 110.0
+
+        result = strategy._place_stop_sell("2330", 1, "trail")
+
+        assert result is False
+        assert strategy.signal_recorder.signal_count == 0
+        assert "2330" in strategy.positions
+
 
 class TestTradeModeRegression:
     """trade 模式應繼續呼叫 broker 下單。"""
@@ -169,4 +227,25 @@ class TestTradeModeRegression:
 
         assert result is True
         broker.place_order.assert_called_once()
+        assert broker.place_order.call_args.kwargs["custom_field"] == BOT_BUY_FIELD
         assert strategy.signal_recorder.signal_count == 0
+
+    def test_place_sell_calls_broker_with_ai_sell_tag(self) -> None:
+        settings = _make_settings(run_mode="trade")
+        broker = MagicMock()
+        mock_trade = MagicMock()
+        mock_trade.order.ordno = "SELL001"
+        broker.place_market_sell.return_value = mock_trade
+
+        strategy = MyStrategy(broker=broker, settings=settings)
+        strategy.positions["2330"] = PositionInfo(
+            symbol="2330", avg_price=100.0, quantity=1,
+        )
+        strategy._last_price["2330"] = 110.0
+
+        result = strategy._place_stop_sell("2330", 1, "target")
+
+        assert result is True
+        broker.place_market_sell.assert_called_once_with(
+            "2330", 1, bot_sell_field("target"),
+        )

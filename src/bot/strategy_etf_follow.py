@@ -145,6 +145,7 @@ class EtfFollowStrategy(BaseStrategy):
     def on_tick(self, tick: MarketTick) -> None:
         symbol = tick.symbol
         price = tick.price
+        self._last_price[symbol] = price
         cur_time = now_tw_time()
 
         if symbol not in self._prev_close:
@@ -197,8 +198,15 @@ class EtfFollowStrategy(BaseStrategy):
                 hw = price
 
             drawdown_pct = 100 * (hw - price) / hw if hw > 0 else 0
+            user_target_pct = self._sell_profit_target(symbol)
 
-            if (
+            if user_target_pct is not None and pnl_pct >= user_target_pct:
+                self.logger.info(
+                    "[使用者目標賣出] %s PnL=%.2f%% (>= %.2f%%)",
+                    symbol, pnl_pct, user_target_pct,
+                )
+                self._place_stop_sell(symbol, pos.quantity, custom_field="target")
+            elif (
                 pnl_pct >= self.settings.take_profit_pct
                 and drawdown_pct >= self.settings.trailing_stop_pct
             ):

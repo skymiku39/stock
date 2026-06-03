@@ -1,5 +1,5 @@
 id: next_day_radar
-version: "1.0"
+version: "1.1"
 description: 從盤後新聞 + 今日收盤資料 + 美股盤前/盤中 + 明日法說事件，萃取「明日預備題材 + 強勢承接 + 事件焦點」
 model_hint: gemini-2.5-flash
 max_output_tokens: 3500
@@ -76,6 +76,9 @@ template: |
   - event_focus 至少 1 個 (若 catalyst_text 為空可從新聞推敲)，所有 ticker 必須是 4-6 位數台股代號
   - strong_carry 從 today_strong_text 挑 5-10 檔，過濾「量比 < 1.2」或「漲幅 > 8% 過熱」
   - 若 macro_summary 顯示美股偏空 (SOX < -2% 或 VIX > 25)，market_tone 給 risk_off 且建議拉回承接
+  - **期貨領先指標 (期貨為輔、現貨為主)**：若 macro_summary 出現「台指期逆價差擴大」且美股偏空，
+    視為情緒保守 → 偏向 risk_off / 拉回承接；若「正價差過大」且今日漲多，提醒過熱、隔日勿追高開盤。
+    夜盤 (清晨) 大跌可預判台股開盤低點，update 模式須據此下修開盤偏多力道。
   - 不可編造未在輸入中出現的代號；同一檔可重複於 carry_themes / event_focus / strong_carry，但用途要清楚
 
   ## 美股盤後/盤中概況

@@ -117,6 +117,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 提供所有策略共用的基礎設施：
 - **Queue 解耦**: Tick 回呼 → Queue → 獨立消費者 Thread
 - **部位管理**: `positions` dict，成交回報自動更新均價/數量
+- **AI 部位標籤**: 買單使用 `AIBUY`，成交後部位標記 `owner_tag=AI`
 - **委託追蹤**: `pending_orders` 防止重複下單
 - **資金追蹤**: `_fund_used` 即時追蹤已投入金額
 - **收盤出場**: 獨立 Thread 在 `exit_time` 後市價清倉
@@ -127,6 +128,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 
 繼承 BaseStrategy，實作 `on_tick()`：
 - 進場：漲幅 1%~5%、時間 < enter_cutoff_time
+- 使用者目標賣出：若 `SELL_PROFIT_TARGETS` 有該股票門檻，PnL 達標才允許自動賣出
 - 停損：PnL <= stop_loss_pct
 - 移動停利：PnL >= take_profit_pct 且從高點回撤 >= trailing_stop_pct
 - 全出場：exit_time 後由 BaseStrategy 自動處理
@@ -134,6 +136,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 ### models.py -- 資料模型
 
 - `PositionInfo` -- 持倉資訊（股號、均價、數量、進場時間）
+- `owner_tag=AI` -- 標記此部位由本工具買進，所有自動賣出會先檢查此標籤
 - `OrderRecord` -- 委託紀錄（委託號、股號、方向、類型）
 - `MarketTick` -- 跨來源正規化行情
 - `SignalEvent` -- 看盤/報表模式的交易意圖訊號
@@ -141,7 +144,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 ### recorder.py -- 交易紀錄
 
 - `record_deal(msg)` -- 暫存成交回報
-- `export_csv()` -- 匯出 CSV 至 `data/trades_YYYY-MM-DD.csv`
+- `export_csv()` -- 匯出 CSV 至 `data/trades_YYYY-MM-DD.csv`，包含 `custom_field` 與 `owner_tag`
 - `summary()` -- 產生統計摘要（筆數、買賣金額）
 
 ### signal_recorder.py -- 訊號與分析報表

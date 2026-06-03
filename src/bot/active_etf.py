@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 # 比直接打散在 12+ 投信官網 (URL 格式都不一樣) 更可靠且更易於 LLM 解析。
 # 使用者可在「主動 ETF 追蹤」頁覆寫成各家投信的官方頁。
 _ETFINFO_HOLDINGS = "https://www.etfinfo.tw/etf/{symbol}/holdings"
+# MoneyDJ ETF 成分股頁 (前十大持股 + 區域/產業配置)。
+# 用於 etfinfo.tw 尚未收錄的標的 (例：部分 2026 新掛牌主動式 ETF 與海外型)。
+# 同時支援台股 (4 位數代號) 與海外持股 (公司名)。
+_MONEYDJ_HOLDINGS = "https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw"
 
 DEFAULT_ACTIVE_ETFS: List[Dict[str, str]] = [
     {"symbol": "00980A", "name": "主動野村臺灣優選", "issuer": "野村投信", "region": "台灣", "freq": "季配",
@@ -79,23 +83,23 @@ DEFAULT_ACTIVE_ETFS: List[Dict[str, str]] = [
     {"symbol": "00997A", "name": "主動群益美國增長", "issuer": "群益投信", "region": "美國", "freq": "季配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00997A")},
     {"symbol": "00998A", "name": "主動復華金融股息", "issuer": "復華投信", "region": "全球", "freq": "季配",
-     "holdings_url": "https://www.fhtrust.com.tw/ETF/etf_detail/ETF24"},
+     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00998A")},
     {"symbol": "00400A", "name": "主動國泰動能高息", "issuer": "國泰投信", "region": "台灣", "freq": "月配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00400A")},
     {"symbol": "00401A", "name": "主動摩根台灣鑫收", "issuer": "摩根投信", "region": "台灣", "freq": "月配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00401A")},
     {"symbol": "00402A", "name": "主動安聯美國科技", "issuer": "安聯投信", "region": "美國", "freq": "-",
-     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00402A")},
+     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00402A")},
     {"symbol": "00403A", "name": "主動統一升級50", "issuer": "統一投信", "region": "台灣", "freq": "季配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00403A")},
     {"symbol": "00404A", "name": "主動聯博全球非投", "issuer": "聯博投信", "region": "全球", "freq": "月配",
-     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00404A")},
+     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00404A")},
     {"symbol": "00405A", "name": "主動富邦台灣龍耀", "issuer": "富邦投信", "region": "台灣", "freq": "-",
-     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00405A")},
+     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00405A")},
     {"symbol": "00406A", "name": "主動中信台灣收益", "issuer": "中國信託投信", "region": "台灣", "freq": "月配",
-     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00406A")},
+     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00406A")},
     {"symbol": "00407A", "name": "主動凱基台灣", "issuer": "凱基投信", "region": "台灣", "freq": "不配息",
-     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00407A")},
+     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00407A")},
 ]
 
 

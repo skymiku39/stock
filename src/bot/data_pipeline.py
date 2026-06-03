@@ -477,6 +477,7 @@ def run_full_pipeline(
                     [{k: v for k, v in d.items() if k != "rows"} for d in run.chip_summaries],
                     ensure_ascii=False, indent=2,
                 ),
+                macro_summary=_pipeline_macro_text(macro_snap_dict),
             )
             run.daily_brief_md = raw or "(LLM 未產出內容)"
             run.daily_brief_prompt_id = info.get("prompt_id", "")
@@ -588,6 +589,17 @@ def load_pipeline_run(root: Path, run_id: str) -> Optional[PipelineRun]:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _pipeline_macro_text(macro_dict: Dict[str, Any]) -> str:
+    """組合給 daily_brief 用的「總經 + 期貨領先指標」摘要文字。"""
+    if not macro_dict:
+        return "(無 macro 資料)"
+    try:
+        from bot.intraday_pipeline import _macro_summary_text
+        return _macro_summary_text(macro_dict)
+    except Exception:
+        return "(macro 摘要產生失敗)"
 
 
 def _top_movers(macro_dict: Dict[str, Any]) -> List[Dict[str, Any]]:

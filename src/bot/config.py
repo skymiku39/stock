@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import datetime
-from typing import Annotated, List, Literal
+from typing import Annotated, Dict, List, Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # --- 執行模式 ---
     run_mode: Literal["trade", "watch", "report"] = "trade"
+    broker_backend: Literal["shioaji", "t4"] = "shioaji"
     market_source: Literal["shioaji", "twse_public", ""] = ""
     report_poll_seconds: int = 5
     report_output_dir: str = "data/reports"
@@ -23,6 +24,17 @@ class Settings(BaseSettings):
     # --- Shioaji 登入 ---
     api_key: str = ""
     secret_key: str = ""
+
+    # --- T4 DLL 下單元件 (Windows-only；目前作為下單 adapter 測試骨架) ---
+    t4_dll_path: str = ""
+    t4_dll_dir: str = ""
+    t4_login_id: str = ""
+    t4_login_password: str = ""
+    t4_person_id: str = ""
+    t4_ca_path: str = ""
+    t4_ca_password: str = ""
+    t4_stock_branch: str = ""
+    t4_stock_account: str = ""
 
     # --- 電子憑證 ---
     ca_path: str = ""
@@ -60,6 +72,38 @@ class Settings(BaseSettings):
     stop_loss_pct: float = -3.0
     take_profit_pct: float = 6.0
     trailing_stop_pct: float = 2.0  # 從最高點回撤此百分比則觸發停利
+    sell_profit_targets: Annotated[Dict[str, float], NoDecode] = Field(default_factory=dict)
+    # 例: SELL_PROFIT_TARGETS=2330:8,0050:5.5
+    # 有設定的股票，AI 部位只有在報酬率達到該門檻後才允許自動賣出。
+
+    @field_validator("sell_profit_targets", mode="before")
+    @classmethod
+    def _parse_sell_profit_targets(cls, v: object) -> Dict[str, float]:
+        if v in (None, ""):
+            return {}
+        if isinstance(v, dict):
+            return {str(k).strip(): float(val) for k, val in v.items() if str(k).strip()}
+        if isinstance(v, str):
+            out: Dict[str, float] = {}
+            for raw_item in v.replace(";", ",").split(","):
+                item = raw_item.strip()
+                if not item:
+                    continue
+                if ":" in item:
+                    symbol, pct = item.split(":", 1)
+                elif "=" in item:
+                    symbol, pct = item.split("=", 1)
+                else:
+                    raise ValueError(
+                        "SELL_PROFIT_TARGETS must use SYMBOL:PCT pairs, "
+                        f"got {item!r}"
+                    )
+                symbol = symbol.strip()
+                if not symbol:
+                    raise ValueError("SELL_PROFIT_TARGETS contains an empty symbol")
+                out[symbol] = float(pct.strip())
+            return out
+        raise ValueError(f"Cannot parse sell_profit_targets from {v!r}")
 
     # --- 資金控管 (基本) ---
     max_fund: int = 500_000              # 總可用資金上限 (TWD)
@@ -114,6 +158,25 @@ class Settings(BaseSettings):
     pipeline_generate_brief: bool = True
     pipeline_fetch_macro: bool = True
     pipeline_generate_us_brief: bool = True
+
+    # --- 背景排程器 (stock-scheduler) ---
+    # 讓資料更新與盤中監測「持續自動執行」，不需開著儀表板。
+    scheduler_enabled: bool = True
+    scheduler_tick_seconds: int = 30          # 主迴圈每隔幾秒檢查一次有無到期任務
+    # 輕量行情/總經刷新 (不打 LLM，成本低)；<=0 停用
+    scheduler_macro_interval_min: int = 30
+    scheduler_fundamentals_interval_min: int = 360
+    scheduler_fundamentals_args: str = "--limit 3 --stale-days 30 --delay-seconds 30"
+    # 完整研究管線 (ETF/籌碼/基本面/法說 + LLM 簡報)；<=0 停用
+    scheduler_research_interval_min: int = 240
+    # 傳給 stock-auto-research 的額外參數 (例如 "--no-brief" 省 LLM 成本)
+    scheduler_research_args: str = ""
+    # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
+    scheduler_market_hours_only: bool = True
+    scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪
+    # 盤中自動托管 stock-bot 監測子行程 (開盤啟動、收盤停止)
+    scheduler_supervise_monitor: bool = False
+    scheduler_monitor_mode: Literal["watch", "report", "trade"] = "watch"
 
     # --- 本地股票資料庫 (SQLite) ---
     # 留空 = 預設 data/stock.db；可指向同步資料夾，例如:

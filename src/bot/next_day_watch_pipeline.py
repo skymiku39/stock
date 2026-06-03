@@ -41,6 +41,9 @@ from bot.news_fetcher import fetch_today_news, news_to_compact_text
 from bot.utils import get_logger, mk_folder, now_tw
 
 
+REPORT_TYPE = "next_day_watch"
+
+
 # ----------------------------------------------------------------------
 # 資料模型
 # ----------------------------------------------------------------------
@@ -355,6 +358,32 @@ def _strong_carry_text(
     return "\n".join(lines)
 
 
+def _radar_candidate_tickers(report: NextDayReport) -> List[Tuple[str, str]]:
+    """Collect tickers discovered by LLM radar output."""
+    out: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(raw_ticker: Any, raw_name: Any = "") -> None:
+        ticker = str(raw_ticker or "").strip()
+        if not ticker or not ticker.isdigit() or ticker in seen:
+            return
+        seen.add(ticker)
+        out.append((ticker, str(raw_name or "").strip()))
+
+    for theme in report.carry_themes:
+        for candidate in theme.get("candidate_tickers", []) or []:
+            add(candidate.get("ticker"), candidate.get("name"))
+
+    for candidate in report.strong_carry_llm:
+        add(candidate.get("ticker"), candidate.get("name"))
+
+    for event in report.event_focus:
+        for candidate in event.get("tickers", []) or []:
+            add(candidate.get("ticker"), candidate.get("name"))
+
+    return out
+
+
 def _catalyst_text(events: List[Dict[str, Any]]) -> str:
     if not events:
         return "(無已知法說/權息)"
@@ -528,6 +557,29 @@ def run_next_day_watch(
     else:
         log.info("[5/7] (略) LLM 未啟用")
 
+    # LLM can discover topical/event candidates that were not in the initial
+    # watchlist/ETF/event scan. Fill their technical/chip data before scoring.
+    radar_tickers = _radar_candidate_tickers(report)
+    for ticker, name in radar_tickers:
+        if name:
+            name_map.setdefault(ticker, name)
+    missing_radar_tickers = [
+        ticker for ticker, _name in radar_tickers if ticker not in strength_map
+    ]
+    if missing_radar_tickers:
+        log.info(
+            "[5.5/7] 補掃 LLM 題材/事件候選 %d 檔今日強勢度 ...",
+            len(missing_radar_tickers),
+        )
+        strength_map.update(_scan_today_strength(
+            missing_radar_tickers,
+            today=today,
+            project_root=root,
+            refresh=force_refresh_technicals,
+            log=log,
+            max_tickers=scan_limit,
+        ))
+
     # ---- 6. 合併候選股 + 算 next_day_score ----
     log.info("[6/7] 合併三大來源 + 排序 ...")
     pool: Dict[str, NextDayCandidate] = {}
@@ -674,14 +726,17 @@ def run_next_day_watch(
 
     report.duration_sec = round(time.time() - t0, 2)
 
-    # ---- 持久化 ----
     out_dir = root / "data" / "next_day_watch" / target.isoformat()
+    report.output_dir = str(out_dir)
+
+    # ---- 持久化 ----
     mk_folder(str(out_dir))
+    report_json = _report_to_json(report)
     try:
         # 同一目標日 draft / update 各存一份
         fname = "report.json" if mode == "draft" else "report_update.json"
         (out_dir / fname).write_text(
-            json.dumps(_report_to_json(report), ensure_ascii=False, indent=2),
+            json.dumps(report_json, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         if report.brief_md:
@@ -689,7 +744,7 @@ def run_next_day_watch(
             (out_dir / brief_name).write_text(report.brief_md, encoding="utf-8")
     except Exception:
         log.exception("next-day 持久化失敗")
-    report.output_dir = str(out_dir)
+    _persist_report_json_to_db(report_json, root=root, log=log)
 
     log.info(
         "next-day-watch 完成 (%.1fs, 題材 %d / 候選 %d / 事件 %d / 錯誤 %d)",
@@ -768,7 +823,27 @@ def load_latest_next_day(
 
     優先讀 ``report_update.json`` (凌晨更新版)，沒有再退 ``report.json``。
     """
-    base = (root or Path.cwd()) / "data" / "next_day_watch"
+    root_path = root or Path.cwd()
+    try:
+        from bot.stock_db import StockDB
+        db = StockDB.open(root=root_path)
+        rows = db.list_llm_daily_reports(report_type=REPORT_TYPE, limit=200)
+        seen_dates: List[str] = []
+        for row in rows:
+            if row.report_date not in seen_dates:
+                seen_dates.append(row.report_date)
+        for date_iso in seen_dates:
+            data = load_next_day_by_date(
+                root_path,
+                date_iso,
+                prefer_update=prefer_update,
+            )
+            if data:
+                return data
+    except Exception:
+        get_logger("next-day").debug("load latest next-day from DB failed", exc_info=True)
+
+    base = root_path / "data" / "next_day_watch"
     if not base.exists():
         return None
     days = sorted([d for d in base.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
@@ -778,15 +853,174 @@ def load_latest_next_day(
             p = d / fname
             if p.exists():
                 try:
-                    return json.loads(p.read_text(encoding="utf-8"))
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    _persist_report_json_to_db(data, root=root_path, log=get_logger("next-day"))
+                    return data
                 except Exception:
                     continue
     return None
 
 
+def load_next_day_by_date(
+    root: Optional[Path] = None,
+    target_date: Optional[dt.date | str] = None,
+    *,
+    prefer_update: bool = True,
+    mode: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """依 target_date 讀取明日當沖報告，不會觸發 LLM 生成。"""
+    root_path = root or Path.cwd()
+    if target_date is None:
+        date_iso = next_trading_day(now_tw().date()).isoformat()
+    elif hasattr(target_date, "isoformat"):
+        date_iso = target_date.isoformat()  # type: ignore[union-attr]
+    else:
+        date_iso = str(target_date)
+
+    modes = [mode] if mode else (
+        ["update", "draft"] if prefer_update else ["draft", "update"]
+    )
+
+    try:
+        from bot.stock_db import StockDB
+        db = StockDB.open(root=root_path)
+        for m in modes:
+            data = _daily_report_row_to_payload(
+                db.get_llm_daily_report(REPORT_TYPE, date_iso, mode=m or "")
+            )
+            if data:
+                return data
+    except Exception:
+        get_logger("next-day").debug("load next-day from DB failed", exc_info=True)
+
+    file_names = {
+        "draft": "report.json",
+        "update": "report_update.json",
+    }
+    for m in modes:
+        fname = file_names.get(m or "")
+        if not fname:
+            continue
+        p = root_path / "data" / "next_day_watch" / date_iso / fname
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            _persist_report_json_to_db(data, root=root_path, log=get_logger("next-day"))
+            return data
+        except Exception:
+            get_logger("next-day").debug("load next-day file failed: %s", p, exc_info=True)
+    return None
+
+
+def load_next_day_by_asof(
+    root: Optional[Path] = None,
+    asof_date: Optional[dt.date | str] = None,
+    *,
+    prefer_update: bool = True,
+    mode: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """依產生日(asof)讀取明日當沖報告，不會觸發 LLM 生成。"""
+    root_path = root or Path.cwd()
+    if asof_date is None:
+        date_iso = now_tw().date().isoformat()
+    elif hasattr(asof_date, "isoformat"):
+        date_iso = asof_date.isoformat()  # type: ignore[union-attr]
+    else:
+        date_iso = str(asof_date)
+
+    try:
+        from bot.stock_db import StockDB
+        db = StockDB.open(root=root_path)
+        rows = db.list_llm_daily_reports(report_type=REPORT_TYPE, limit=500)
+        seen_dates: List[str] = []
+        for row in rows:
+            if row.asof != date_iso:
+                continue
+            if mode is not None and row.mode != mode:
+                continue
+            if row.report_date not in seen_dates:
+                seen_dates.append(row.report_date)
+        for target_iso in seen_dates:
+            data = load_next_day_by_date(
+                root_path,
+                target_iso,
+                prefer_update=prefer_update,
+                mode=mode,
+            )
+            if data and str(data.get("asof") or "") == date_iso:
+                return data
+    except Exception:
+        get_logger("next-day").debug("load next-day by asof from DB failed", exc_info=True)
+
+    base = root_path / "data" / "next_day_watch"
+    if not base.exists():
+        return None
+    days = sorted([d for d in base.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
+    for d in days:
+        data = load_next_day_by_date(
+            root_path,
+            d.name,
+            prefer_update=prefer_update,
+            mode=mode,
+        )
+        if data and str(data.get("asof") or "") == date_iso:
+            return data
+    return None
+
+
+def _daily_report_row_to_payload(row: Any) -> Optional[Dict[str, Any]]:
+    if row is None or not row.payload_json:
+        return None
+    try:
+        payload = json.loads(row.payload_json)
+    except Exception:
+        return None
+    if row.brief_md and not payload.get("brief_md"):
+        payload["brief_md"] = row.brief_md
+    payload.setdefault("_db_generated_at", row.generated_at)
+    payload.setdefault("_db_updated_at", row.updated_at)
+    payload.setdefault("_db_report_date", row.report_date)
+    payload.setdefault("_db_mode", row.mode)
+    return payload
+
+
+def _persist_report_json_to_db(
+    data: Dict[str, Any],
+    *,
+    root: Path,
+    log: logging.Logger,
+) -> None:
+    report_date = str(data.get("target_date") or "").strip()
+    if not report_date:
+        return
+    mode = str(data.get("mode") or "draft")
+    try:
+        from bot.stock_db import LlmDailyReportRow, StockDB
+        db = StockDB.open(root=root)
+        db.upsert_llm_daily_report(
+            LlmDailyReportRow(
+                report_type=REPORT_TYPE,
+                report_date=report_date,
+                mode=mode,
+                asof=str(data.get("asof") or ""),
+                generated_at=now_tw().isoformat(timespec="seconds"),
+                market_tone=str(data.get("market_tone") or ""),
+                prompt_id=str(data.get("brief_prompt_id") or ""),
+                prompt_version=str(data.get("brief_prompt_version") or ""),
+                brief_md=str(data.get("brief_md") or ""),
+                payload_json=json.dumps(data, ensure_ascii=False),
+            )
+        )
+    except Exception:
+        log.exception("next-day DB 持久化失敗")
+
+
 __all__ = [
     "NextDayCandidate",
     "NextDayReport",
+    "load_next_day_by_asof",
+    "load_next_day_by_date",
     "load_latest_next_day",
     "next_trading_day",
     "run_next_day_watch",

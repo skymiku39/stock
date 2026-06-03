@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,6 +88,17 @@ class PresentationText:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# 主機設定
+# ----------------------------------------------------------------------
+#
+# MOPS 於 2024-2025 改版後，舊網域 mops.twse.com.tw 的 ajax 端點會回
+# 「FOR SECURITY REASONS, THIS PAGE CAN NOT BE ACCESSED」安全性阻擋頁。
+# 目前可正常存取的主機為 mopsov.twse.com.tw (公開查詢介面)。
+# 可用環境變數 MOPS_HOST 覆寫 (例如官方再次搬遷時)。
+MOPS_HOST = os.environ.get("MOPS_HOST", "https://mopsov.twse.com.tw").rstrip("/")
+
+
 def _new_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
@@ -96,17 +108,24 @@ def _new_session() -> requests.Session:
             "Chrome/124.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Referer": f"{MOPS_HOST}/mops/web/index",
     })
     return s
+
+
+def _is_security_block(html: str) -> bool:
+    """偵測 MOPS 安全性阻擋頁 (HTTP 200 但無資料)。"""
+    head = (html or "")[:400].upper()
+    return "FOR SECURITY REASONS" in head or "CAN NOT BE ACCESSED" in head
 
 
 # ----------------------------------------------------------------------
 # 法說會行事曆
 # ----------------------------------------------------------------------
 
-# MOPS 「投資人關係 → 法人說明會」實際頁面是動態 JSP；以下端點是公開的查詢介面。
-# 若主管機關調整路徑，使用者可自行覆寫 MOPS_CONF_URL。
-MOPS_CONF_URL = "https://mops.twse.com.tw/mops/web/ajax_t100sb02_1"
+# MOPS 「投資人關係 → 法人說明會」公開查詢端點 (動態 JSP)。
+# 走 mopsov 主機；若主管機關調整路徑，可用環境變數 MOPS_HOST 覆寫主機。
+MOPS_CONF_URL = f"{MOPS_HOST}/mops/web/ajax_t100sb02_1"
 
 
 def fetch_conference_schedule(
@@ -135,6 +154,12 @@ def fetch_conference_schedule(
     try:
         resp = sess.post(MOPS_CONF_URL, data=payload, timeout=15)
         resp.encoding = "utf-8"
+        if _is_security_block(resp.text):
+            log.warning(
+                "MOPS 法說會行事曆被安全性阻擋 (%s)；可設定 MOPS_HOST 覆寫主機",
+                MOPS_CONF_URL,
+            )
+            return []
         return _parse_conference_html(resp.text, year_roc, month, log)
     except Exception:
         log.exception("MOPS 法說會行事曆抓取失敗")
@@ -211,7 +236,9 @@ def _parse_conference_html(
 # 重大訊息
 # ----------------------------------------------------------------------
 
-MOPS_MATERIAL_URL = "https://mops.twse.com.tw/mops/web/ajax_t05st02"
+MOPS_MATERIAL_URL = f"{MOPS_HOST}/mops/web/ajax_t05st02"
+# TWSE OpenAPI「上市公司每日重大訊息」(公開、穩定 JSON；僅含最近交易日全市場)
+URL_MATERIAL_OPENAPI = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
 
 
 def fetch_material_info(
@@ -220,9 +247,24 @@ def fetch_material_info(
     logger: Optional[logging.Logger] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MaterialInfo]:
-    """個股重大訊息歷史查詢。"""
+    """個股重大訊息查詢。
+
+    來源優先序：
+    1. TWSE OpenAPI ``t187ap04_L`` (上市公司每日重大訊息)：公開、穩定 JSON，
+       但只含「最近交易日」全市場資料 → 篩出該 ticker 當日訊息。
+    2. mopsov 個股歷史查詢 ``ajax_t05st02``：可查歷史，但 MOPS 偶有阻擋/查無資料。
+
+    兩者皆失敗時回空清單 (呼叫端可用長度 0 + log 判斷)。
+    """
     log = logger or get_logger("mops")
     sess = session or _new_session()
+
+    # ---- 1. OpenAPI 每日重大訊息 ----
+    out = _fetch_material_openapi(ticker, sess, log)
+    if out:
+        return out
+
+    # ---- 2. mopsov 個股歷史 fallback ----
     if year_roc is None:
         year_roc = dt.date.today().year - 1911
     payload = {
@@ -237,10 +279,70 @@ def fetch_material_info(
     try:
         resp = sess.post(MOPS_MATERIAL_URL, data=payload, timeout=15)
         resp.encoding = "utf-8"
+        if _is_security_block(resp.text):
+            log.warning("MOPS 重大訊息被安全性阻擋: %s (可設 MOPS_HOST 覆寫)", ticker)
+            return []
         return _parse_material_html(resp.text, ticker, log)
     except Exception:
         log.exception("MOPS 重大訊息抓取失敗: %s", ticker)
         return []
+
+
+def _fetch_material_openapi(
+    ticker: str,
+    sess: requests.Session,
+    log: logging.Logger,
+) -> List[MaterialInfo]:
+    """從 TWSE OpenAPI t187ap04_L 取該 ticker 的當日重大訊息。"""
+    try:
+        resp = sess.get(URL_MATERIAL_OPENAPI, timeout=20)
+        if resp.status_code != 200:
+            log.warning("重大訊息 OpenAPI HTTP %d", resp.status_code)
+            return []
+        data = resp.json()
+    except Exception:
+        log.debug("重大訊息 OpenAPI 抓取/解析失敗", exc_info=True)
+        return []
+    out: List[MaterialInfo] = []
+    for row in data if isinstance(data, list) else []:
+        code = str(row.get("公司代號") or "").strip()
+        if code != ticker:
+            continue
+        d = _roc_to_date(str(row.get("發言日期") or row.get("出表日期") or ""))
+        if d is None:
+            continue
+        # 欄位「主旨 」尾端可能帶空白
+        subject = ""
+        for k, v in row.items():
+            if k.strip() == "主旨":
+                subject = str(v).strip()
+                break
+        out.append(MaterialInfo(
+            date=d,
+            time=str(row.get("發言時間") or "").strip(),
+            ticker=code,
+            company=str(row.get("公司名稱") or "").strip(),
+            subject=subject,
+        ))
+    if out:
+        log.info("重大訊息 OpenAPI %s -> %d 筆 (當日)", ticker, len(out))
+    return out
+
+
+def _roc_to_date(s: str) -> Optional[dt.date]:
+    """民國 YYYMMDD / 西元 YYYYMMDD / YYY/MM/DD → date。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())
+    try:
+        if len(digits) == 8:  # 西元
+            return dt.date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+        if len(digits) == 7:  # 民國
+            return dt.date(int(digits[:3]) + 1911, int(digits[3:5]), int(digits[5:7]))
+    except ValueError:
+        return None
+    return None
 
 
 def _parse_material_html(

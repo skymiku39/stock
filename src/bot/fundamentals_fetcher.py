@@ -3,7 +3,7 @@
 涵蓋面向（對應 Gemini 對話框架）：
 * 每月營收 (含 YoY/MoM) -- TWSE OpenAPI `t187ap05_L`
 * 每日 PER / PBR / 殖利率 -- TWSE OpenAPI `BWIBBU_ALL`
-* 歷年股利政策 -- TWSE OpenAPI `t187ap46_L_dividend`
+* 歷年股利政策 -- TWSE OpenAPI `t187ap45_L` (上市) + mopsfin `t187ap45_O.csv` (上櫃)
 * EPS / 三率（毛利率、營業利益率、淨利率）-- MOPS 季報，
   另支援使用者匯入 CSV (data/fundamentals_manual/<ticker>.json)
 
@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
 import json
 import logging
 from dataclasses import asdict, dataclass, field
@@ -46,8 +48,24 @@ URL_BWIBBU_ALL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
 # 上櫃個股本益比 / 殖利率 / 股價淨值比
 URL_TPEX_VALUATION = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
 
-# 個股股利分派 (年度)
-URL_DIVIDEND = "https://openapi.twse.com.tw/v1/opendata/t187ap46_L_ex"
+# 個股股利分派情形 (決議/擬議)
+# 舊端點 t187ap46_L_ex 已失效 (回 HTML 404)；改用 TWSE OpenAPI 目前列出的
+# t187ap45_L「股利分派情形－決議（擬議）」。注意此資料為「現行決議」快照，
+# 含現金/股票股利各構成欄位，但**不含除息/除權日**。
+URL_DIVIDEND = "https://openapi.twse.com.tw/v1/opendata/t187ap45_L"
+# 上櫃股利分派情形 (CSV，欄位與上市相同；mopsfin 提供)
+URL_TPEX_DIVIDEND_CSV = "https://mopsfin.twse.com.tw/opendata/t187ap45_O.csv"
+
+_DIVIDEND_SOURCE_STATE_FILE = "dividends_source_state.json"
+_DIVIDEND_MIN_RETRY_SECONDS = 6 * 3600
+_DIVIDEND_MAX_RETRY_SECONDS = 48 * 3600
+_DIVIDEND_BLOCK_MARKERS = (
+    "\u60a8\u7684\u700f\u89bd\u91cf\u7570\u5e38",
+    "\u76ee\u524d\u66ab\u6642\u95dc\u9589\u670d\u52d9",
+    "FOR SECURITY REASONS",
+    "Too Many Requests",
+    "rate limit",
+)
 
 # 季報綜合損益表 (EPS、三率) — TWSE OpenAPI，依產業別分檔，免登入且穩定。
 # 注意：TWSE 季報的損益數字為「年度累計」(Q2=上半年、Q3=前三季、Q4=全年)，
@@ -245,6 +263,89 @@ def _read_json_cache(path: Path, ttl_seconds: Optional[int] = None) -> Optional[
 
 def _write_json_cache(path: Path, data: Any) -> None:
     _write_cloud_json_cache(path, data, indent=2)
+
+
+def _parse_tw_datetime(value: Any) -> Optional[dt.datetime]:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=now_tw().tzinfo)
+    return parsed
+
+
+def _dividend_source_state_path(root: Optional[Path] = None) -> Path:
+    return _cache_root(root) / _DIVIDEND_SOURCE_STATE_FILE
+
+
+def _read_dividend_source_state(root: Optional[Path] = None) -> Dict[str, Any]:
+    data = _read_json_cache(_dividend_source_state_path(root))
+    return data if isinstance(data, dict) else {}
+
+
+def _write_dividend_source_state(
+    root: Optional[Path],
+    state: Dict[str, Any],
+) -> None:
+    _write_json_cache(_dividend_source_state_path(root), state)
+
+
+def _dividend_fetch_deferred(
+    state: Dict[str, Any],
+    now: Optional[dt.datetime] = None,
+) -> bool:
+    next_attempt = _parse_tw_datetime(state.get("next_attempt_at"))
+    return bool(next_attempt and next_attempt > (now or now_tw()))
+
+
+def _record_dividend_fetch_success(root: Optional[Path]) -> None:
+    now_iso = now_tw().isoformat(timespec="seconds")
+    prev = _read_dividend_source_state(root)
+    _write_dividend_source_state(root, {
+        "source": "twse_tpex_dividend",
+        "status": "ok",
+        "last_attempt_at": now_iso,
+        "last_success_at": now_iso,
+        "next_attempt_at": "",
+        "fail_count": 0,
+        "last_error": "",
+        "previous_error": str(prev.get("last_error") or ""),
+    })
+
+
+def _record_dividend_fetch_failure(
+    root: Optional[Path],
+    errors: List[str],
+    *,
+    partial: bool = False,
+) -> Dict[str, Any]:
+    prev = _read_dividend_source_state(root)
+    now = now_tw()
+    fail_count = int(prev.get("fail_count") or 0) + 1
+    delay = min(
+        _DIVIDEND_MIN_RETRY_SECONDS * (2 ** max(0, fail_count - 1)),
+        _DIVIDEND_MAX_RETRY_SECONDS,
+    )
+    next_attempt = now + dt.timedelta(seconds=delay)
+    state = {
+        "source": "twse_tpex_dividend",
+        "status": "partial" if partial else "failed",
+        "last_attempt_at": now.isoformat(timespec="seconds"),
+        "last_success_at": str(prev.get("last_success_at") or ""),
+        "next_attempt_at": next_attempt.isoformat(timespec="seconds"),
+        "fail_count": fail_count,
+        "last_error": "; ".join(e for e in errors if e)[:500],
+    }
+    _write_dividend_source_state(root, state)
+    return state
+
+
+def _looks_like_source_block(text: str) -> bool:
+    sample = (text or "")[:3000].lower()
+    return any(marker.lower() in sample for marker in _DIVIDEND_BLOCK_MARKERS)
 
 
 def _to_float(x: Any) -> float:
@@ -503,7 +604,39 @@ def fetch_valuation(
 # ----------------------------------------------------------------------
 
 
+def _parse_tpex_dividend_csv(text: str) -> List[Dict[str, Any]]:
+    """把上櫃 t187ap45_O.csv 解析成與上市 JSON 相容的 list[dict]。"""
+    out: List[Dict[str, Any]] = []
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            # csv 鍵與 JSON 鍵相同 (公司代號/股利年度/股東配發-...)，可直接沿用
+            out.append({k: (v or "").strip() for k, v in row.items() if k})
+    except Exception:
+        pass
+    return out
+
+
 def fetch_dividend_all(
+    *,
+    root: Optional[Path] = None,
+    session: Optional[requests.Session] = None,
+    use_cache: bool = True,
+    cache_ttl: int = 24 * 3600,
+    logger: Optional[logging.Logger] = None,
+) -> List[Dict[str, Any]]:
+    """抓全市場股利分派情形 (上市 JSON + 上櫃 CSV，合併原始 list[dict])。"""
+    return _fetch_dividend_all_resilient(
+        root=root,
+        session=session,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        logger=logger,
+    )
+
+
+# t187ap45_L / t187ap45_O 的現金/股票股利各構成欄位 (盈餘 + 法定盈餘公積 + 資本公積)
+def _fetch_dividend_all_resilient(
     *,
     root: Optional[Path] = None,
     session: Optional[requests.Session] = None,
@@ -514,37 +647,134 @@ def fetch_dividend_all(
     log = logger or get_logger("fundamentals")
     sess = session or _session()
     cache = _cache_root(root) / "dividends_all.json"
+    stale_cached = _read_json_cache(cache) if use_cache else None
+
     if use_cache:
         cached = _read_json_cache(cache, ttl_seconds=cache_ttl)
         if cached is not None:
             return cached
+        state = _read_dividend_source_state(root)
+        if _dividend_fetch_deferred(state):
+            next_attempt = str(state.get("next_attempt_at") or "")
+            if stale_cached is not None:
+                log.info(
+                    "Dividend source in backoff until %s; using stale local cache",
+                    next_attempt,
+                )
+                return stale_cached
+            log.info(
+                "Dividend source in backoff until %s; no local cache available",
+                next_attempt,
+            )
+            return []
+
+    combined: List[Dict[str, Any]] = []
+    failures: List[str] = []
+    source_ok = 0
+
     try:
         resp = sess.get(URL_DIVIDEND, timeout=20)
-        if resp.status_code != 200:
-            log.warning("Dividend HTTP %d", resp.status_code)
-            return []
-        data = resp.json()
-        if isinstance(data, list):
-            _write_json_cache(cache, data)
-            return data
-    except Exception:
-        log.exception("Dividend 抓取失敗")
-    return []
+        if resp.status_code == 200:
+            if _looks_like_source_block(resp.text):
+                failures.append("twse: source block")
+                log.warning("Dividend(twse) source block detected")
+            else:
+                data = resp.json()
+                if isinstance(data, list):
+                    combined.extend(data)
+                    source_ok += 1
+                else:
+                    failures.append("twse: unexpected JSON payload")
+        else:
+            failures.append(f"twse: HTTP {resp.status_code}")
+            log.warning("Dividend(twse) HTTP %d", resp.status_code)
+    except Exception as exc:
+        failures.append(f"twse: {type(exc).__name__}")
+        log.exception("Dividend(twse) fetch failed")
+
+    try:
+        resp = sess.get(URL_TPEX_DIVIDEND_CSV, timeout=20)
+        if resp.status_code == 200:
+            resp.encoding = "utf-8-sig"
+            if _looks_like_source_block(resp.text):
+                failures.append("tpex: source block")
+                log.warning("Dividend(tpex) source block detected")
+            else:
+                combined.extend(_parse_tpex_dividend_csv(resp.text))
+                source_ok += 1
+        else:
+            failures.append(f"tpex: HTTP {resp.status_code}")
+            log.warning("Dividend(tpex) HTTP %d", resp.status_code)
+    except Exception as exc:
+        failures.append(f"tpex: {type(exc).__name__}")
+        log.exception("Dividend(tpex) fetch failed")
+
+    if combined and not failures and source_ok >= 2:
+        _write_json_cache(cache, combined)
+        _record_dividend_fetch_success(root)
+        return combined
+
+    if combined and stale_cached is None:
+        _write_json_cache(cache, combined)
+        if failures:
+            _record_dividend_fetch_failure(root, failures, partial=True)
+        else:
+            _record_dividend_fetch_success(root)
+        return combined
+
+    if failures:
+        _record_dividend_fetch_failure(root, failures, partial=bool(combined))
+        if stale_cached is not None:
+            log.warning(
+                "Dividend fetch incomplete; using stale local cache (%d rows)",
+                len(stale_cached) if isinstance(stale_cached, list) else 0,
+            )
+            return stale_cached
+
+    if not combined:
+        _record_dividend_fetch_failure(root, ["no dividend rows returned"])
+    return combined
+
+
+_DIV_CASH_KEYS = [
+    "股東配發-盈餘分配之現金股利(元/股)",
+    "股東配發-法定盈餘公積發放之現金(元/股)",
+    "股東配發-資本公積發放之現金(元/股)",
+]
+_DIV_STOCK_KEYS = [
+    "股東配發-盈餘轉增資配股(元/股)",
+    "股東配發-法定盈餘公積轉增資配股(元/股)",
+    "股東配發-資本公積轉增資配股(元/股)",
+]
 
 
 def _parse_dividend(raw: Dict[str, Any], ticker: str) -> Optional[DividendRecord]:
-    code = str(raw.get("Code") or raw.get("股票代號") or raw.get("公司代號") or "").strip()
+    """解析單筆 t187ap45 股利分派。
+
+    新端點不含除息/除權日，僅有現金/股票股利各構成欄位；現金與股票股利分別
+    為三個構成欄位之和。`股利年度` 為民國年。
+    """
+    code = str(
+        raw.get("公司代號") or raw.get("Code")
+        or raw.get("股票代號") or ""
+    ).strip()
     if code != ticker:
         return None
-    year_str = str(raw.get("Year") or raw.get("年度") or raw.get("股利年度") or "").strip()
+    year_str = str(raw.get("股利年度") or raw.get("Year") or raw.get("年度") or "").strip()
     try:
         year = int(year_str)
         if year < 1911:
             year += 1911
     except ValueError:
         year = 0
-    cash = _to_float(raw.get("CashEarningsDistribution") or raw.get("現金股利"))
-    stock = _to_float(raw.get("StockEarningsDistribution") or raw.get("股票股利"))
+    if year == 0:
+        return None
+    # 相容舊欄位 (現金股利/股票股利) 與新欄位 (分構成加總)
+    cash = sum(_to_float(raw.get(k)) for k in _DIV_CASH_KEYS)
+    stock = sum(_to_float(raw.get(k)) for k in _DIV_STOCK_KEYS)
+    if cash == 0 and stock == 0:
+        cash = _to_float(raw.get("CashEarningsDistribution") or raw.get("現金股利"))
+        stock = _to_float(raw.get("StockEarningsDistribution") or raw.get("股票股利"))
     return DividendRecord(
         ticker=code,
         year=year,
@@ -563,14 +793,32 @@ def fetch_dividends(
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
 ) -> List[DividendRecord]:
-    """個股歷年股利紀錄；TWSE OpenAPI 主要回最新一筆，舊年度需 manual 累積。"""
+    """個股歷年股利紀錄。
+
+    t187ap45 為「現行決議」快照，同一股利年度可能有多筆 (季配/半年配/年度)，
+    因此依「股利年度」彙總：現金、股票股利皆**加總**，舊年度需靠本地 history 累積。
+    """
     log = logger or get_logger("fundamentals")
     rows = fetch_dividend_all(root=root, session=session, logger=log)
-    new_records: List[DividendRecord] = []
+
+    # 依股利年度彙總本次抓到的多筆 (季配/年度) → 單一年度合計
+    by_year: Dict[int, DividendRecord] = {}
     for raw in rows:
         rec = _parse_dividend(raw, ticker)
-        if rec:
-            new_records.append(rec)
+        if not rec:
+            continue
+        agg = by_year.get(rec.year)
+        if agg is None:
+            by_year[rec.year] = rec
+        else:
+            agg.cash_dividend += rec.cash_dividend
+            agg.stock_dividend += rec.stock_dividend
+            agg.ex_dividend_date = agg.ex_dividend_date or rec.ex_dividend_date
+            agg.ex_right_date = agg.ex_right_date or rec.ex_right_date
+    new_records = list(by_year.values())
+    for r in new_records:
+        r.cash_dividend = round(r.cash_dividend, 4)
+        r.stock_dividend = round(r.stock_dividend, 4)
 
     ticker_dir = _cache_root(root) / ticker
     mk_folder(str(ticker_dir))

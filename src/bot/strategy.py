@@ -28,6 +28,13 @@ from shioaji.constant import Action, OrderState
 
 from bot.models import MarketTick, OrderRecord, PositionInfo, SignalEvent
 from bot.notifier import TelegramNotifier
+from bot.ownership import (
+    BOT_OWNER_TAG,
+    bot_buy_field,
+    bot_sell_field,
+    is_bot_order_field,
+    is_bot_owner,
+)
 from bot.recorder import TradeRecorder
 from bot.risk_guard import RiskGuard
 from bot.signal_recorder import SignalRecorder
@@ -69,6 +76,7 @@ class BaseStrategy(ABC):
 
         # 收盤全出場標記
         self._closure_placed: Set[str] = set()
+        self._closure_blocked: Set[str] = set()
 
         # Tick 佇列: (exchange, tick) -- trade/watch 模式
         self._tick_queue: Queue = Queue(maxsize=50_000)
@@ -314,10 +322,17 @@ class BaseStrategy(ABC):
 
         with self._pending_lock[symbol]:
             ordno = msg.get("ordno", "")
-            if ordno in self.pending_orders.get(symbol, []):
+            was_pending = ordno in self.pending_orders.get(symbol, [])
+            if was_pending:
                 self.pending_orders[symbol].remove(ordno)
 
             if action == "Buy":
+                if not (was_pending or is_bot_order_field(custom)):
+                    self.logger.info(
+                        "忽略非 AI 標籤買進成交: %s %d 張 @ %.2f [%s]",
+                        symbol, qty, price, custom,
+                    )
+                    return
                 cost = price * qty * 1000
                 self._fund_used += cost
                 if symbol in self.positions:
@@ -325,6 +340,7 @@ class BaseStrategy(ABC):
                 else:
                     self.positions[symbol] = PositionInfo(
                         symbol=symbol, avg_price=price, quantity=qty,
+                        owner_tag=BOT_OWNER_TAG,
                     )
                 self.risk.on_entry_filled(symbol, price, qty)
                 self.logger.info(
@@ -334,6 +350,18 @@ class BaseStrategy(ABC):
                 self.notifier.notify_buy(symbol, price, qty)
 
             elif action == "Sell":
+                if symbol not in self.positions:
+                    self.logger.info(
+                        "忽略非 AI 持倉賣出成交: %s %d 張 @ %.2f [%s]",
+                        symbol, qty, price, custom,
+                    )
+                    return
+                if not is_bot_owner(self.positions[symbol].owner_tag):
+                    self.logger.warning(
+                        "阻擋非 AI 標籤部位賣出更新: %s owner=%s",
+                        symbol, self.positions[symbol].owner_tag,
+                    )
+                    return
                 released = price * qty * 1000
                 self._fund_used = max(0.0, self._fund_used - released)
                 self.notifier.notify_sell(symbol, price, qty, custom)
@@ -362,6 +390,7 @@ class BaseStrategy(ABC):
         else:
             self.positions[symbol] = PositionInfo(
                 symbol=symbol, avg_price=price, quantity=quantity,
+                owner_tag=BOT_OWNER_TAG,
             )
         self.risk.on_entry_filled(symbol, price, quantity)
 
@@ -474,6 +503,13 @@ class BaseStrategy(ABC):
                 if pos.quantity <= 0:
                     continue
 
+                price = self._last_price.get(symbol, pos.avg_price)
+                if not self._can_auto_sell(
+                    symbol, pos.quantity, "close", price=price,
+                ):
+                    self._closure_blocked.add(symbol)
+                    continue
+
                 if self._is_trade_mode:
                     with self._pending_lock[symbol]:
                         if len(self.pending_orders.get(symbol, [])) > 0:
@@ -484,14 +520,14 @@ class BaseStrategy(ABC):
                         )
                         assert self.broker is not None
                         trade = self.broker.place_market_sell(
-                            symbol, pos.quantity, custom_field="close",
+                            symbol, pos.quantity,
+                            custom_field=bot_sell_field("close"),
                         )
                         if trade:
                             ordno = getattr(trade.order, "ordno", "")
                             self.pending_orders[symbol].append(ordno)
                             self._closure_placed.add(symbol)
                 else:
-                    price = self._last_price.get(symbol, pos.avg_price)
                     self.logger.info(
                         "[虛擬全出場] %s %d 張 @ %.2f", symbol, pos.quantity, price,
                     )
@@ -502,6 +538,14 @@ class BaseStrategy(ABC):
                 self.logger.info("所有部位已清空，策略結束")
                 if self._is_trade_mode:
                     self.notifier.notify_closure(self.recorder.summary())
+                self._running = False
+                break
+
+            if set(self.positions) <= self._closure_blocked:
+                self.logger.warning(
+                    "收盤出場被賣出授權限制阻擋，保留部位不自動賣出: %s",
+                    sorted(self.positions),
+                )
                 self._running = False
                 break
 
@@ -560,7 +604,7 @@ class BaseStrategy(ABC):
             action=Action.Buy,
             quantity=quantity,
             price=price,
-            custom_field=custom_field,
+            custom_field=bot_buy_field(custom_field),
         )
         if trade is None:
             return False
@@ -577,13 +621,18 @@ class BaseStrategy(ABC):
         quantity: int,
         custom_field: str = "stop",
     ) -> bool:
+        price = self._last_price.get(symbol, 0.0)
+        if not self._can_auto_sell(symbol, quantity, custom_field, price=price):
+            return False
+
         if not self._is_trade_mode:
-            price = self._last_price.get(symbol, 0.0)
             self._virtual_fill_sell(symbol, price, quantity, custom_field)
             return True
 
         assert self.broker is not None
-        trade = self.broker.place_market_sell(symbol, quantity, custom_field)
+        trade = self.broker.place_market_sell(
+            symbol, quantity, bot_sell_field(custom_field),
+        )
         if trade is None:
             return False
 
@@ -591,6 +640,56 @@ class BaseStrategy(ABC):
         with self._pending_lock[symbol]:
             self.pending_orders[symbol].append(ordno)
         return True
+
+    def _sell_profit_target(self, symbol: str) -> Optional[float]:
+        targets = getattr(self.settings, "sell_profit_targets", {}) or {}
+        target = targets.get(symbol)
+        if target is None:
+            return None
+        return float(target)
+
+    def _position_pnl_pct(self, symbol: str, price: float) -> Optional[float]:
+        pos = self.positions.get(symbol)
+        if pos is None or pos.avg_price <= 0 or price <= 0:
+            return None
+        return 100 * (price - pos.avg_price) / pos.avg_price
+
+    def _can_auto_sell(
+        self,
+        symbol: str,
+        quantity: int,
+        reason: str,
+        *,
+        price: float,
+    ) -> bool:
+        pos = self.positions.get(symbol)
+        if pos is None or quantity <= 0:
+            self.logger.warning("阻擋自動賣出：%s 無 AI 持倉或張數無效", symbol)
+            return False
+        if not is_bot_owner(pos.owner_tag):
+            self.logger.warning(
+                "阻擋自動賣出：%s owner_tag=%s 不是 AI 買進部位",
+                symbol, pos.owner_tag,
+            )
+            return False
+
+        target = self._sell_profit_target(symbol)
+        if target is not None:
+            pnl_pct = self._position_pnl_pct(symbol, price)
+            if pnl_pct is None:
+                self.logger.warning(
+                    "阻擋自動賣出：%s 無法驗證 %.2f%% 賣出門檻",
+                    symbol, target,
+                )
+                return False
+            if pnl_pct < target:
+                self.logger.info(
+                    "阻擋自動賣出：%s PnL %.2f%% 尚未達使用者門檻 %.2f%% [%s]",
+                    symbol, pnl_pct, target, reason,
+                )
+                return False
+
+        return self.risk.check_exit(symbol, reason)
 
     # ------------------------------------------------------------------
     # 抽象方法
@@ -631,6 +730,7 @@ class MyStrategy(BaseStrategy):
     def on_tick(self, tick: MarketTick) -> None:
         symbol = tick.symbol
         price = tick.price
+        self._last_price[symbol] = price
         cur_time = now_tw_time()
 
         if symbol not in self._prev_close:
@@ -681,8 +781,16 @@ class MyStrategy(BaseStrategy):
                 hw = price
 
             drawdown_pct = 100 * (hw - price) / hw if hw > 0 else 0
+            user_target_pct = self._sell_profit_target(symbol)
 
-            if (
+            if user_target_pct is not None and pnl_pct >= user_target_pct:
+                self.logger.info(
+                    "[使用者目標賣出] %s PnL=%.2f%% (>= %.2f%%)",
+                    symbol, pnl_pct, user_target_pct,
+                )
+                self._place_stop_sell(symbol, pos.quantity, custom_field="target")
+
+            elif (
                 pnl_pct >= self.settings.take_profit_pct
                 and drawdown_pct >= self.settings.trailing_stop_pct
             ):

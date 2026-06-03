@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 import shioaji as sj
 from shioaji import BidAskSTKv1, Exchange, TickSTKv1
@@ -18,19 +18,22 @@ from shioaji.constant import (
     OrderState,
     OrderType,
     QuoteType,
+    StockOrderCond,
     StockOrderLot,
     StockPriceType,
 )
 
 from bot.utils import get_logger
+from bot.ownership import clean_order_field
 
 if TYPE_CHECKING:
     from shioaji.contracts import Contract
-    from shioaji.order import Trade
+    from shioaji.order import Order, Trade
 
     from bot.config import Settings
 
 
+CONTRACTS_TIMEOUT_MS = 10_000
 class SjBroker:
     """封裝 Shioaji SDK 的所有低階操作。"""
 
@@ -45,8 +48,10 @@ class SjBroker:
         self._tick_callback: Optional[Callable] = None
         self._bidask_callback: Optional[Callable] = None
         self._order_callback: Optional[Callable] = None
+        self._subscriptions: set[Tuple[str, str]] = set()
 
         self._reconnect_lock = threading.Lock()
+        self.last_order_error: Optional[Exception] = None
 
     def _should_activate_ca(self) -> bool:
         """Only trade mode may activate CA; watch mode must stay quote-only."""
@@ -55,6 +60,28 @@ class SjBroker:
             and not self.settings.simulation
             and self.settings.run_mode == "trade"
         )
+
+    def _subscribe(self, contract: "Contract", quote_type: QuoteType) -> None:
+        assert self.api is not None
+        if hasattr(self.api, "subscribe"):
+            try:
+                self.api.subscribe(contract, quote_type=quote_type)
+                return
+            except TypeError:
+                self.api.subscribe(contract, quote_type=_quote_type_label(quote_type))
+                return
+        self.api.quote.subscribe(contract, quote_type=quote_type)
+
+    def _unsubscribe(self, contract: "Contract", quote_type: QuoteType) -> None:
+        assert self.api is not None
+        if hasattr(self.api, "unsubscribe"):
+            try:
+                self.api.unsubscribe(contract, quote_type=quote_type)
+                return
+            except TypeError:
+                self.api.unsubscribe(contract, quote_type=_quote_type_label(quote_type))
+                return
+        self.api.quote.unsubscribe(contract, quote_type=quote_type)
 
     # ------------------------------------------------------------------
     # 登入 / 登出
@@ -73,9 +100,25 @@ class SjBroker:
             accounts = self.api.login(
                 api_key=self.settings.api_key,
                 secret_key=self.settings.secret_key,
+                contracts_timeout=CONTRACTS_TIMEOUT_MS,
             )
-        except Exception:
-            self.logger.exception("登入失敗")
+        except Exception as exc:
+            msg = str(exc)
+            low = msg.lower()
+            if "not allow" in low and "ip" in low:
+                import re as _re
+                m = _re.search(r"ip:\s*([0-9a-fA-F:.]+)", msg)
+                bad_ip = m.group(1) if m else "目前對外 IP"
+                self.logger.error(
+                    "登入失敗：IP 白名單阻擋 (%s 不在金鑰允許清單)。"
+                    "請到永豐 e leader → API 金鑰管理移除 IP 限制或加入該 IP。", bad_ip,
+                )
+            elif "permission" in low or "401" in low:
+                self.logger.error(
+                    "登入/權限失敗：API 金鑰可能未開通『下單』權限。詳: %s", msg[:120],
+                )
+            else:
+                self.logger.exception("登入失敗")
             return False
 
         self.logger.info("登入成功，可用帳號: %s", accounts)
@@ -115,7 +158,7 @@ class SjBroker:
             return self._contracts[symbol]
 
         assert self.api is not None, "尚未登入"
-        contract = self.api.Contracts.Stocks.get(symbol)
+        contract = _lookup_stock_contract(self.api, symbol)
         if contract is None:
             self.logger.error("找不到合約: %s", symbol)
             return None
@@ -133,7 +176,8 @@ class SjBroker:
             return
 
         assert self.api is not None
-        self.api.quote.subscribe(contract, quote_type=QuoteType.Tick)
+        self._subscribe(contract, QuoteType.Tick)
+        self._subscriptions.add((symbol, "tick"))
         if symbol not in self._subscribed_symbols:
             self._subscribed_symbols.append(symbol)
         self.logger.info("已訂閱 Tick: %s", symbol)
@@ -144,7 +188,10 @@ class SjBroker:
             return
 
         assert self.api is not None
-        self.api.quote.subscribe(contract, quote_type=QuoteType.BidAsk)
+        self._subscribe(contract, QuoteType.BidAsk)
+        self._subscriptions.add((symbol, "bidask"))
+        if symbol not in self._subscribed_symbols:
+            self._subscribed_symbols.append(symbol)
         self.logger.info("已訂閱 BidAsk: %s", symbol)
 
     def unsubscribe(self, symbol: str) -> None:
@@ -154,20 +201,29 @@ class SjBroker:
 
         assert self.api is not None
         try:
-            self.api.quote.unsubscribe(contract, quote_type=QuoteType.Tick)
-            self.api.quote.unsubscribe(contract, quote_type=QuoteType.BidAsk)
+            self._unsubscribe(contract, QuoteType.Tick)
+            self._unsubscribe(contract, QuoteType.BidAsk)
         except Exception:
             self.logger.exception("取消訂閱失敗: %s", symbol)
 
+        self._subscriptions = {
+            item for item in self._subscriptions if item[0] != symbol
+        }
         if symbol in self._subscribed_symbols:
             self._subscribed_symbols.remove(symbol)
         self.logger.info("已取消訂閱: %s", symbol)
 
     def _resubscribe_all(self) -> None:
         """斷線重連後重新訂閱所有商品。"""
-        for symbol in list(self._subscribed_symbols):
+        subscriptions = sorted(self._subscriptions)
+        if not subscriptions:
+            subscriptions = [(symbol, "tick") for symbol in self._subscribed_symbols]
+        for symbol, qtype in subscriptions:
             try:
-                self.subscribe_tick(symbol)
+                if qtype == "bidask":
+                    self.subscribe_bidask(symbol)
+                else:
+                    self.subscribe_tick(symbol)
                 time.sleep(0.1)
             except Exception:
                 self.logger.exception("重新訂閱失敗: %s", symbol)
@@ -249,6 +305,7 @@ class SjBroker:
                         self.api.login(
                             api_key=self.settings.api_key,
                             secret_key=self.settings.secret_key,
+                            contracts_timeout=CONTRACTS_TIMEOUT_MS,
                         )
 
                         if self._should_activate_ca():
@@ -288,6 +345,7 @@ class SjBroker:
         price_type: StockPriceType = StockPriceType.LMT,
         order_type: OrderType = OrderType.ROD,
         custom_field: str = "",
+        order_lot: StockOrderLot = StockOrderLot.Common,
     ) -> Optional[Trade]:
         if self.settings.run_mode != "trade":
             self.logger.error(
@@ -301,33 +359,63 @@ class SjBroker:
             return None
 
         assert self.api is not None
-        order = self.api.Order(
+        order = self._build_stock_order(
             price=price,
             quantity=quantity,
             action=action,
             price_type=price_type,
             order_type=order_type,
-            order_lot=StockOrderLot.Common,
-            custom_field=custom_field[:6],
-            account=self.api.stock_account,
+            custom_field=custom_field,
+            order_lot=order_lot,
         )
 
+        unit = "股" if order_lot in (StockOrderLot.IntradayOdd, StockOrderLot.Odd) else "張"
         self.logger.info(
-            "下單: %s %s %d 張 @ %s (%s/%s) [%s]",
-            action.value, symbol, quantity, price,
-            price_type.value, order_type.value, custom_field,
+            "下單: %s %s %d %s @ %s (%s/%s/%s) [%s]",
+            action.value, symbol, quantity, unit, price,
+            price_type.value, order_type.value, order_lot.value, custom_field,
         )
 
         try:
             trade = self.api.place_order(contract, order)
+            self.last_order_error = None
             self.logger.info(
                 "下單結果: id=%s status=%s",
                 trade.order.id, trade.status.status,
             )
             return trade
-        except Exception:
+        except Exception as exc:
+            self.last_order_error = exc
             self.logger.exception("下單失敗: %s", symbol)
             return None
+
+    def _build_stock_order(
+        self,
+        *,
+        price: float,
+        quantity: int,
+        action: Action,
+        price_type: StockPriceType,
+        order_type: OrderType,
+        custom_field: str,
+        order_lot: StockOrderLot = StockOrderLot.Common,
+    ) -> "Order":
+        assert self.api is not None
+        kwargs = dict(
+            price=price,
+            quantity=quantity,
+            action=action,
+            price_type=price_type,
+            order_type=order_type,
+            order_lot=order_lot,
+            order_cond=StockOrderCond.Cash,
+            custom_field=_clean_custom_field(custom_field),
+            account=self.api.stock_account,
+        )
+        stock_order_cls = getattr(sj, "StockOrder", None)
+        if stock_order_cls is not None:
+            return stock_order_cls(**kwargs)
+        return self.api.Order(**kwargs)
 
     def place_market_sell(
         self,
@@ -344,6 +432,30 @@ class SjBroker:
             price_type=StockPriceType.MKT,
             order_type=OrderType.IOC,
             custom_field=custom_field,
+        )
+
+    def place_odd_lot_order(
+        self,
+        symbol: str,
+        action: Action,
+        shares: int,
+        price: float,
+        custom_field: str = "odd",
+    ) -> Optional[Trade]:
+        """盤中零股委託 (IntradayOdd)。
+
+        shares 為「股數」(1~999)，price 必為限價 (零股不支援市價)。
+        盤中零股交易時段為 09:00~13:30，採 ROD 限價。
+        """
+        return self.place_order(
+            symbol=symbol,
+            action=action,
+            quantity=shares,
+            price=price,
+            price_type=StockPriceType.LMT,
+            order_type=OrderType.ROD,
+            custom_field=custom_field,
+            order_lot=StockOrderLot.IntradayOdd,
         )
 
     # ------------------------------------------------------------------
@@ -388,10 +500,59 @@ class SjBroker:
     # 訂單狀態查詢
     # ------------------------------------------------------------------
 
-    def update_status(self) -> None:
+    def update_status(self, trade: Optional["Trade"] = None) -> None:
         assert self.api is not None
-        self.api.update_status(self.api.stock_account)
+        if trade is not None:
+            self.api.update_status(trade=trade)
+        else:
+            self.api.update_status(self.api.stock_account)
 
     def list_trades(self) -> list:
         assert self.api is not None
         return self.api.list_trades()
+
+    def cancel_order(self, trade: "Trade") -> Optional["Trade"]:
+        """Cancel an order and refresh status using Shioaji's recommended flow."""
+        assert self.api is not None
+        try:
+            self.update_status(trade=trade)
+        except Exception:
+            self.logger.debug("cancel_order pre-refresh failed", exc_info=True)
+        try:
+            cancelled = self.api.cancel_order(trade)
+        except Exception:
+            self.logger.exception("撤單失敗")
+            return None
+        try:
+            self.update_status(trade=cancelled or trade)
+        except Exception:
+            self.logger.debug("cancel_order post-refresh failed", exc_info=True)
+        return cancelled
+
+
+def _quote_type_label(quote_type: QuoteType) -> str:
+    value = getattr(quote_type, "value", "")
+    if value:
+        return str(value)
+    return "tick"
+
+
+def _clean_custom_field(custom_field: str) -> str:
+    return clean_order_field(custom_field)
+
+
+def _lookup_stock_contract(api: sj.Shioaji, symbol: str) -> Optional["Contract"]:
+    stocks = api.Contracts.Stocks
+    for getter in (
+        lambda: stocks.get(symbol),
+        lambda: stocks.TSE.get(symbol),
+        lambda: stocks.OTC.get(symbol),
+        lambda: stocks[symbol],
+    ):
+        try:
+            contract = getter()
+        except Exception:
+            continue
+        if contract is not None:
+            return contract
+    return None

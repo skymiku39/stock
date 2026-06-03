@@ -90,3 +90,18 @@ class TestSymbolParsing:
         s = Settings(_env_file=env_file)  # type: ignore[call-arg]
 
         assert s.symbols == ["2330", "0050", "2881"]
+
+
+class TestSellProfitTargets:
+    def test_sell_profit_targets_parse_comma_pairs(self) -> None:
+        s = Settings(
+            symbols=["2330"],
+            sell_profit_targets="2330:8,0050=5.5",
+            _env_file=None,  # type: ignore[call-arg]
+        )
+
+        assert s.sell_profit_targets == {"2330": 8.0, "0050": 5.5}
+
+    def test_sell_profit_targets_default_empty(self) -> None:
+        s = Settings(symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
+        assert s.sell_profit_targets == {}

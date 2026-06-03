@@ -12,11 +12,12 @@
 ====
 * 完全 read-only：不會去打 Shioaji / TWSE 即時報價
 * chip_summary 採用「最近一筆 cached 籌碼」，要主動抓需呼叫 `refresh_chips=True`
+* Dashboard 可用 `auto_fill_missing=False` 走 local-first 快速模式；缺資料只標示，
+  不隱式補抓外部 API。
 """
 
 from __future__ import annotations
 
-import csv
 import dataclasses
 import datetime as dt
 import json
@@ -56,6 +57,7 @@ from bot.fundamentals_fetcher import (
     build_fundamental_snapshot,
     snapshot_to_dict as fundamental_to_dict,
 )
+from bot.portfolio import load_portfolio
 from bot.quarterly import summarize_quarterly
 from bot.technicals import (
     TechnicalSnapshot,
@@ -166,8 +168,18 @@ def build_snapshot(
     refresh_distribution: bool = False,
     refresh_macro: bool = False,
     technical_months: int = 6,
+    auto_fill_missing: bool = True,
+    auto_llm: bool = True,
+    macro_cache_only: bool = False,
 ) -> TickerSnapshot:
-    """整合所有資料源，組出單一個股快照。"""
+    """整合所有資料源，組出單一個股快照。
+
+    Args:
+        auto_fill_missing: False 時只讀本地 cache/DB 與明確 refresh 的項目；
+            不因本地缺資料而自動補抓外部資料源。
+        auto_llm: False 時不在 snapshot 組裝期間自動呼叫 Gemini。
+        macro_cache_only: True 時 macro 只讀本地快取，避免快速頁面卡在外部 API。
+    """
     log = get_logger("ticker-view")
     snap = TickerSnapshot(
         ticker=ticker,
@@ -307,8 +319,8 @@ def build_snapshot(
                 }
         except Exception:
             pass
-        # 仍然沒有 → 直接跑近 N 日 summary（TWSE 公開資料，免費）
-        if snap.chip_summary is None:
+        # 仍然沒有 → local-first 模式只標示缺資料；一般模式才自動補抓。
+        if auto_fill_missing and snap.chip_summary is None:
             try:
                 log.info("[%s] 籌碼面快取為空，自動抓近 %d 日", ticker, chip_days)
                 summary = build_chip_summary(
@@ -384,7 +396,8 @@ def build_snapshot(
             refresh=refresh_fundamentals,
         )
         if (
-            not refresh_fundamentals
+            auto_fill_missing
+            and not refresh_fundamentals
             and (snap.fundamentals is None or not snap.fundamentals.has_data)
         ):
             log.info("[%s] 基本面快取為空，自動抓取一次", ticker)
@@ -407,7 +420,7 @@ def build_snapshot(
             root=project_root,
             refresh=refresh_technicals,
         )
-        if not refresh_technicals and not tech_snap.has_data:
+        if auto_fill_missing and not refresh_technicals and not tech_snap.has_data:
             log.info("[%s] 技術面快取為空，自動抓取一次", ticker)
             tech_snap, _ = build_technical_snapshot(
                 ticker,
@@ -429,7 +442,7 @@ def build_snapshot(
     try:
         trend = load_distribution_trend(ticker, root=project_root)
         cur: Optional[DistributionWeekly] = None
-        need_refresh = refresh_distribution or not trend.weeks
+        need_refresh = refresh_distribution or (auto_fill_missing and not trend.weeks)
         if need_refresh:
             try:
                 cur = build_distribution_snapshot(ticker, root=project_root)
@@ -464,7 +477,7 @@ def build_snapshot(
     #    都會走到這裡，呼叫 Gemini 並消耗 token (12 小時內快取)。
     # 條件：尚未有 pipeline 法說分析、且設了 GEMINI_API_KEY。
     # 未設 API Key 時 auto_analyze_ticker 會回 None，graceful-skip，不會收費。
-    if snap.llm_analysis is None:
+    if auto_llm and snap.llm_analysis is None:
         try:
             from bot.auto_llm import auto_analyze_ticker
             auto = auto_analyze_ticker(
@@ -503,6 +516,7 @@ def build_snapshot(
             root=project_root,
             force_refresh=refresh_macro,
             use_cache=True,
+            cache_only=macro_cache_only and not refresh_macro,
             logger=log,
         )
         snap.macro_snapshot = macro_to_dict(macro_snap)
@@ -557,47 +571,23 @@ def _load_run(p: Path) -> Optional[Dict[str, Any]]:
 def _scan_trades_for(
     ticker: str, root: Path,
 ) -> tuple[List[TradeRecord], float, float]:
-    """掃 data/trades_*.csv 找此 ticker 的所有交易。簡易 FIFO 估算持倉。"""
-    trades: List[TradeRecord] = []
-    qty = 0.0
-    cost = 0.0
-    sum_cost = 0.0
-    trades_dir = root / "data"
-    if not trades_dir.exists():
-        return [], 0.0, 0.0
-    for f in sorted(trades_dir.glob("trades_*.csv")):
-        try:
-            with f.open("r", encoding="utf-8") as fp:
-                reader = csv.DictReader(fp)
-                for row in reader:
-                    t = (row.get("ticker") or row.get("code") or "").strip()
-                    if t != ticker:
-                        continue
-                    side = (row.get("side") or row.get("action") or "").lower()
-                    try:
-                        q = float(row.get("qty") or row.get("quantity") or 0)
-                        px = float(row.get("price") or 0)
-                    except ValueError:
-                        continue
-                    ts = row.get("ts") or row.get("time") or ""
-                    trades.append(TradeRecord(
-                        ts=ts, side=side, qty=q, price=px,
-                        note=row.get("note", ""),
-                    ))
-                    if side.startswith("b"):
-                        qty += q
-                        sum_cost += q * px
-                    elif side.startswith("s"):
-                        if qty > 0:
-                            qty -= q
-                            if qty <= 0:
-                                qty = 0
-                                sum_cost = 0
-        except Exception:
-            continue
-    if qty > 0:
-        cost = sum_cost / qty
-    return trades, qty, round(cost, 2)
+    """Scan local trade CSV files and estimate the open position with FIFO lots."""
+    all_trades, positions = load_portfolio(root)
+    trades = [
+        TradeRecord(
+            ts=t.ts,
+            side=t.side,
+            qty=t.qty,
+            price=t.price,
+            note=t.note,
+        )
+        for t in all_trades
+        if t.symbol == ticker
+    ]
+    pos = positions.get(ticker)
+    if pos is None:
+        return trades, 0.0, 0.0
+    return trades, pos.qty, round(pos.avg_cost, 2)
 
 
 def snapshot_to_dict(s: TickerSnapshot) -> Dict[str, Any]:

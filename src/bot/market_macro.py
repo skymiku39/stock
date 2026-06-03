@@ -121,6 +121,25 @@ class AdrPremium:
 
 
 @dataclass
+class FuturesBasis:
+    """台指期 (TX) 近月與現貨 (加權指) 的價差 — 作為「期貨領先指標」之一。
+
+    正價差 (futures > spot) 代表市場情緒偏樂觀/過熱；
+    逆價差 (futures < spot) 代表偏悲觀/保守 (6-8 月除權息旺季會自然偏逆價差)。
+    """
+    contract: str = "TX"
+    contract_month: str = ""     # 近月，例 "202606"
+    futures_price: float = 0.0   # 近月期貨收盤/結算
+    spot_price: float = 0.0      # 加權指數現貨
+    basis: float = 0.0           # 期貨 - 現貨 (點數)
+    basis_pct: float = 0.0       # 價差 / 現貨 %
+    open_interest: float = 0.0   # 近月未平倉量
+    state: str = ""              # 正價差 | 逆價差 | 平水 | unknown
+    asof_date: str = ""
+    source: str = "taifex"
+
+
+@dataclass
 class MacroSnapshot:
     fetched_at: str
     asof_date: str            # 多半是抓取當日 (美股結算可能落後一日)
@@ -129,6 +148,7 @@ class MacroSnapshot:
     adr_premiums: List[AdrPremium] = field(default_factory=list)
     usdtwd: float = 0.0
     notes: List[str] = field(default_factory=list)
+    futures_basis: Optional[FuturesBasis] = None
     cached: bool = False
 
     # ---- 便利方法 ----
@@ -245,6 +265,99 @@ def _fetch_tw_close(ticker: str, logger: logging.Logger) -> Optional[float]:
 
 
 # ----------------------------------------------------------------------
+# 台指期 (TX) 近月價差 — 期貨領先指標
+# ----------------------------------------------------------------------
+
+# 期交所 OpenAPI：期貨每日行情 (免登入、穩定 JSON)。
+URL_TAIFEX_DAILY_FUT = "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
+
+
+def _to_float_loose(x: Any) -> float:
+    try:
+        s = str(x).replace(",", "").strip()
+        if not s or s in ("-", "--"):
+            return 0.0
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def fetch_tx_futures_basis(
+    spot_price: float,
+    *,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[FuturesBasis]:
+    """抓台指期 (TX) 近月行情並計算與現貨 (加權指) 的正逆價差。
+
+    Args:
+        spot_price: 加權指數現貨點數 (通常取自 macro snapshot 的 ^TWII)。
+
+    回傳 ``None`` 表示期交所抓取失敗或無有效近月資料。
+    """
+    log = logger or get_logger("macro")
+    try:
+        import requests
+
+        resp = requests.get(
+            URL_TAIFEX_DAILY_FUT,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        )
+        if resp.status_code != 200:
+            log.warning("TAIFEX 期貨行情 HTTP %d", resp.status_code)
+            return None
+        rows = resp.json()
+    except Exception:
+        log.exception("TAIFEX 期貨行情抓取失敗")
+        return None
+    if not isinstance(rows, list):
+        return None
+
+    # 只取大台指 TX 的「月合約」(ContractMonth(Week) 為 6 位數，排除週合約 W)
+    tx_rows: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("Contract") or "").strip().upper() != "TX":
+            continue
+        cm = str(r.get("ContractMonth(Week)") or r.get("ContractMonth") or "").strip()
+        if len(cm) == 6 and cm.isdigit():
+            tx_rows.append(r)
+    if not tx_rows:
+        return None
+
+    # 近月 = 最小 (最近) 的合約月
+    tx_rows.sort(key=lambda r: str(r.get("ContractMonth(Week)") or ""))
+    front = tx_rows[0]
+    fut_price = _to_float_loose(front.get("Last"))
+    if fut_price <= 0:
+        fut_price = _to_float_loose(front.get("SettlementPrice"))
+    if fut_price <= 0:
+        return None
+
+    fb = FuturesBasis(
+        contract="TX",
+        contract_month=str(front.get("ContractMonth(Week)") or ""),
+        futures_price=fut_price,
+        spot_price=round(spot_price, 2),
+        open_interest=_to_float_loose(front.get("OpenInterest")),
+        asof_date=str(front.get("Date") or ""),
+    )
+    if spot_price and spot_price > 0:
+        fb.basis = round(fut_price - spot_price, 2)
+        fb.basis_pct = round(fb.basis / spot_price * 100.0, 3)
+        if fb.basis > 1:
+            fb.state = "正價差"
+        elif fb.basis < -1:
+            fb.state = "逆價差"
+        else:
+            fb.state = "平水"
+    else:
+        fb.state = "unknown"
+    return fb
+
+
+# ----------------------------------------------------------------------
 # 快取
 # ----------------------------------------------------------------------
 
@@ -273,6 +386,12 @@ def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[MacroSnapshot]:
             snap.stocks[sym] = StockQuote(**info)
         for p_info in (d.get("adr_premiums") or []):
             snap.adr_premiums.append(AdrPremium(**p_info))
+        fb = d.get("futures_basis")
+        if isinstance(fb, dict):
+            try:
+                snap.futures_basis = FuturesBasis(**fb)
+            except TypeError:
+                snap.futures_basis = None
         return snap
     except Exception:
         return None
@@ -290,6 +409,7 @@ def _save_cache(snap: MacroSnapshot, root: Optional[Path]) -> Path:
         "indices": {k: asdict(v) for k, v in snap.indices.items()},
         "stocks": {k: asdict(v) for k, v in snap.stocks.items()},
         "adr_premiums": [asdict(x) for x in snap.adr_premiums],
+        "futures_basis": asdict(snap.futures_basis) if snap.futures_basis else None,
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     mirror_file_to_cloud(p, root=root)
@@ -306,9 +426,15 @@ def fetch_macro_snapshot(
     root: Optional[Path] = None,
     force_refresh: bool = False,
     use_cache: bool = True,
+    cache_only: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> MacroSnapshot:
-    """抓 (或回傳快取的) 美股 + 加權 + ADR 溢價總覽。"""
+    """抓 (或回傳快取的) 美股 + 加權 + ADR 溢價總覽。
+
+    Args:
+        cache_only: True 時只讀本地/雲端鏡像快取；快取不存在就回空 snapshot，
+            不呼叫 yfinance 或外部 OpenAPI。Dashboard 的快速 local-first 路徑使用。
+    """
     log = logger or get_logger("macro")
     today = now_tw().date()
 
@@ -317,6 +443,13 @@ def fetch_macro_snapshot(
         if cached is not None:
             log.info("macro 命中快取 %s", today)
             return cached
+        if cache_only:
+            log.info("macro cache-only miss %s", today)
+            return MacroSnapshot(
+                fetched_at=now_tw().isoformat(timespec="seconds"),
+                asof_date=today.isoformat(),
+                notes=["本地 macro 快取不存在；本次略過外部抓取"],
+            )
 
     yf = _import_yf()
     notes: List[str] = []
@@ -387,6 +520,18 @@ def fetch_macro_snapshot(
             premium_pct=round(prem_pct, 2),
         ))
 
+    # ---- 台指期近月價差 (期貨領先指標) ----
+    try:
+        twii = snap.indices.get("^TWII")
+        spot = twii.price if twii else 0.0
+        fb = fetch_tx_futures_basis(spot, logger=log)
+        if fb is not None:
+            snap.futures_basis = fb
+        else:
+            notes.append("台指期價差抓取失敗")
+    except Exception:
+        log.exception("台指期價差計算失敗")
+
     snap.notes = notes
     try:
         _save_cache(snap, root)
@@ -419,6 +564,7 @@ def macro_to_dict(s: MacroSnapshot) -> Dict[str, Any]:
         "indices": {k: asdict(v) for k, v in s.indices.items()},
         "stocks": {k: asdict(v) for k, v in s.stocks.items()},
         "adr_premiums": [asdict(p) for p in s.adr_premiums],
+        "futures_basis": asdict(s.futures_basis) if s.futures_basis else None,
         "cached": s.cached,
     }
 
@@ -471,10 +617,12 @@ __all__ = [
     "AdrPremium",
     "DEFAULT_INDICES",
     "DEFAULT_STOCKS",
+    "FuturesBasis",
     "IndexQuote",
     "MacroSnapshot",
     "StockQuote",
     "fetch_macro_snapshot",
+    "fetch_tx_futures_basis",
     "load_supply_chain",
     "macro_to_dict",
     "related_us_stocks_for_tw",
