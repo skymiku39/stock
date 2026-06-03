@@ -638,6 +638,8 @@ uv run stock-scheduler --dry-run  # 只印排程計畫，不實際執行
 - **macro** 任務：定期呼叫 `stock-macro-update` 刷新行情/總經 (預設每 30 分，不打 LLM)。
 - **research** 任務：定期呼叫 `stock-auto-research` 跑完整研究管線 (預設每 240 分，含 LLM 簡報)。
   也會自動回頭重抓**新掛牌 ETF** 的持股，一旦來源公開即補齊 CSV。
+- **company** 任務：定期呼叫 `stock-company-update` 補齊公司基本資料 (名稱/**產業別**/上市日，預設一天一次)。
+  解決持股分析與查資料頁面大量顯示「未分類」、名稱空白的問題。
 - **monitor** 托管 (選用，`SCHEDULER_SUPERVISE_MONITOR=true`)：開盤自動啟動 `stock-bot` 監測子行程、收盤自動停止。
 - 各任務間隔、是否只在交易時段執行，皆由 `.env` 的 `SCHEDULER_*` 控制 (見 `.env.example`)。
 

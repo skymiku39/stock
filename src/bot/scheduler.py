@@ -125,6 +125,14 @@ class Scheduler:
                 market_hours_only=s.scheduler_market_hours_only,
                 extra_args=extra,
             ))
+        if getattr(s, "scheduler_company_interval_min", 0) > 0:
+            jobs.append(Job(
+                name="company",
+                console_script="stock-company-update",
+                module="bot.company_update",
+                interval_min=s.scheduler_company_interval_min,
+                market_hours_only=False,  # 公司基本資料為靜態，任何時段皆可補
+            ))
         return jobs
 
     # ------------------------------------------------------------------

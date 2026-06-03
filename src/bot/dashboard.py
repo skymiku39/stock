@@ -85,6 +85,7 @@ from bot.stock_db import (  # noqa: E402
     get_db,
     reset_db_singleton,
 )
+from bot.company_info import lookup_company_info  # noqa: E402
 from bot.cloud_sync import (  # noqa: E402
     CloudConfig,
     CloudSyncDependencyError,
@@ -1728,7 +1729,42 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
         st.session_state["auto_research_results"] = results
         st.success(f"完成：{len(results)} 檔已自動研究")
 
-    results = st.session_state.get("auto_research_results") or []
+    # ------ 自動載入/還原快取結果 ------
+    current_tickers: List[str] = []
+    for raw in (tickers_input or "").split(","):
+        t = raw.strip()
+        if t and t not in current_tickers:
+            current_tickers.append(t)
+    if not current_tickers:
+        try:
+            items = wl.load(PROJECT_ROOT).items
+            current_tickers = [i.ticker for i in items if i.ticker]
+        except Exception:
+            current_tickers = []
+
+    results = st.session_state.get("auto_research_results")
+    results_tickers = [r["ticker"] for r in results] if results is not None else []
+    if results is None or set(results_tickers) != set(current_tickers):
+        from bot.auto_llm import load_cached_auto_analysis
+        results = []
+        for ticker in current_tickers:
+            cached = load_cached_auto_analysis(ticker, PROJECT_ROOT, max_age_hours=999999)
+            if cached:
+                name_hint = cached.get("name", "")
+                row = {
+                    "ticker": ticker,
+                    "name": name_hint,
+                    "sentiment": cached.get("sentiment"),
+                    "score": cached.get("sentiment_score"),
+                    "confidence": cached.get("confidence"),
+                    "catalyst_outlook": cached.get("catalyst_outlook", ""),
+                    "logic_verdict": (cached.get("logic_check") or {}).get("verdict", ""),
+                    "logic_suggestion": (cached.get("logic_check") or {}).get("suggestion", ""),
+                    "_raw": cached,
+                }
+                results.append(row)
+        st.session_state["auto_research_results"] = results
+
     if results:
         st.markdown("### 研究結果")
         df = pd.DataFrame([
@@ -1858,6 +1894,15 @@ def page_llm_analysis() -> None:
         _render_auto_research_tab(api_key, model)
 
     with tab_paste:
+        # ------ 自動載入貼文字分析結果 ------
+        cached_paste = None
+        if "last_llm_analysis" not in st.session_state:
+            cached_paste = _load_paste_analysis()
+            if cached_paste:
+                st.session_state["last_llm_analysis"] = cached_paste["analysis"]
+                st.session_state["llm_ticker"] = cached_paste["analysis"].ticker
+                st.session_state["llm_text"] = cached_paste["text"]
+
         ticker = st.text_input("股票代號", value="2330", key="llm_ticker")
         text = st.text_area(
             "貼上法說會逐字稿 / 簡報文字",
@@ -1876,9 +1921,11 @@ def page_llm_analysis() -> None:
             client = GeminiClient(api_key=api_key, model=model)
             with st.spinner("Gemini 正在解析貼上的法說內容，並輸出結構化 JSON..."):
                 analysis = analyze_presentation(text, ticker=ticker, client=client)
-
             st.session_state["last_llm_analysis"] = analysis
+            _save_paste_analysis(analysis, text)
 
+        analysis = st.session_state.get("last_llm_analysis")
+        if analysis:
             c1, c2, c3 = st.columns(3)
             c1.metric("情緒", analysis.sentiment)
             c2.metric("情緒分數", f"{analysis.sentiment_score:+.2f}")
@@ -1991,6 +2038,18 @@ def page_llm_analysis() -> None:
         if last_analysis is None:
             st.info("請先在『貼文字分析』頁完成一場法說會分析。")
         else:
+            # 確保 session state 中的反查結果是針對當前分析的 ticker
+            if "last_logic_check_result" in st.session_state:
+                if st.session_state["last_logic_check_result"].ticker != last_analysis.ticker:
+                    st.session_state.pop("last_logic_check_result", None)
+                    st.session_state.pop("auto_chips_summary", None)
+
+            cached_logic = None
+            if "last_logic_check_result" not in st.session_state:
+                cached_logic = _load_logic_check(last_analysis.ticker)
+                if cached_logic:
+                    st.session_state["last_logic_check_result"] = cached_logic["result"]
+
             st.write(
                 f"基於最近一次分析: **{last_analysis.ticker}** "
                 f"(sentiment={last_analysis.sentiment} {last_analysis.sentiment_score:+.2f})"
@@ -2013,37 +2072,41 @@ def page_llm_analysis() -> None:
                 )
 
             auto_s = st.session_state.get("auto_chips_summary")
+            chips_source = auto_s
+            if chips_source is None and cached_logic:
+                chips_source = cached_logic["chips"]
+
             cc1, cc2 = st.columns(2)
             with cc1:
                 foreign = st.number_input(
                     "外資近期淨買超 (張)",
-                    value=float(auto_s.foreign_net) if auto_s else 0.0,
+                    value=float(chips_source.foreign_net) if chips_source else 0.0,
                     step=100.0,
                 )
                 trust = st.number_input(
                     "投信淨買超 (張)",
-                    value=float(auto_s.investment_trust_net) if auto_s else 0.0,
+                    value=float(chips_source.investment_trust_net) if chips_source else 0.0,
                     step=100.0,
                 )
                 dealer = st.number_input(
                     "自營商淨買超 (張)",
-                    value=float(auto_s.dealer_net) if auto_s else 0.0,
+                    value=float(chips_source.dealer_net) if chips_source else 0.0,
                     step=100.0,
                 )
             with cc2:
                 margin = st.number_input(
                     "融資餘額變動 (%)",
-                    value=float(auto_s.margin_buy_change_pct) if auto_s else 0.0,
+                    value=float(chips_source.margin_buy_change_pct) if chips_source else 0.0,
                     step=1.0,
                 )
                 short_b = st.number_input(
                     "借券賣出餘額變動 (%)",
-                    value=float(auto_s.short_borrow_change_pct) if auto_s else 0.0,
+                    value=float(chips_source.short_borrow_change_pct) if chips_source else 0.0,
                     step=1.0,
                 )
                 block = st.number_input(
                     "鉅額交易淨額 (張)",
-                    value=float(auto_s.block_trade_net) if auto_s else 0.0,
+                    value=float(chips_source.block_trade_net) if chips_source else 0.0,
                     step=100.0,
                 )
             note = st.text_input("備註", "")
@@ -2069,6 +2132,11 @@ def page_llm_analysis() -> None:
                 client = GeminiClient(api_key=api_key, model=model) if api_key else None
                 with st.spinner("用籌碼摘要反查 LLM 結論一致性..."):
                     result = logic_check(last_analysis, chips, client)
+                st.session_state["last_logic_check_result"] = result
+                _save_logic_check(last_analysis.ticker, chips, result)
+
+            result = st.session_state.get("last_logic_check_result")
+            if result:
                 verdict_color = {
                     "consistent": "green",
                     "suspicious_distribution": "red",
@@ -2837,9 +2905,46 @@ def _stock_label(db: StockDB, symbol: str) -> Tuple[str, str]:
         info = db.get_stock_info(symbol)
     except Exception:
         info = None
+
+    # 自動補：DB 沒這檔、或名稱/產業為空時，從 TWSE/TPEx 公司基本資料補 (每日快取)。
+    if info is None or not info.industry or not (info.short_name or info.name):
+        try:
+            fetched = lookup_company_info(symbol, root=PROJECT_ROOT)
+        except Exception:
+            fetched = None
+        if fetched is not None:
+            if info is None:
+                info = fetched
+            else:
+                info.name = info.name or fetched.name
+                info.short_name = info.short_name or fetched.short_name
+                info.industry = info.industry or fetched.industry
+                info.market = info.market or fetched.market
+                info.listed_date = info.listed_date or fetched.listed_date
+            try:
+                db.upsert_stock_info(info)
+            except Exception:
+                pass
+
     if info is None:
+        # 公司清單查不到 (多為 ETF/基金) → 至少標記，避免一律「未分類」。
+        try:
+            from bot.market_meta import is_etf
+            if is_etf(symbol):
+                return "", "ETF / 基金"
+        except Exception:
+            pass
         return "", ""
-    return info.short_name or info.name, info.industry
+
+    industry = info.industry
+    if not industry:
+        try:
+            from bot.market_meta import is_etf
+            if is_etf(symbol):
+                industry = "ETF / 基金"
+        except Exception:
+            pass
+    return info.short_name or info.name, industry
 
 
 def _portfolio_rows(
@@ -3031,6 +3136,182 @@ def _save_portfolio_llm_result(markdown: str, info: Dict[str, Any]) -> Path:
     return path
 
 
+# ------ 持股快照磁碟快取 ------
+
+_BROKER_SNAPSHOT_FILENAME = "latest_broker_snapshot.json"
+
+
+def _save_broker_snapshot(snap) -> Path:
+    """將券商庫存快照序列化為 JSON，存到 data/portfolio_analysis/。"""
+    from dataclasses import asdict
+
+    out_dir = _project_path("data", "portfolio_analysis")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / _BROKER_SNAPSHOT_FILENAME
+    payload = asdict(snap)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _load_broker_snapshot():
+    """從磁碟讀取上次儲存的券商庫存快照，回傳 BrokerPositionsSnapshot 或 None。"""
+    from bot.portfolio import BrokerPosition, BrokerPositionsSnapshot
+
+    path = _project_path("data", "portfolio_analysis", _BROKER_SNAPSHOT_FILENAME)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        positions = [
+            BrokerPosition(**p) for p in data.get("positions", [])
+        ]
+        return BrokerPositionsSnapshot(
+            broker=data.get("broker", ""),
+            account=data.get("account", ""),
+            asof=data.get("asof", ""),
+            simulation=data.get("simulation", False),
+            positions=positions,
+            error=data.get("error", ""),
+        )
+    except Exception:
+        return None
+
+
+def _load_portfolio_bundle_from_disk() -> Optional[Dict[str, Any]]:
+    """從磁碟讀取上次儲存的 portfolio analysis bundle。"""
+    path = _project_path("data", "portfolio_analysis", "latest_bundle.json")
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _load_portfolio_llm_from_disk() -> Optional[Dict[str, Any]]:
+    """從磁碟讀取上次儲存的 LLM 投組分析結果。"""
+    path = _project_path("data", "portfolio_analysis", "latest_analysis.md")
+    if not path.exists():
+        return None
+    try:
+        markdown = path.read_text(encoding="utf-8")
+        # 解析 header 中的 prompt/version/model 資訊
+        info: Dict[str, str] = {}
+        if markdown.startswith("<!--"):
+            end = markdown.find("-->")
+            if end > 0:
+                header_text = markdown[4:end].strip()
+                for part in header_text.split():
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        info[k.strip()] = v.strip()
+                markdown = markdown[end + 3:].strip()
+        return {
+            "markdown": markdown,
+            "info": info,
+            "path": str(path),
+        }
+    except Exception:
+        return None
+
+
+# ------ 貼文字分析、言行反查、最後個股快取 ------
+
+def _save_paste_analysis(analysis, text: str) -> None:
+    """將貼文字分析結果與對應的逐字稿文字存入 data/cache_paste_analysis.json 中。"""
+    from dataclasses import asdict
+    path = _project_path("data", "cache_paste_analysis.json")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "analysis": asdict(analysis),
+            "text": text,
+            "saved_at": dt.datetime.now().isoformat()
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_paste_analysis() -> Optional[Dict[str, Any]]:
+    """從 data/cache_paste_analysis.json 載入貼文字分析結果與文字。"""
+    from bot.llm_analyzer import PresentationAnalysis
+    path = _project_path("data", "cache_paste_analysis.json")
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        a_data = payload.get("analysis")
+        if a_data:
+            analysis = PresentationAnalysis(**a_data)
+            return {
+                "analysis": analysis,
+                "text": payload.get("text", "")
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _save_logic_check(ticker: str, chips, result) -> None:
+    """將籌碼面與言行一致性檢查的結果存入 data/cache_logic_check.json 中。"""
+    from dataclasses import asdict
+    path = _project_path("data", "cache_logic_check.json")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ticker": ticker,
+            "chips": asdict(chips),
+            "result": asdict(result),
+            "saved_at": dt.datetime.now().isoformat()
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_logic_check(expected_ticker: str) -> Optional[Dict[str, Any]]:
+    """從 data/cache_logic_check.json 載入特定股票代號的籌碼與反查結果。"""
+    from bot.llm_analyzer import ChipsContext, LogicCheckResult
+    path = _project_path("data", "cache_logic_check.json")
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("ticker") == expected_ticker:
+            c_data = payload.get("chips")
+            r_data = payload.get("result")
+            if c_data and r_data:
+                return {
+                    "chips": ChipsContext(**c_data),
+                    "result": LogicCheckResult(**r_data)
+                }
+    except Exception:
+        pass
+    return None
+
+
+def _save_last_viewed_ticker(ticker: str) -> None:
+    """儲存最後瀏覽的個股代號至 data/last_viewed_ticker.txt。"""
+    path = _project_path("data", "last_viewed_ticker.txt")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(ticker.strip(), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_last_viewed_ticker() -> str:
+    """從 data/last_viewed_ticker.txt 讀取最後瀏覽的個股代號。"""
+    path = _project_path("data", "last_viewed_ticker.txt")
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
 def _render_portfolio_analysis_section(
     *,
     df: pd.DataFrame,
@@ -3208,9 +3489,11 @@ def page_portfolio() -> None:
             settings = S(_env_file=str(env_path()))  # type: ignore[call-arg]
             snap = fetch_broker_positions(settings)
             st.session_state["portfolio_broker_snapshot"] = snap
+            st.session_state.pop("portfolio_from_cache", None)
             if snap.error:
                 status.update(label="券商庫存讀取失敗", state="error", expanded=True)
             else:
+                _save_broker_snapshot(snap)
                 status.update(label=f"券商庫存讀取完成：{len(snap.positions)} 檔", state="complete", expanded=False)
         except Exception as exc:
             status.update(label="券商庫存讀取失敗", state="error", expanded=True)
@@ -3221,19 +3504,40 @@ def page_portfolio() -> None:
 
     snap = st.session_state.get("portfolio_broker_snapshot")
     if snap is None:
-        st.info("請先按「刷新券商庫存」。此頁會以券商目前庫存為主，本工具成交紀錄只用來做來源標記。")
-        if all_trades:
-            st.markdown("#### 最近本工具成交")
+        # 嘗試從磁碟快取還原上次的券商庫存快照
+        cached_snap = _load_broker_snapshot()
+        if cached_snap is not None and not cached_snap.error:
+            snap = cached_snap
+            st.session_state["portfolio_broker_snapshot"] = snap
+            st.session_state["portfolio_from_cache"] = True
+            # 同時嘗試還原分析資料包與 LLM 結果
+            if "portfolio_analysis_bundle" not in st.session_state:
+                cached_bundle = _load_portfolio_bundle_from_disk()
+                if cached_bundle:
+                    st.session_state["portfolio_analysis_bundle"] = cached_bundle
+            if "portfolio_analysis_result" not in st.session_state:
+                cached_llm = _load_portfolio_llm_from_disk()
+                if cached_llm:
+                    st.session_state["portfolio_analysis_result"] = cached_llm
         else:
-            st.info("目前也沒有可解析的本工具成交紀錄。")
-        _render_recent_portfolio_trades(all_trades)
-        return
+            st.info("請先按「刷新券商庫存」。此頁會以券商目前庫存為主，本工具成交紀錄只用來做來源標記。")
+            if all_trades:
+                st.markdown("#### 最近本工具成交")
+            else:
+                st.info("目前也沒有可解析的本工具成交紀錄。")
+            _render_recent_portfolio_trades(all_trades)
+            return
 
     if getattr(snap, "error", ""):
         st.error(f"讀取券商庫存失敗：{snap.error}")
         _render_recent_portfolio_trades(all_trades)
         return
 
+    if st.session_state.get("portfolio_from_cache"):
+        st.info(
+            f"💡 目前呈現的是歷史快取庫存（快照時間: {snap.asof}）。"
+            "如需最新資料，請按上方「刷新券商庫存」。"
+        )
     st.caption(
         f"券商快照：{snap.broker} / 帳號 {snap.account or '—'} / "
         f"時間 {snap.asof} / {'模擬環境' if snap.simulation else '正式環境'}"
@@ -3476,9 +3780,14 @@ def page_ticker_detail() -> None:
     options: List[str] = sorted({i.ticker for i in wlist.items})
 
     # 來自 watchlist 跳轉
-    default_t = st.session_state.get("detail_ticker", "")
+    default_t = st.session_state.get("detail_ticker")
+    if not default_t:
+        default_t = _load_last_viewed_ticker()
+        if default_t:
+            st.session_state["detail_ticker"] = default_t
+            
     free_t = st.text_input(
-        "Ticker", value=default_t,
+        "Ticker", value=default_t or "",
         placeholder="輸入代號 (例如 2330)，或從 watchlist 選一檔",
     )
     if options:
@@ -3608,6 +3917,7 @@ def page_ticker_detail() -> None:
             raise exc
 
     snap, card = st.session_state["detail_cache"]
+    _save_last_viewed_ticker(ticker)
 
     # ---- 資料完整度提示 ----
     # local-first 模式下缺資料是正常狀態；引導使用者只刷新需要的資料源。

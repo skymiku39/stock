@@ -9,6 +9,8 @@
 
 | 資料源 | 端點 / URL | 用途 | 憑證 | 失敗 fallback |
 |--------|-----------|------|:----:|--------------|
+| **公司基本資料 (上市)** | `openapi.twse.com.tw/v1/opendata/t187ap03_L` | 名稱/簡稱/**產業別**/上市日 → 持股分類 | 否 | 每日快取 `data/meta/company_info.json`；舊快取 |
+| **公司基本資料 (上櫃)** | `tpex.org.tw/openapi/v1/mopsfin_t187ap03_O` | 同上 (上櫃) | 否 | 同上 |
 | 月營收 (上市) | `openapi.twse.com.tw/v1/opendata/t187ap05_L` | 基本面月營收 YoY/MoM | 否 | 本地 cache；上櫃另抓 TPEx |
 | 月營收 (上櫃) | `tpex.org.tw/openapi/v1/mopsfin_t187ap05_O` | 同上 (上櫃) | 否 | 本地 cache |
 | 估值 PER/PBR/殖利率 (上市) | `openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL` | 估值面 | 否 | 本地 cache |
@@ -26,6 +28,19 @@
 | 網路搜尋 | DuckDuckGo HTML | 法說/題材研究 | 否 | 空清單 (DDG 偶回 202 限流) |
 | 美股/指數/VIX/ADR | yfinance | 跨市場連動 | 否 | TWSE 收盤 fallback；未安裝則「無資料」 |
 | **台指期正逆價差** | `openapi.taifex.com.tw/v1/DailyMarketReportFut` | 期貨領先指標 (正逆價差) | 否 | 抓不到則 macro note 標記、不影響其他分析 |
+
+> **產業分類 (持股分析「未分類」修復)**：上述公司基本資料的「產業別」原始格式是**數字代碼**
+> (例如 `24`=半導體業)，由 `bot/company_info.py` 的 `INDUSTRY_CODE_MAP` 轉成中文後寫入
+> 本地 `stock_info`。持股分析頁查 DB 缺名稱/產業時會**自動補抓**；亦可手動全市場補齊：
+>
+> ```bash
+> uv run stock-company-update            # 只補缺漏 (保留人工分類，如 散熱 / PCB / ABF)
+> uv run stock-company-update --all       # 以官方資料全覆寫
+> uv run stock-company-update --refresh   # 強制重抓來源 (略過當日快取)
+> ```
+>
+> `stock-scheduler` 也會以 `SCHEDULER_COMPANY_INTERVAL_MIN` (預設一天一次) 自動補齊。
+> ETF/基金不在公司清單，會標記為「ETF / 基金」而非「未分類」。
 
 ## 主動式 ETF 持股
 

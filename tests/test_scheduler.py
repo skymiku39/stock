@@ -23,7 +23,7 @@ def test_scheduler_builds_both_jobs_by_default() -> None:
 
     sch = Scheduler(_settings(), dry_run=True)
     names = {j.name for j in sch.jobs}
-    assert names == {"macro", "fundamentals", "research"}
+    assert names == {"macro", "fundamentals", "research", "company"}
 
 
 def test_scheduler_skips_disabled_jobs() -> None:
@@ -34,6 +34,7 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_macro_interval_min=0,
             scheduler_fundamentals_interval_min=0,
             scheduler_research_interval_min=0,
+            scheduler_company_interval_min=0,
         ),
         dry_run=True,
     )

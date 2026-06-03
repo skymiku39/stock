@@ -169,6 +169,8 @@ class Settings(BaseSettings):
     scheduler_fundamentals_args: str = "--limit 3 --stale-days 30 --delay-seconds 30"
     # 完整研究管線 (ETF/籌碼/基本面/法說 + LLM 簡報)；<=0 停用
     scheduler_research_interval_min: int = 240
+    # 公司基本資料 (名稱/產業/上市日) 補齊；靜態資料，預設一天一次；<=0 停用
+    scheduler_company_interval_min: int = 1440
     # 傳給 stock-auto-research 的額外參數 (例如 "--no-brief" 省 LLM 成本)
     scheduler_research_args: str = ""
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
