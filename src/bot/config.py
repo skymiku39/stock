@@ -194,6 +194,8 @@ class Settings(BaseSettings):
     # Optional Google Drive Desktop / shared cloud folder used to mirror
     # fetched JSON/CSV/PDF cache files across machines.
     google_cache_dir: str = ""
+    # Google Sheets 自動同步間隔 (分鐘)；<=0 停用；由 stock-scheduler 呼叫 stock-cloud-sync
+    scheduler_cloud_sync_interval_min: int = 0
 
     @field_validator("report_poll_seconds")
     @classmethod

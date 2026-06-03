@@ -33,6 +33,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.config import Settings
 from bot.intraday_pipeline import _consensus_tickers_today, _macro_summary_text, _parse_json
 from bot.llm_analyzer import GeminiClient, gemini_call
@@ -735,13 +736,17 @@ def run_next_day_watch(
     try:
         # 同一目標日 draft / update 各存一份
         fname = "report.json" if mode == "draft" else "report_update.json"
-        (out_dir / fname).write_text(
+        report_path = out_dir / fname
+        report_path.write_text(
             json.dumps(report_json, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        mirror_file_to_cloud(report_path, root=root)
         if report.brief_md:
             brief_name = "next_day_brief.md" if mode == "draft" else "next_day_brief_update.md"
-            (out_dir / brief_name).write_text(report.brief_md, encoding="utf-8")
+            brief_path = out_dir / brief_name
+            brief_path.write_text(report.brief_md, encoding="utf-8")
+            mirror_file_to_cloud(brief_path, root=root)
     except Exception:
         log.exception("next-day 持久化失敗")
     _persist_report_json_to_db(report_json, root=root, log=log)
@@ -851,6 +856,7 @@ def load_latest_next_day(
         candidates = ["report_update.json", "report.json"] if prefer_update else ["report.json", "report_update.json"]
         for fname in candidates:
             p = d / fname
+            restore_file_from_cloud(p, root=root_path)
             if p.exists():
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
@@ -902,6 +908,7 @@ def load_next_day_by_date(
         if not fname:
             continue
         p = root_path / "data" / "next_day_watch" / date_iso / fname
+        restore_file_from_cloud(p, root=root_path)
         if not p.exists():
             continue
         try:

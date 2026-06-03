@@ -75,3 +75,18 @@ def test_restore_tree_from_cloud(tmp_path: Path, monkeypatch) -> None:
     assert copied == 1
     restored = project / "data" / "etf_holdings" / "00980A" / "2026-05-28.csv"
     assert restored.read_text(encoding="utf-8") == "ticker,name\n2330,TSMC\n"
+
+
+def test_next_day_report_mirror_path(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    cloud = tmp_path / "drive-cache"
+    monkeypatch.setenv("GOOGLE_CACHE_DIR", str(cloud))
+
+    report = project / "data" / "next_day_watch" / "2026-06-04" / "report.json"
+    report.parent.mkdir(parents=True)
+    report.write_text('{"target_date": "2026-06-04"}', encoding="utf-8")
+
+    assert mirror_file_to_cloud(report, root=project) is True
+    mirrored = cloud / "data" / "next_day_watch" / "2026-06-04" / "report.json"
+    assert mirrored.exists()
+    assert "2026-06-04" in mirrored.read_text(encoding="utf-8")

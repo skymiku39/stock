@@ -50,6 +50,7 @@ stock-company-update = "bot.company_update:main"
 stock-gemini-test = "bot.gemini_smoke:main"
 stock-llm-research = "bot.llm_research_cli:main"
 stock-calendar-update = "bot.conference_calendar_cli:main"
+stock-cloud-sync = "bot.cloud_sync_cli:main"
 
 [build-system]
 requires = ["hatchling"]

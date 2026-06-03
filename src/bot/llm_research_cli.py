@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from bot.auto_llm import auto_research_ticker
+from bot.cloud_file_cache import mirror_file_to_cloud
 from bot.config import Settings
 from bot.conference_calendar import update_calendar, upcoming_tickers
 from bot.utils import get_logger, mk_folder, now_tw
@@ -77,6 +78,7 @@ def _append_log(root: Path, entry: Dict[str, object]) -> None:
     try:
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        mirror_file_to_cloud(log_path, root=root)
     except Exception:
         pass
 

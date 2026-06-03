@@ -21,6 +21,7 @@ from typing import Dict, Optional
 
 import requests
 
+from bot.cloud_file_cache import restore_file_from_cloud, write_json_cache
 from bot.utils import get_logger, mk_folder, now_tw
 
 # 市場別常數
@@ -97,6 +98,7 @@ def load_market_map(
         return _MARKET_MAP
 
     path = _map_path(root)
+    restore_file_from_cloud(path, root=root)
     today = now_tw().date().isoformat()
     if not force_refresh and path.exists():
         try:
@@ -110,16 +112,14 @@ def load_market_map(
     mp = _build_market_map(session=session, logger=logger)
     if mp:
         try:
-            path.write_text(
-                json.dumps({"date": today, "map": mp}, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            write_json_cache(path, {"date": today, "map": mp}, root=root)
         except Exception:
             pass
         _MARKET_MAP = mp
         return mp
 
     # 建表失敗：盡量用舊快取，否則回空
+    restore_file_from_cloud(path, root=root)
     if path.exists():
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))

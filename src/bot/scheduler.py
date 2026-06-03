@@ -2,9 +2,11 @@
 
 讓「股票資訊持續自動更新 + 盤中監測」不必開著儀表板也能跑：
 
-  * macro   : 輕量行情 / 總經刷新 (呼叫 stock-macro-update，不打 LLM)
-  * research: 完整研究管線 (呼叫 stock-auto-research，含 ETF/籌碼/基本面/LLM 簡報)
-  * monitor : 盤中自動托管 stock-bot 監測子行程 (開盤啟動、收盤停止)
+  * macro      : 輕量行情 / 總經刷新 (呼叫 stock-macro-update，不打 LLM)
+  * research   : 完整研究管線 (呼叫 stock-auto-research，含 ETF/籌碼/基本面/LLM 簡報)
+  * company    : 公司基本資料補齊 (stock-company-update)
+  * cloud_sync : Google Sheets 同步 (stock-cloud-sync，含 LLM 分析表)
+  * monitor    : 盤中自動托管 stock-bot 監測子行程 (開盤啟動、收盤停止)
 
 各任務的間隔、是否只在交易時段執行，皆由 .env 的 SCHEDULER_* 設定控制。
 
@@ -132,6 +134,14 @@ class Scheduler:
                 module="bot.company_update",
                 interval_min=s.scheduler_company_interval_min,
                 market_hours_only=False,  # 公司基本資料為靜態，任何時段皆可補
+            ))
+        if getattr(s, "scheduler_cloud_sync_interval_min", 0) > 0:
+            jobs.append(Job(
+                name="cloud_sync",
+                console_script="stock-cloud-sync",
+                module="bot.cloud_sync_cli",
+                interval_min=s.scheduler_cloud_sync_interval_min,
+                market_hours_only=False,
             ))
         return jobs
 

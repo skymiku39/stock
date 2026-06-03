@@ -197,14 +197,93 @@ uv sync --extra cloud
 
 ## 進一步擴充
 
-* 想自動定時同步？寫個 Windows Task Scheduler / cron job 在每天開盤前後執行：
-  ```python
-  from bot.cloud_sync import GoogleSheetSync, load_config_from_env
-  sync = GoogleSheetSync(load_config_from_env())
-  sync.sync_all()
-  ```
+* 想自動定時同步？使用 CLI（見下方「LLM 多機同步 SOP」）或把
+  `SCHEDULER_CLOUD_SYNC_INTERVAL_MIN` 設為正數，讓 `stock-scheduler` 定期執行
+  `stock-cloud-sync`。
 * 想要更細的衝突解決 (row-level merge)？可以在 `cloud_sync.py` 自己加一個
   `merge(table)` 方法，比對 PK 後依 `updated_at` 逐 row 取最新。
+
+---
+
+## 混合模式：靜態資料路徑總表
+
+本專案用 **兩條通道** 上雲（建議同時設定）：
+
+| 通道 | 環境變數 | 適用資料 |
+|------|---------|---------|
+| **Drive 檔案鏡像** | `GOOGLE_CACHE_DIR` | `data/` 下 JSON / CSV / PDF 快取 |
+| **Google Sheets** | `GOOGLE_SHEET_ID` + `GOOGLE_SA_JSON_PATH` | `stock.db` 內可同步表格 |
+
+### 靜態／半靜態檔案 (`data/`)
+
+| 路徑 | 用途 | Drive 鏡像 | Sheets |
+|------|------|:----------:|:------:|
+| `data/meta/company_info.json` | 上市/上櫃公司基本資料快取 | 是 | 經 `stock_info` 表 |
+| `data/meta/market_map.json` | 市場別對照 (twse/tpex) | 是 | 否 |
+| `data/supply_chain.json` | 美股→台股供應鏈 | 是 | 否 |
+| `data/active_etfs.json` | 主動式 ETF 清單 | 是 | `etf_meta`（若寫入 DB） |
+| `data/calendar/conferences_*.json` | 法說會行事曆 | 是 | 否 |
+| `data/calendar/exhibitions.json` | 展覽清單 | 是 | 否 |
+| `data/macro/macro_*.json` | 總經快取 | 是 | 否 |
+| `data/fundamentals/**` | 基本面快取 | 是 | `monthly_revenue` / `quarterly_report` |
+| `data/chips/**`, `data/distribution/**` | 籌碼／集保 | 是 | 否 |
+| `data/technicals/<ticker>/` | K 線 CSV | 是 | `price_history` |
+| `data/etf_holdings/**` | ETF 持股 | 是 | 否 |
+| `data/mops_downloads/`, `data/mops_cache/` | MOPS 下載 | 是 | 否 |
+| `data/watchlist.json` | 觀察清單 JSON | 是 | `watchlist` |
+
+### LLM 產物
+
+| 路徑 / 表 | 內容 | Drive 鏡像 | Sheets |
+|-----------|------|:----------:|:------:|
+| `log/llm_calls/llm_calls_*.jsonl` | 完整 prompt/response 日誌 | 否 | 經 `llm_analysis_history`（摘要欄位） |
+| `data/auto_llm/<ticker>.json` | 個股自動研究 | 是 | `llm_analysis_history` |
+| `data/auto_llm/research_log.jsonl` | CLI 批次摘要 | 是 | 否 |
+| `data/pipeline_runs/<ts>/` | 法說管線輸出 | 是 | 否 |
+| `data/intraday/<date>/` | 盤中戰情報告 | 是 | `llm_daily_reports` |
+| `data/next_day_watch/<date>/` | 明日當沖報告 | 是 | `llm_daily_reports` |
+
+`stock.db` 建議**每台機器各一份**（本地路徑），不要兩台同時開啟放在 Drive 上的同一個 `.db` 檔。
+
+---
+
+## LLM 多機同步 SOP（混合模式）
+
+### 必要設定
+
+```env
+GOOGLE_CACHE_DIR=G:/My Drive/stock-cloud-cache
+GOOGLE_SHEET_ID=你的_Sheet_ID
+GOOGLE_SA_JSON_PATH=.secrets/your-sa.json
+SCHEDULER_CLOUD_SYNC_INTERVAL_MIN=60   # 選用：排程自動 sync；0=停用
+```
+
+並安裝雲端套件：`uv sync --extra cloud`
+
+### 日常流程
+
+1. **機器 A** 跑研究（`stock-auto-research` / `stock-llm-research` / `stock-nextday` 等）
+   - 結果寫入本地 `stock.db`（`llm_analysis_history`、`llm_daily_reports`）
+   - 大型 JSON/MD 自動鏡像到 `GOOGLE_CACHE_DIR`（若已設定）
+2. **上傳結構化資料**（擇一）：
+   - `uv run stock-cloud-sync --push`
+   - 或 `uv run stock-cloud-sync`（智能 sync，依 `updated_at`）
+   - 或僅 LLM 表：`uv run stock-cloud-sync --push --tables llm_analysis_history,llm_daily_reports`
+3. **機器 B** 開始工作前：
+   - `uv run stock-cloud-sync --pull`（或 `--sync`）
+   - 讀檔時會從 `GOOGLE_CACHE_DIR` 還原缺的 `data/auto_llm/`、`data/next_day_watch/` 等
+4. Dashboard「明日當沖 / 個股 LLM」會**優先讀 DB**，因此 Pull 後即可看到相同分析。
+
+### CLI 參考
+
+```bash
+uv run stock-cloud-sync                  # 全部 SYNCABLE 表智能 sync
+uv run stock-cloud-sync --push           # 本地 → Sheets
+uv run stock-cloud-sync --pull           # Sheets → 本地
+uv run stock-cloud-sync --tables llm_analysis_history,llm_daily_reports
+```
+
+---
 
 ## Google cache folder (cross-machine fetch cache)
 

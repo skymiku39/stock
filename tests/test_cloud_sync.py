@@ -17,7 +17,7 @@ from bot.cloud_sync import (
     _coerce_row,
     _max_updated_at,
 )
-from bot.stock_db import PriceBar, StockDB, StockInfo, WatchlistRow
+from bot.stock_db import LlmDailyReportRow, PriceBar, StockDB, StockInfo, WatchlistRow
 
 
 @pytest.fixture
@@ -271,6 +271,32 @@ class TestMaxUpdated:
 
     def test_empty(self) -> None:
         assert _max_updated_at([]) == ""
+
+
+class TestLlmDailyReports:
+    def test_push_llm_daily_reports(self, sync: GoogleSheetSync, db: StockDB) -> None:
+        db.upsert_llm_daily_report(
+            LlmDailyReportRow(
+                report_type="next_day_watch",
+                report_date="2026-06-04",
+                mode="draft",
+                asof="2026-06-03",
+                generated_at="2026-06-03T18:00:00",
+                market_tone="risk_on",
+                brief_md="# brief",
+                payload_json='{"target_date":"2026-06-04"}',
+                updated_at="2026-06-03T18:00:00",
+            )
+        )
+        table_ws: Dict[str, FakeWorksheet] = {}
+        _patch_get_or_create(sync, table_ws)
+
+        result = sync.push("llm_daily_reports")
+        assert result.ok
+        assert result.rows == 1
+        ws = table_ws["llm_daily_reports"]
+        assert ws.cleared
+        assert "next_day_watch" in str(ws.values)
 
 
 class TestConfigDisabled:
