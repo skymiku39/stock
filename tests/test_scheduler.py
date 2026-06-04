@@ -57,6 +57,32 @@ def test_scheduler_fundamentals_extra_args_parsed() -> None:
     assert fundamentals.extra_args == ["--limit", "1", "--delay-seconds", "0"]
 
 
+def test_scheduler_adds_daytrade_llm_jobs_when_enabled() -> None:
+    from bot.scheduler import Scheduler
+
+    sch = Scheduler(
+        _settings(
+            scheduler_intraday_enabled=True,
+            scheduler_nextday_draft_enabled=True,
+            scheduler_nextday_update_enabled=True,
+        ),
+        dry_run=True,
+    )
+    names = {j.name for j in sch.jobs}
+    assert {"intraday", "nextday_draft", "nextday_update"}.issubset(names)
+    assert next(j for j in sch.jobs if j.name == "intraday").run_once_per_day is True
+
+
+def test_scheduler_nextday_update_targets_today() -> None:
+    from bot.scheduler import Scheduler
+
+    sch = Scheduler(_settings(scheduler_nextday_update_enabled=True), dry_run=True)
+    job = next(j for j in sch.jobs if j.name == "nextday_update")
+    now = dt.datetime(2026, 6, 4, 2, 30)
+
+    assert sch._job_extra_args(job, now)[-2:] == ["--target-date", "2026-06-04"]
+
+
 def test_data_window_only_weekday_in_hours() -> None:
     from bot.scheduler import _is_data_window
 

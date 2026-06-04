@@ -32,7 +32,7 @@ from bot.env_io import (  # noqa: E402
     save_env,
     validate,
 )
-from bot.process_runner import get_runner, tail_file  # noqa: E402
+from bot.process_runner import get_runner, get_scheduler_runner, tail_file  # noqa: E402
 from bot.active_etf import (  # noqa: E402
     ActiveEtf,
     DEFAULT_ACTIVE_ETFS,
@@ -6484,6 +6484,275 @@ def page_intraday() -> None:
                 st.rerun()
 
 
+def page_intraday_live() -> None:
+    st.title("⚡ 今日當沖即時追蹤")
+    st.caption(
+        "自動刷新今天 LLM 點名過的股票，只更新公開資料/本地狀態；"
+        "LLM 即時推演與檢討必須手動按鈕觸發。"
+    )
+    _llm_caption(
+        "下方追蹤表格自動刷新不會呼叫 LLM。只有按「手動刷新 LLM 即時推演 / 檢討」時，"
+        "才會把早盤分析、刷新後狀態、新聞與宏觀資料送 Gemini。"
+    )
+
+    from bot.config import Settings as S
+    from bot.intraday_live import (
+        build_live_tracking_rows,
+        load_live_review,
+        save_live_review,
+    )
+    from bot.intraday_pipeline import load_intraday_by_date
+    from bot.utils import now_tw
+
+    today = now_tw().date()
+    report = load_intraday_by_date(PROJECT_ROOT, today)
+    if not report:
+        st.warning("今天尚無當沖戰情室報告。請先到「今日當沖戰情室」執行一次盤前/重跑流程。")
+        return
+
+    controls = st.columns([1.2, 1, 0.9, 1.2, 1])
+    max_tickers = int(controls[0].number_input(
+        "追蹤檔數",
+        min_value=5,
+        max_value=30,
+        value=12,
+        step=1,
+        help="從 LLM 排名與題材候選中依序取出。",
+    ))
+    auto_refresh = controls[1].toggle(
+        "自動刷新",
+        value=True,
+        key="intraday_live_auto_refresh",
+        help="只刷新表格資料，不會自動呼叫 LLM。",
+    )
+    refresh_seconds = int(controls[2].number_input(
+        "秒數",
+        min_value=10,
+        max_value=180,
+        value=30,
+        step=10,
+    ))
+    refresh_technicals = controls[3].toggle(
+        "慢速技術重算",
+        value=False,
+        key="intraday_live_refresh_tech",
+        help="開啟後才會重新抓公開 K 線/技術資料；自動刷新預設只抓即時報價。",
+    )
+    refresh_chips = controls[4].toggle(
+        "刷新籌碼",
+        value=False,
+        key="intraday_live_refresh_chips",
+        help="較慢；通常手動 LLM 檢討時會自動納入。",
+    )
+
+    if st.button("立即刷新追蹤表", use_container_width=True):
+        st.session_state["intraday_live_force_refresh"] = time.time()
+
+    with st.spinner("刷新今日 LLM 點名股票狀態..."):
+        tracking = build_live_tracking_rows(
+            report,
+            root=PROJECT_ROOT,
+            max_tickers=max_tickers,
+            refresh_quotes=True,
+            refresh_technicals=refresh_technicals,
+            refresh_chips=refresh_chips,
+            refresh_news=False,
+            include_news=False,
+        )
+
+    rows = tracking.get("rows") or []
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("報告日期", str(report.get("asof") or today.isoformat()))
+    col_b.metric("追蹤檔數", f"{len(rows)}")
+    col_c.metric("報價來源", "TWSE MIS")
+    col_d.metric("表格刷新", str(tracking.get("asof", "-")).split("T")[-1])
+
+    if not rows:
+        st.info("今日 LLM 報告沒有可追蹤的股票代號。")
+        return
+
+    stale_count = sum(
+        1
+        for row in rows
+        if row.get("quote_date") and row.get("quote_date") != today.isoformat()
+    )
+    missing_quote_count = sum(1 for row in rows if row.get("quote_price") is None)
+    estimated_quote_count = sum(
+        1
+        for row in rows
+        if row.get("quote_price") is not None
+        and row.get("quote_price_basis") not in ("", "last_trade")
+    )
+    if stale_count:
+        st.warning(f"{stale_count} 檔報價日期不是今天，已標成「非今日資料」。")
+    if missing_quote_count:
+        st.info(f"{missing_quote_count} 檔尚未取得 TWSE 即時報價；不會用日 K 快照假裝盤中數值。")
+    if estimated_quote_count:
+        st.caption(f"{estimated_quote_count} 檔 MIS 未提供最新成交價，已用前揭示價或買賣中間價估算。")
+
+    table_rows = []
+    basis_labels = {
+        "last_trade": "成交價",
+        "previous_trade": "前揭示價",
+        "bid_ask_mid": "買賣中間價",
+        "best_bid": "買一價",
+        "best_ask": "賣一價",
+    }
+    for row in rows:
+        table_rows.append({
+            "代號": row.get("ticker", ""),
+            "名稱": row.get("name", ""),
+            "題材": row.get("theme", ""),
+            "即時價": row.get("quote_price"),
+            "即時%": row.get("quote_pct_change"),
+            "即時量": row.get("quote_volume"),
+            "價格基準": basis_labels.get(row.get("quote_price_basis", ""), row.get("quote_price_basis", "")),
+            "買一": row.get("quote_best_bid"),
+            "賣一": row.get("quote_best_ask"),
+            "報價日": row.get("quote_date", ""),
+            "報價時間": row.get("quote_time", ""),
+            "來源": row.get("quote_source") or row.get("technical_source", ""),
+            "初始當沖分": row.get("initial_day_trade_score", 0),
+            "初始技術分": row.get("initial_technical_score", 50),
+            "技術分": row.get("current_technical_score"),
+            "技術變化": row.get("score_delta"),
+            "初始今日%": row.get("initial_pct_change", 0),
+            "早盤量比": row.get("initial_volume_ratio"),
+            "慢速量比": row.get("current_volume_ratio"),
+            "技術來源": row.get("technical_source", ""),
+            "規則檢討": row.get("correctness", ""),
+            "狀態": row.get("status", ""),
+            "理由": row.get("reason", ""),
+            "籌碼": row.get("chip_text", ""),
+            "新聞": " / ".join(row.get("news_titles") or []),
+            "最後K日": row.get("current_last_date", ""),
+        })
+    df = pd.DataFrame(table_rows)
+    st.dataframe(
+        df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "初始當沖分": st.column_config.ProgressColumn(
+                "初始當沖分", min_value=0, max_value=100, format="%.1f",
+            ),
+            "初始技術分": st.column_config.ProgressColumn(
+                "初始技術分", min_value=0, max_value=100, format="%.1f",
+            ),
+            "技術分": st.column_config.ProgressColumn(
+                "技術分", min_value=0, max_value=100, format="%.1f",
+            ),
+            "初始今日%": st.column_config.NumberColumn(format="%+.2f%%"),
+            "即時價": st.column_config.NumberColumn(format="%.2f"),
+            "即時%": st.column_config.NumberColumn(format="%+.2f%%"),
+            "即時量": st.column_config.NumberColumn(format="%.0f"),
+            "買一": st.column_config.NumberColumn(format="%.2f"),
+            "賣一": st.column_config.NumberColumn(format="%.2f"),
+            "早盤量比": st.column_config.NumberColumn(format="%.2f"),
+            "慢速量比": st.column_config.NumberColumn(format="%.2f"),
+            "技術變化": st.column_config.NumberColumn(format="%+.1f"),
+        },
+    )
+
+    st.markdown("### LLM 即時推演 / 檢討")
+    latest_review = load_live_review(PROJECT_ROOT, today)
+    env_values = load_env()
+    api_ready = bool(env_values.get("GEMINI_API_KEY"))
+    ran_manual_llm = False
+
+    if not api_ready:
+        st.info("尚未設定 GEMINI_API_KEY；可以看自動追蹤表，但無法手動刷新 LLM 推演。")
+
+    if st.button(
+        "🤖 手動刷新 LLM 即時推演 / 檢討",
+        type="primary",
+        disabled=not api_ready,
+        help=LLM_HINT_DIRECT,
+        use_container_width=True,
+    ):
+        ran_manual_llm = True
+        import os
+        for key, value in env_values.items():
+            if value and not os.environ.get(key):
+                os.environ[key] = value
+
+        from bot.llm_analyzer import GeminiClient, gemini_call
+        from bot.market_macro import fetch_macro_snapshot, macro_to_dict
+        from bot.news_fetcher import fetch_today_news, news_to_compact_text
+        from bot.prompt_registry import get_registry
+
+        settings = S()
+        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
+        registry = get_registry(PROJECT_ROOT / "prompts")
+        registry.reload()
+        with st.spinner("刷新新資料並請 LLM 檢討早盤判斷..."):
+            fresh_tracking = build_live_tracking_rows(
+                report,
+                root=PROJECT_ROOT,
+                max_tickers=max_tickers,
+                refresh_quotes=True,
+                refresh_technicals=True,
+                refresh_chips=True,
+                refresh_news=True,
+                include_news=True,
+            )
+            macro = fetch_macro_snapshot(
+                root=PROJECT_ROOT,
+                force_refresh=True,
+                use_cache=True,
+            )
+            news_items = fetch_today_news(
+                limit=120,
+                use_cache=False,
+                force_refresh=True,
+                root=PROJECT_ROOT,
+            )
+            raw, info = gemini_call(
+                "intraday_live_review",
+                client=client,
+                registry=registry,
+                metadata={"task": "intraday_live_review", "asof": today.isoformat()},
+                asof_time=now_tw().isoformat(timespec="seconds"),
+                original_brief=report.get("brief_md") or report.get("overall_brief") or "",
+                themes_json=json.dumps(report.get("themes") or [], ensure_ascii=False, indent=2),
+                live_rows_json=json.dumps(fresh_tracking.get("rows") or [], ensure_ascii=False, indent=2),
+                macro_json=json.dumps(macro_to_dict(macro), ensure_ascii=False, indent=2),
+                news_text=news_to_compact_text(news_items, max_chars=5000),
+            )
+        if raw:
+            payload = {
+                "generated_at": now_tw().isoformat(timespec="seconds"),
+                "prompt_id": info.get("prompt_id", ""),
+                "prompt_version": info.get("prompt_version", ""),
+                "llm_info": info,
+                "tracking": fresh_tracking,
+            }
+            save_live_review(
+                root=PROJECT_ROOT,
+                report_date=today,
+                markdown=raw,
+                payload=payload,
+            )
+            latest_review = {"markdown": raw, **payload}
+            st.success("LLM 即時推演已更新。")
+        else:
+            st.warning("LLM 未產出內容，請到 LLM 呼叫紀錄查看錯誤。")
+
+    if latest_review and latest_review.get("markdown"):
+        st.caption(
+            "上次手動檢討: "
+            + str(latest_review.get("generated_at") or latest_review.get("path") or "")
+        )
+        st.markdown(latest_review["markdown"])
+    else:
+        st.caption("尚未做過手動 LLM 即時推演。")
+
+    if auto_refresh and not ran_manual_llm:
+        st.caption(f"自動刷新已開啟：{refresh_seconds} 秒後更新追蹤表。LLM 不會自動呼叫。")
+        time.sleep(refresh_seconds)
+        st.rerun()
+
+
 # ======================================================================
 # 頁面: 明日當沖關注
 # ======================================================================
@@ -7263,10 +7532,94 @@ def _market_calendar_event_label(event: Any) -> str:
     return label if len(label) <= 34 else label[:31] + "..."
 
 
+def _quick_scheduler_env(include_llm_reports: bool) -> Dict[str, str]:
+    env = {"SCHEDULER_ENABLED": "true"}
+    if include_llm_reports:
+        env.update({
+            "SCHEDULER_INTRADAY_ENABLED": "true",
+            "SCHEDULER_NEXTDAY_DRAFT_ENABLED": "true",
+            "SCHEDULER_NEXTDAY_UPDATE_ENABLED": "true",
+        })
+    return env
+
+
+def _render_sidebar_quick_controls() -> None:
+    env_values = load_env()
+    bot_runner = get_runner(PROJECT_ROOT)
+    scheduler_runner = get_scheduler_runner(PROJECT_ROOT)
+    bot_running = bot_runner.is_running()
+    scheduler_running = scheduler_runner.is_running()
+
+    st.sidebar.markdown("#### 快速啟動")
+    st.sidebar.markdown(
+        f"{_badge('自動更新 ON' if scheduler_running else '自動更新 OFF', 'green' if scheduler_running else 'gray')} "
+        f"{_badge('BOT ON' if bot_running else 'BOT OFF', 'green' if bot_running else 'gray')}",
+        unsafe_allow_html=True,
+    )
+
+    include_reports = st.sidebar.toggle(
+        "包含當沖 LLM 報告",
+        value=True,
+        key="quick_auto_llm_reports",
+        disabled=scheduler_running,
+        help=(
+            "啟動自動更新時，臨時打開 stock-intraday、stock-nextday draft/update。"
+            "同一天已有報告時會跳過，避免重複呼叫 Gemini。"
+        ),
+    )
+    if include_reports and not env_values.get("GEMINI_API_KEY"):
+        st.sidebar.caption("尚未設定 GEMINI_API_KEY；當沖報告會無法產生 LLM 簡報。")
+
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("啟動自動更新", disabled=scheduler_running, use_container_width=True):
+        rec = scheduler_runner.start(
+            run_mode="scheduler",
+            extra_env=_quick_scheduler_env(include_reports),
+        )
+        st.sidebar.success(f"自動更新已啟動 PID {rec.pid}")
+        time.sleep(0.4)
+        st.rerun()
+    if c2.button("停止更新", disabled=not scheduler_running, use_container_width=True):
+        ok = scheduler_runner.stop()
+        st.sidebar.success("自動更新已停止" if ok else "自動更新停止逾時")
+        time.sleep(0.4)
+        st.rerun()
+
+    scheduler_record = scheduler_runner.current()
+    if scheduler_running and scheduler_record:
+        elapsed = time.time() - scheduler_record.started_at
+        st.sidebar.caption(f"更新 PID {scheduler_record.pid} · {_human_duration(elapsed)}")
+
+    mode_options = ["watch", "report", "trade"]
+    default_mode = env_values.get("RUN_MODE", "watch")
+    mode_index = mode_options.index(default_mode) if default_mode in mode_options else 0
+    bot_mode = st.sidebar.selectbox(
+        "BOT 模式",
+        mode_options,
+        index=mode_index,
+        key="quick_bot_mode",
+        help="watch=看盤監測；report=公開資料報表；trade=依設定交易。",
+    )
+    b1, b2 = st.sidebar.columns(2)
+    if b1.button("啟動 BOT", disabled=bot_running, use_container_width=True):
+        rec = bot_runner.start(run_mode=bot_mode)
+        st.sidebar.success(f"BOT 已啟動 PID {rec.pid}")
+        time.sleep(0.4)
+        st.rerun()
+    if b2.button("停止 BOT", disabled=not bot_running, use_container_width=True):
+        ok = bot_runner.stop()
+        st.sidebar.success("BOT 已停止" if ok else "BOT 停止逾時")
+        time.sleep(0.4)
+        st.rerun()
+
+    st.sidebar.write("")
+
+
 PAGES = {
     # 研究與分析
     "功能總覽": page_overview,
     "今日當沖戰情室": page_intraday,
+    "今日當沖即時追蹤": page_intraday_live,
     "明日當沖關注": page_next_day_watch,
     "K 線看板": page_board,
     "個股總覽": page_watchlist,
@@ -7295,7 +7648,7 @@ PAGES = {
 }
 
 NAV_GROUPS = {
-    "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "明日當沖關注", "K 線看板", "個股總覽", "目前持股分析", "個股深入分析", "自動化管線"],
+    "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "今日當沖即時追蹤", "明日當沖關注", "K 線看板", "個股總覽", "目前持股分析", "個股深入分析", "自動化管線"],
     "📡 監控與訊號": ["美股 / 跨市場", "跟單訊號", "主動 ETF 追蹤", "LLM 法說分析"],
     "⚡ 執行與紀錄": ["啟動 / 監控", "🛡 風控中心", "交易可行性檢查", "交易紀錄", "報表分析"],
     "⚙️ 系統與診斷": ["組態設定", "資料庫 / 雲端同步", "Prompt 管理",
@@ -7333,6 +7686,7 @@ def main_app() -> None:
 
     st.sidebar.title("Stock Bot")
     st.sidebar.caption("台股當沖機器人 儀表板")
+    _render_sidebar_quick_controls()
 
     if "page" not in st.session_state:
         st.session_state.page = "功能總覽"

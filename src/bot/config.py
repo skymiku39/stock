@@ -58,7 +58,17 @@ class Settings(BaseSettings):
     enter_cutoff_time: datetime.time = datetime.time(9, 30)
     exit_time: datetime.time = datetime.time(13, 15)
 
-    @field_validator("enter_cutoff_time", "exit_time", mode="before")
+    @field_validator(
+        "enter_cutoff_time",
+        "exit_time",
+        "scheduler_intraday_time",
+        "scheduler_intraday_end_time",
+        "scheduler_nextday_draft_time",
+        "scheduler_nextday_draft_end_time",
+        "scheduler_nextday_update_time",
+        "scheduler_nextday_update_end_time",
+        mode="before",
+    )
     @classmethod
     def _parse_time(cls, v: object) -> datetime.time:
         if isinstance(v, datetime.time):
@@ -173,6 +183,16 @@ class Settings(BaseSettings):
     scheduler_company_interval_min: int = 1440
     # 傳給 stock-auto-research 的額外參數 (例如 "--no-brief" 省 LLM 成本)
     scheduler_research_args: str = ""
+    # One-shot LLM report jobs. Kept off by default to avoid surprise token usage.
+    scheduler_intraday_enabled: bool = False
+    scheduler_intraday_time: datetime.time = datetime.time(8, 30)
+    scheduler_intraday_end_time: datetime.time = datetime.time(14, 30)
+    scheduler_nextday_draft_enabled: bool = False
+    scheduler_nextday_draft_time: datetime.time = datetime.time(14, 0)
+    scheduler_nextday_draft_end_time: datetime.time = datetime.time(18, 0)
+    scheduler_nextday_update_enabled: bool = False
+    scheduler_nextday_update_time: datetime.time = datetime.time(2, 0)
+    scheduler_nextday_update_end_time: datetime.time = datetime.time(6, 0)
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
     scheduler_market_hours_only: bool = True
     scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪

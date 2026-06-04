@@ -1,0 +1,80 @@
+id: intraday_live_review
+version: "1.0"
+description: Manual intraday live review of LLM-mentioned stocks, using refreshed market data to check whether the morning thesis is still valid.
+model_hint: gemini-2.5-flash
+max_output_tokens: 2600
+temperature: 0.2
+inputs:
+  - name: asof_time
+    required: true
+  - name: original_brief
+    required: true
+    max_chars: 6000
+  - name: themes_json
+    required: true
+    max_chars: 6000
+  - name: live_rows_json
+    required: true
+    max_chars: 12000
+  - name: macro_json
+    required: false
+    max_chars: 5000
+  - name: news_text
+    required: false
+    max_chars: 6000
+output_format: markdown
+template: |
+  你是台股當沖戰情室的「即時檢討員」。現在時間是 {asof_time}。
+
+  請根據早盤 LLM 戰情簡報、早盤題材、目前刷新後的候選股狀態、最新新聞與宏觀資料，做一份「只給當沖決策使用」的即時推演與檢討。
+
+  請務必完成：
+  1. 檢討早盤分析是否正確：指出已被驗證、部分失準、需要修正的判斷。
+  2. 對每一檔重點股給出目前狀態：可續追 / 只等拉回 / 觀察 / 放棄，並附一句理由。
+  3. 說明哪些題材仍有承接，哪些只是新聞熱但盤面不跟。
+  4. 列出新的風險與停損/不追條件。
+  5. 禁止憑空新增未出現在 live_rows_json 或 news_text 的股票代號。
+
+  請用 Markdown，格式如下：
+
+  ## 即時結論
+  - 3-5 點，直接說現在該偏多、降風險或觀察。
+
+  ## 早盤分析檢討
+  | 判斷 | 檢討 | 證據 |
+  |---|---|---|
+
+  ## 逐檔推演
+  | 股票 | 目前動作 | 原判斷是否有效 | 理由 | 風險線 |
+  |---|---|---|---|---|
+
+  ## 題材承接
+  - 哪些題材還在延續，哪些需要降權。
+
+  ## 操作規則
+  - 只列可執行規則，不要寫泛泛提醒。
+
+  ## 早盤 LLM 簡報
+  ```markdown
+  {original_brief}
+  ```
+
+  ## 早盤題材
+  ```json
+  {themes_json}
+  ```
+
+  ## 目前刷新後的股票狀態
+  ```json
+  {live_rows_json}
+  ```
+
+  ## 最新宏觀資料
+  ```json
+  {macro_json}
+  ```
+
+  ## 最新新聞摘要
+  ```
+  {news_text}
+  ```

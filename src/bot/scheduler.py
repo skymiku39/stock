@@ -27,8 +27,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from shutil import which
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 from bot.config import Settings
 from bot.utils import get_logger, now_tw
@@ -51,9 +50,6 @@ def _in_window(t: dt.time, start: dt.time, end: dt.time) -> bool:
 
 def _base_command() -> List[str]:
     """優先用 uv run，否則 fallback 到當前 Python -m。"""
-    uv = which("uv")
-    if uv:
-        return [uv, "run"]
     return [sys.executable, "-m"]
 
 
@@ -72,7 +68,14 @@ class Job:
     interval_min: int
     market_hours_only: bool
     extra_args: List[str] = field(default_factory=list)
+    run_once_per_day: bool = False
+    window_start: Optional[dt.time] = None
+    window_end: Optional[dt.time] = None
+    report_kind: str = ""
+    report_mode: str = ""
+    target_date_mode: str = ""
     last_run_epoch: float = 0.0
+    last_run_key: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def is_running(self) -> bool:
@@ -127,6 +130,49 @@ class Scheduler:
                 market_hours_only=s.scheduler_market_hours_only,
                 extra_args=extra,
             ))
+        if getattr(s, "scheduler_intraday_enabled", False):
+            jobs.append(Job(
+                name="intraday",
+                console_script="stock-intraday",
+                module="bot.intraday_cli",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--refresh-news"],
+                run_once_per_day=True,
+                window_start=s.scheduler_intraday_time,
+                window_end=s.scheduler_intraday_end_time,
+                report_kind="intraday",
+            ))
+        if getattr(s, "scheduler_nextday_draft_enabled", False):
+            jobs.append(Job(
+                name="nextday_draft",
+                console_script="stock-nextday",
+                module="bot.next_day_watch_cli",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--mode", "draft", "--refresh-news"],
+                run_once_per_day=True,
+                window_start=s.scheduler_nextday_draft_time,
+                window_end=s.scheduler_nextday_draft_end_time,
+                report_kind="next_day_watch",
+                report_mode="draft",
+                target_date_mode="next_trading_day",
+            ))
+        if getattr(s, "scheduler_nextday_update_enabled", False):
+            jobs.append(Job(
+                name="nextday_update",
+                console_script="stock-nextday",
+                module="bot.next_day_watch_cli",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--mode", "update", "--refresh-macro"],
+                run_once_per_day=True,
+                window_start=s.scheduler_nextday_update_time,
+                window_end=s.scheduler_nextday_update_end_time,
+                report_kind="next_day_watch",
+                report_mode="update",
+                target_date_mode="today",
+            ))
         if getattr(s, "scheduler_company_interval_min", 0) > 0:
             jobs.append(Job(
                 name="company",
@@ -149,17 +195,71 @@ class Scheduler:
     # 任務執行
     # ------------------------------------------------------------------
 
-    def _run_job(self, job: Job) -> None:
-        cmd = _resolve_cmd(job.console_script, job.module, job.extra_args)
+    def _job_target_date(self, job: Job, now: dt.datetime) -> Optional[dt.date]:
+        if job.target_date_mode == "today":
+            return now.date()
+        if job.target_date_mode == "next_trading_day":
+            from bot.next_day_watch_pipeline import next_trading_day
+            return next_trading_day(now.date())
+        return None
+
+    def _job_extra_args(self, job: Job, now: dt.datetime) -> List[str]:
+        extra = list(job.extra_args)
+        target_date = self._job_target_date(job, now)
+        if target_date is not None:
+            extra.extend(["--target-date", target_date.isoformat()])
+        return extra
+
+    def _daily_run_key(self, job: Job, now: dt.datetime) -> str:
+        target_date = self._job_target_date(job, now)
+        date_part = target_date.isoformat() if target_date else now.date().isoformat()
+        mode_part = f":{job.report_mode}" if job.report_mode else ""
+        return f"{job.name}:{date_part}{mode_part}"
+
+    def _job_in_window(self, job: Job, now: dt.datetime) -> bool:
+        if not _is_weekday(now.date()):
+            return False
+        if job.window_start is None:
+            return True
+        window_end = job.window_end or dt.time(23, 59)
+        return _in_window(now.time(), job.window_start, window_end)
+
+    def _report_exists_for_job(self, job: Job, now: dt.datetime) -> bool:
+        try:
+            if job.report_kind == "intraday":
+                from bot.intraday_pipeline import load_intraday_by_date
+                data = load_intraday_by_date(self.project_root, now.date())
+                return bool(data and (data.get("brief_md") or data.get("rankings")))
+            if job.report_kind == "next_day_watch":
+                from bot.next_day_watch_pipeline import load_next_day_by_date
+                target_date = self._job_target_date(job, now)
+                if target_date is None:
+                    return False
+                data = load_next_day_by_date(
+                    self.project_root,
+                    target_date,
+                    mode=job.report_mode or None,
+                    prefer_update=job.report_mode == "update",
+                )
+                return bool(data and (data.get("brief_md") or data.get("rankings")))
+        except Exception:
+            self.logger.debug("daily report existence check failed: %s", job.name, exc_info=True)
+        return False
+
+    def _run_job(self, job: Job, now: Optional[dt.datetime] = None) -> None:
+        scheduled_at = now or now_tw()
+        cmd = _resolve_cmd(job.console_script, job.module, self._job_extra_args(job, scheduled_at))
         ts = time.strftime("%Y%m%d_%H%M%S")
         log_path = self.log_dir / f"scheduler_{job.name}_{ts}.log"
         self.logger.info("▶ 執行任務 %s: %s → %s", job.name, " ".join(cmd), log_path.name)
         if self.dry_run:
             self.logger.info("  (dry-run，略過實際執行)")
             job.last_run_epoch = time.time()
+            if job.run_once_per_day:
+                job.last_run_key = self._daily_run_key(job, scheduled_at)
             return
 
-        env = _child_env()
+        env = _child_env(self.project_root)
         try:
             with open(log_path, "w", encoding="utf-8", buffering=1) as fp:
                 fp.write(f"# job={job.name} cmd={' '.join(cmd)} start={ts}\n# ---\n")
@@ -175,19 +275,33 @@ class Scheduler:
             self.logger.exception("任務 %s 執行失敗", job.name)
         finally:
             job.last_run_epoch = time.time()
+            if job.run_once_per_day:
+                job.last_run_key = self._daily_run_key(job, scheduled_at)
 
     def _dispatch(self, job: Job, now: dt.datetime) -> None:
         if job.is_running():
             return
+        if job.run_once_per_day:
+            if not self._job_in_window(job, now):
+                return
+            run_key = self._daily_run_key(job, now)
+            if job.last_run_key == run_key:
+                return
+            if self._report_exists_for_job(job, now):
+                self.logger.info("skip %s; report already exists for %s", job.name, run_key)
+                job.last_run_key = run_key
+                job.last_run_epoch = time.time()
+                return
+        else:
+            due = (time.time() - job.last_run_epoch) >= job.interval_min * 60
+            if not due:
+                return
         if job.market_hours_only and not _is_data_window(now):
-            return
-        due = (time.time() - job.last_run_epoch) >= job.interval_min * 60
-        if not due:
             return
 
         def _worker() -> None:
             with job._lock:
-                self._run_job(job)
+                self._run_job(job, now)
 
         threading.Thread(target=_worker, name=f"job-{job.name}", daemon=True).start()
 
@@ -244,7 +358,7 @@ class Scheduler:
                 if job.market_hours_only and not _is_data_window(now):
                     self.logger.info("略過 %s (非交易時段)", job.name)
                     continue
-                self._run_job(job)
+                self._run_job(job, now)
             self._supervise_monitor(now)
             self.logger.info("=== Scheduler --once 完成 ===")
             return 0
@@ -252,6 +366,8 @@ class Scheduler:
         # 啟動即跑一輪 (不受 market_hours_only 限制，方便即時看到資料)
         if self.settings.scheduler_run_on_start and not self.dry_run:
             for job in self.jobs:
+                if job.run_once_per_day:
+                    continue
                 threading.Thread(
                     target=lambda j=job: (j._lock.acquire(),
                                           self._run_job(j), j._lock.release()),
@@ -282,11 +398,17 @@ def _is_data_window(now: dt.datetime) -> bool:
     )
 
 
-def _child_env() -> dict:
+def _child_env(project_root: Optional[Path] = None) -> dict:
     import os
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    if project_root is not None:
+        src_path = str(project_root / "src")
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            src_path if not existing_pythonpath else src_path + os.pathsep + existing_pythonpath
+        )
     return env
 
 

@@ -31,10 +31,22 @@ class RunRecord:
 class BotProcessRunner:
     """單例 stock-bot 子行程管理。"""
 
-    def __init__(self, project_root: Optional[Path] = None):
+    def __init__(
+        self,
+        project_root: Optional[Path] = None,
+        *,
+        console_script: str = "stock-bot",
+        module: str = "bot.main",
+        log_prefix: str = "dashboard_run",
+        set_run_mode_env: bool = True,
+    ):
         self.project_root = project_root or Path.cwd()
         self.log_dir = self.project_root / "log"
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.console_script = console_script
+        self.module = module
+        self.log_prefix = log_prefix
+        self.set_run_mode_env = set_run_mode_env
 
         self._proc: Optional[subprocess.Popen] = None
         self._record: Optional[RunRecord] = None
@@ -68,22 +80,30 @@ class BotProcessRunner:
         self,
         run_mode: str,
         extra_env: Optional[Dict[str, str]] = None,
+        args: Optional[List[str]] = None,
     ) -> RunRecord:
         if self.is_running():
             assert self._record is not None
             return self._record
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_path = self.log_dir / f"dashboard_run_{run_mode}_{timestamp}.log"
+        safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in run_mode)
+        log_path = self.log_dir / f"{self.log_prefix}_{safe_label}_{timestamp}.log"
 
         env = os.environ.copy()
-        env["RUN_MODE"] = run_mode
+        if self.set_run_mode_env:
+            env["RUN_MODE"] = run_mode
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        src_path = str(self.project_root / "src")
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            src_path if not existing_pythonpath else src_path + os.pathsep + existing_pythonpath
+        )
         if extra_env:
             env.update(extra_env)
 
-        cmd = self._build_command()
+        cmd = self._build_command(args or [])
 
         creationflags = 0
         if sys.platform == "win32":
@@ -91,7 +111,7 @@ class BotProcessRunner:
 
         log_fp = open(log_path, "w", encoding="utf-8", buffering=1)
         log_fp.write(
-            f"# stock-bot dashboard run\n"
+            f"# {self.console_script} dashboard run\n"
             f"# command: {' '.join(cmd)}\n"
             f"# run_mode: {run_mode}\n"
             f"# started_at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -175,14 +195,10 @@ class BotProcessRunner:
     # 內部
     # ------------------------------------------------------------------
 
-    def _build_command(self) -> List[str]:
-        """優先用 uv run，其次 fallback 到當前 Python -m bot.main。"""
-        from shutil import which
-
-        uv = which("uv")
-        if uv:
-            return [uv, "run", "stock-bot"]
-        return [sys.executable, "-m", "bot.main"]
+    def _build_command(self, args: Optional[List[str]] = None) -> List[str]:
+        """Use the dashboard's Python to avoid uv rewriting locked console scripts."""
+        extra = args or []
+        return [sys.executable, "-m", self.module] + extra
 
 
 # ----------------------------------------------------------------------
@@ -190,6 +206,7 @@ class BotProcessRunner:
 # ----------------------------------------------------------------------
 
 _runner: Optional[BotProcessRunner] = None
+_scheduler_runner: Optional[BotProcessRunner] = None
 
 
 def get_runner(project_root: Optional[Path] = None) -> BotProcessRunner:
@@ -197,6 +214,19 @@ def get_runner(project_root: Optional[Path] = None) -> BotProcessRunner:
     if _runner is None:
         _runner = BotProcessRunner(project_root=project_root)
     return _runner
+
+
+def get_scheduler_runner(project_root: Optional[Path] = None) -> BotProcessRunner:
+    global _scheduler_runner
+    if _scheduler_runner is None:
+        _scheduler_runner = BotProcessRunner(
+            project_root=project_root,
+            console_script="stock-scheduler",
+            module="bot.scheduler",
+            log_prefix="dashboard_scheduler",
+            set_run_mode_env=False,
+        )
+    return _scheduler_runner
 
 
 def tail_file(path: Path, lines: int = 200) -> str:
@@ -211,4 +241,10 @@ def tail_file(path: Path, lines: int = 200) -> str:
         return f"<read error: {e}>"
 
 
-__all__ = ["BotProcessRunner", "RunRecord", "get_runner", "tail_file"]
+__all__ = [
+    "BotProcessRunner",
+    "RunRecord",
+    "get_runner",
+    "get_scheduler_runner",
+    "tail_file",
+]

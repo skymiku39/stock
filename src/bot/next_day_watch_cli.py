@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -35,12 +36,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--news-limit", type=int, default=120, help="新聞抓取數量")
     parser.add_argument("--limit", type=int, default=25, help="候選股排序輸出數量")
     parser.add_argument("--scan-limit", type=int, default=60, help="強勢承接掃描範圍上限")
+    parser.add_argument("--target-date", default="", help="Target trading date (YYYY-MM-DD)")
     args = parser.parse_args(argv)
 
     logger = get_logger("stock-nextday")
     settings = Settings()
 
     refresh_macro = args.refresh_macro or args.mode == "update"
+    target_date = dt.date.fromisoformat(args.target_date) if args.target_date else None
 
     report = run_next_day_watch(
         mode=args.mode,
@@ -51,6 +54,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         scan_limit=args.scan_limit,
         force_refresh_news=args.refresh_news,
         force_refresh_macro=refresh_macro,
+        target_date=target_date,
         logger=logger,
     )
 

@@ -91,6 +91,43 @@ class TestPoll:
         assert source._exchange_map["2330"] == "tse"
 
 
+class TestGetQuotes:
+    def test_uses_last_trade_when_available(self) -> None:
+        source = TwsePublicMarketSource(symbols=["2330"])
+        with patch.object(source, "_fetch_raw", return_value=SAMPLE_MSG_ARRAY[:1]):
+            quotes = source.get_quotes()
+
+        quote = quotes["2330"]
+        assert quote["price"] == 600.0
+        assert quote["price_basis"] == "last_trade"
+        assert quote["pct_chg"] == pytest.approx(3.45, abs=0.01)
+
+    def test_uses_bid_ask_mid_when_last_trade_missing(self) -> None:
+        items = [{
+            "c": "2382",
+            "z": "-",
+            "pz": "-",
+            "b": "405.0000_404.5000_",
+            "a": "406.0000_406.5000_",
+            "v": "38143",
+            "y": "417.0000",
+            "d": "20260604",
+            "t": "11:13:36",
+            "n": "廣達",
+            "ex": "tse",
+        }]
+        source = TwsePublicMarketSource(symbols=["2382"])
+        with patch.object(source, "_fetch_raw", return_value=items):
+            quotes = source.get_quotes()
+
+        quote = quotes["2382"]
+        assert quote["price"] == 405.5
+        assert quote["best_bid"] == 405.0
+        assert quote["best_ask"] == 406.0
+        assert quote["price_basis"] == "bid_ask_mid"
+        assert quote["pct_chg"] == pytest.approx(-2.76, abs=0.01)
+
+
 class TestBuildExCh:
     def test_unknown_symbol_tries_both(self) -> None:
         source = TwsePublicMarketSource(symbols=["2330"])
