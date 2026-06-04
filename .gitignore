@@ -105,6 +105,12 @@ Desktop.ini
 .ipynb_checkpoints/
 
 # ======================
+# pytest
+# ======================
+.pytest_cache/
+pytest-cache-files*/
+
+# ======================
 # 其他
 # ======================
 *.bak

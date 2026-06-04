@@ -2,6 +2,8 @@
 
 用法:
     uv run stock-auto-research               # 用 .env 預設參數
+    uv run stock-auto-research --llm-only    # 僅 LLM 個股研究（原 stock-llm-research）
+    uv run stock-auto-research --llm-only 2330,2317 --upcoming --refresh
     uv run stock-auto-research --no-etf      # 跳過 ETF 抓取
     uv run stock-auto-research --no-chips    # 跳過籌碼面
     uv run stock-auto-research --no-brief    # 不產出每日簡報
@@ -15,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.auto_llm import run_llm_research_batch
 from bot.config import Settings
 from bot.data_pipeline import (
     PipelineConfig,
@@ -90,10 +93,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--min-consensus", type=int, default=2,
         help="共識焦點門檻 (ETF 持有檔數 >=N，預設 2)",
     )
+    parser.add_argument(
+        "--llm-only", action="store_true",
+        help="僅跑 LLM 個股研究（跳過 ETF/籌碼/簡報管線；取代 stock-llm-research）",
+    )
+    parser.add_argument(
+        "llm_tickers", nargs="*",
+        help="--llm-only 時的個股代號（可逗號分隔；無參數則 watchlist）",
+    )
+    parser.add_argument(
+        "--upcoming", action="store_true",
+        help="--llm-only：納入未來有法說會的個股",
+    )
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="--llm-only：略過快取強制重跑",
+    )
     args = parser.parse_args(argv)
 
     logger = get_logger("auto-research")
     project_root = Path.cwd()
+
+    if args.llm_only:
+        tickers = [
+            t.strip()
+            for raw in args.llm_tickers
+            for t in str(raw).split(",")
+            if t.strip()
+        ]
+        return run_llm_research_batch(
+            tickers=tickers,
+            root=project_root,
+            upcoming=args.upcoming,
+            upcoming_days=args.upcoming_days,
+            no_calendar=args.no_calendar,
+            refresh=args.refresh,
+            chip_days=args.days,
+            logger=logger,
+        )
+
     settings = Settings()
 
     presentations: List[PresentationInput] = []

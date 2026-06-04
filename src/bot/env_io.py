@@ -225,6 +225,11 @@ ENV_FIELDS: List[EnvField] = [
             "gemini-2.0-flash",
         ],
     ),
+    EnvField(
+        "AUTO_LLM_ALLOW_LEGACY", "允許 auto_llm 舊版 fallback", "LLM 分析", "bool",
+        default="false",
+        help="僅在無 research_ticker prompt 時退回 analyze_presentation；預設關閉",
+    ),
 
     # 自動化管線
     EnvField(

@@ -38,6 +38,12 @@ from bot.market_macro import (
 )
 from bot.news_fetcher import fetch_today_news, news_to_compact_text
 from bot.scoring import compute_scorecard
+from bot.pipeline_shared import (
+    consensus_tickers_today as _consensus_tickers_today,
+    intraday_report_to_dict as _report_to_json,
+    macro_summary_text as _macro_summary_text,
+    parse_json_blob as _parse_json,
+)
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -89,30 +95,6 @@ class IntradayReport:
 # ----------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------
-
-
-def _macro_summary_text(macro: Dict[str, Any]) -> str:
-    bits: List[str] = []
-    idx = macro.get("indices") or {}
-    for sym, label in [
-        ("^GSPC", "S&P"), ("^IXIC", "NASDAQ"),
-        ("^SOX", "SOX"), ("^VIX", "VIX"),
-        ("^TWII", "加權"),
-    ]:
-        q = idx.get(sym)
-        if q:
-            bits.append(f"{label} {q.get('pct_change', 0):+.2f}%")
-    prem = macro.get("adr_premiums") or []
-    if prem:
-        for p in prem:
-            bits.append(f"ADR {p.get('adr_symbol')} 溢價 {p.get('premium_pct', 0):+.2f}%")
-    fb = macro.get("futures_basis")
-    if isinstance(fb, dict) and fb.get("state") and fb.get("state") != "unknown":
-        bits.append(
-            f"台指期{fb.get('state')} {fb.get('basis', 0):+.0f}點"
-            f"({fb.get('basis_pct', 0):+.2f}%, 近月OI {fb.get('open_interest', 0):,.0f})"
-        )
-    return "; ".join(bits) or "(無 macro)"
 
 
 def _build_candidate_pool(
@@ -496,52 +478,6 @@ def run_intraday(
 # ----------------------------------------------------------------------
 
 
-def _parse_json(text: str) -> Optional[Dict[str, Any]]:
-    """robust JSON 解析 (處理 LLM 偶爾帶 ```json fence)。"""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`")
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
-    try:
-        return json.loads(t)
-    except Exception:
-        # 嘗試切到第一個 { ... 最後一個 }
-        l = t.find("{")
-        r = t.rfind("}")
-        if l >= 0 and r > l:
-            try:
-                return json.loads(t[l:r + 1])
-            except Exception:
-                return None
-    return None
-
-
-def _consensus_tickers_today(root: Path) -> List[str]:
-    """從最近一次 pipeline run 取共識 top tickers。"""
-    base = root / "data" / "pipeline_runs"
-    restore_tree_from_cloud(base, root=root)
-    if not base.exists():
-        return []
-    runs = sorted([d for d in base.iterdir() if d.is_dir()], key=lambda p: p.name, reverse=True)
-    if not runs:
-        return []
-    rj = runs[0] / "run.json"
-    restore_file_from_cloud(rj, root=root)
-    if not rj.exists():
-        return []
-    try:
-        data = json.loads(rj.read_text(encoding="utf-8"))
-        tickers: List[str] = []
-        for item in (data.get("consensus_top") or []):
-            t = str(item.get("ticker", "")).strip()
-            if t and t.isdigit() and t not in tickers:
-                tickers.append(t)
-        return tickers[:20]
-    except Exception:
-        return []
-
-
 def _watchlist_tickers(root: Path) -> List[str]:
     try:
         from bot import watchlist as wl_mod
@@ -549,23 +485,6 @@ def _watchlist_tickers(root: Path) -> List[str]:
         return [i.ticker for i in wl.items if i.ticker.isdigit()]
     except Exception:
         return []
-
-
-def _report_to_json(r: IntradayReport) -> Dict[str, Any]:
-    return {
-        "asof": r.asof,
-        "market_tone": r.market_tone,
-        "overall_brief": r.overall_brief,
-        "themes": r.themes,
-        "rankings": [asdict(c) for c in r.rankings],
-        "macro_summary": r.macro_summary,
-        "brief_md": r.brief_md,
-        "brief_prompt_id": r.brief_prompt_id,
-        "brief_prompt_version": r.brief_prompt_version,
-        "duration_sec": r.duration_sec,
-        "errors": r.errors,
-        "output_dir": r.output_dir,
-    }
 
 
 def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:

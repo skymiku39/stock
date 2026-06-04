@@ -596,8 +596,8 @@ def _pipeline_macro_text(macro_dict: Dict[str, Any]) -> str:
     if not macro_dict:
         return "(無 macro 資料)"
     try:
-        from bot.intraday_pipeline import _macro_summary_text
-        return _macro_summary_text(macro_dict)
+        from bot.pipeline_shared import macro_summary_text
+        return macro_summary_text(macro_dict)
     except Exception:
         return "(macro 摘要產生失敗)"
 

@@ -127,21 +127,8 @@ def load_bot_portfolio(root: Path) -> Tuple[List[PortfolioTrade], Dict[str, Port
 
 
 def fetch_broker_positions(settings: Any, *, timeout: int = 8000) -> BrokerPositionsSnapshot:
-    """Read current stock positions from the configured broker.
-
-    Currently Shioaji is supported.  T4 exposes balance query functions, but the
-    fixed-width inventory payload is not normalized in this project yet.
-    """
-    backend = str(getattr(settings, "broker_backend", "shioaji") or "shioaji").lower()
-    if backend == "shioaji":
-        return fetch_shioaji_positions(settings, timeout=timeout)
-    return BrokerPositionsSnapshot(
-        broker=backend,
-        account="",
-        asof=_now_iso(),
-        simulation=bool(getattr(settings, "simulation", False)),
-        error=f"broker_backend={backend} 尚未支援庫存查詢",
-    )
+    """Read current stock positions from Shioaji (production broker)."""
+    return fetch_shioaji_positions(settings, timeout=timeout)
 
 
 def fetch_shioaji_positions(settings: Any, *, timeout: int = 8000) -> BrokerPositionsSnapshot:

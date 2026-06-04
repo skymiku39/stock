@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # --- 執行模式 ---
     run_mode: Literal["trade", "watch", "report"] = "trade"
-    broker_backend: Literal["shioaji", "t4"] = "shioaji"
+    broker_backend: Literal["shioaji"] = "shioaji"
     market_source: Literal["shioaji", "twse_public", ""] = ""
     report_poll_seconds: int = 5
     report_output_dir: str = "data/reports"
@@ -159,6 +159,8 @@ class Settings(BaseSettings):
     # --- Gemini LLM ---
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    # 允許 auto_llm 在無 research_ticker prompt 時退回 analyze_presentation
+    auto_llm_allow_legacy: bool = False
 
     # --- 自動化研究管線 ---
     pipeline_chip_lookback_days: int = 5

@@ -6,7 +6,7 @@ from typing import List, Tuple
 from shioaji.constant import Action, OrderState, OrderType, StockOrderLot, StockPriceType
 
 from bot.config import Settings
-from bot.t4_broker import (
+from t4tools.broker import (
     T4Broker,
     map_order_type,
     map_stock_ord_type,
@@ -21,7 +21,6 @@ def _settings(**overrides) -> Settings:
     defaults = dict(
         run_mode="trade",
         symbols=["2330"],
-        broker_backend="t4",
         t4_login_id="A123456789",
         t4_login_password="pw",
         t4_person_id="A123456789",

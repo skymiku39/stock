@@ -29,13 +29,18 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bot import watchlist as wl
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
+from bot.config import Settings
+from bot.conference_calendar import update_calendar, upcoming_tickers
 from bot.env_io import load_env
 from bot.llm_analyzer import (
     ChipsContext,
@@ -495,6 +500,12 @@ def auto_analyze_ticker(
             raw_response=res["raw"],
         )
     else:
+        allow_legacy = str(
+            load_env().get("AUTO_LLM_ALLOW_LEGACY", "0") or "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if not allow_legacy:
+            log.info("[%s] 無 research_ticker 結果且 AUTO_LLM_ALLOW_LEGACY=0，跳過", ticker)
+            return None
         composed = _compose_legacy_text(
             ticker, name_hint, materials, news, pipeline_text,
             calendar_data, web_block,
@@ -597,8 +608,184 @@ def auto_research_ticker(
     )
 
 
+def _parse_llm_tickers(args_tickers: List[str]) -> List[str]:
+    out: List[str] = []
+    for raw in args_tickers:
+        for t in str(raw).split(","):
+            t = t.strip()
+            if t and t not in out:
+                out.append(t)
+    return out
+
+
+def _load_watchlist_tickers(root: Path) -> List[str]:
+    try:
+        items = wl.load(root).items
+    except Exception:
+        return []
+    return [i.ticker for i in items if i.ticker]
+
+
+def _name_hint_for(ticker: str, root: Path) -> str:
+    try:
+        for it in wl.load(root).items:
+            if it.ticker == ticker:
+                return it.name or ""
+    except Exception:
+        pass
+    try:
+        from bot.stock_db import get_db
+        info = get_db().get_stock_info(ticker)
+        if info and info.name:
+            return info.name
+    except Exception:
+        pass
+    return ""
+
+
+def _append_research_log(root: Path, entry: Dict[str, object]) -> None:
+    log_path = root / "data" / "auto_llm" / "research_log.jsonl"
+    mk_folder(str(log_path.parent))
+    try:
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        mirror_file_to_cloud(log_path, root=root)
+    except Exception:
+        pass
+
+
+def run_llm_research_batch(
+    *,
+    tickers: List[str],
+    root: Path,
+    upcoming: bool = False,
+    upcoming_days: int = 14,
+    no_calendar: bool = False,
+    refresh: bool = False,
+    chip_days: int = 5,
+    logger: Optional[logging.Logger] = None,
+) -> int:
+    """對多檔個股跑 auto_research_ticker（原 stock-llm-research 核心邏輯）。"""
+    log = logger or get_logger("llm-research")
+    settings = Settings()
+
+    if not settings.gemini_api_key:
+        log.error(
+            "未設定 GEMINI_API_KEY；無法跑自動研究。請到 .env 或 dashboard「組態設定」填入。"
+        )
+        return 2
+
+    if not no_calendar:
+        log.info("=== 更新 MOPS 法說會行事曆 ===")
+        try:
+            summary = update_calendar(root=root, logger=log)
+            log.info("行事曆更新完成: %s", summary)
+        except Exception:
+            log.exception("行事曆更新失敗 (繼續)")
+
+    work = list(tickers)
+    if not work:
+        work = _load_watchlist_tickers(root)
+        if work:
+            log.info("未指定 tickers，使用 watchlist 共 %d 檔", len(work))
+    if upcoming:
+        extra = upcoming_tickers(days=upcoming_days, root=root)
+        new_add = [t for t in extra if t not in work]
+        work.extend(new_add)
+        log.info(
+            "加入未來 %d 天有法說會的 %d 檔: %s",
+            upcoming_days, len(new_add), new_add[:10],
+        )
+
+    if not work:
+        log.warning("沒有任何 ticker 可以分析。請傳參數或建立 watchlist。")
+        return 1
+
+    log.info("=== 開始自動研究 %d 檔 ===", len(work))
+    okay = 0
+    failed = 0
+    for i, ticker in enumerate(work, 1):
+        name = _name_hint_for(ticker, root)
+        log.info("[%d/%d] 研究 %s %s ...", i, len(work), ticker, name)
+        try:
+            result = auto_research_ticker(
+                ticker,
+                root=root,
+                name_hint=name,
+                days=chip_days,
+                force_refresh=refresh,
+                refresh_calendar=False,
+                logger=log,
+            )
+        except Exception:
+            log.exception("[%s] 自動研究例外", ticker)
+            failed += 1
+            _append_research_log(root, {
+                "ts": now_tw().isoformat(timespec="seconds"),
+                "ticker": ticker, "status": "exception",
+            })
+            continue
+        if result is None:
+            failed += 1
+            _append_research_log(root, {
+                "ts": now_tw().isoformat(timespec="seconds"),
+                "ticker": ticker, "status": "no_result",
+            })
+            continue
+        okay += 1
+        _append_research_log(root, {
+            "ts": now_tw().isoformat(timespec="seconds"),
+            "ticker": ticker,
+            "status": "ok",
+            "sentiment": result.get("sentiment"),
+            "sentiment_score": result.get("sentiment_score"),
+            "confidence": result.get("confidence"),
+            "catalyst_outlook": result.get("catalyst_outlook", "")[:80],
+            "logic_verdict": (result.get("logic_check") or {}).get("verdict"),
+        })
+
+    log.info("=== 完成：成功 %d 檔 / 失敗 %d 檔 ===", okay, failed)
+    return 0 if okay > 0 else 2
+
+
+def llm_research_main(argv: Optional[List[str]] = None) -> int:
+    """CLI 入口（``stock-llm-research``，已 deprecated，請改用 ``stock-auto-research --llm-only``）。"""
+    parser = argparse.ArgumentParser(
+        prog="stock-llm-research",
+        description=(
+            "全自動 LLM 個股研究 (deprecated：請改用 stock-auto-research --llm-only)"
+        ),
+    )
+    parser.add_argument(
+        "tickers", nargs="*",
+        help="個股代號 (可逗號分隔；無參數則跑 watchlist)",
+    )
+    parser.add_argument("--upcoming", action="store_true", help="納入未來有法說會的個股")
+    parser.add_argument("--upcoming-days", type=int, default=14)
+    parser.add_argument("--no-calendar", action="store_true")
+    parser.add_argument("--no-web", action="store_true", help="保留相容，目前由 auto_research_ticker 控制")
+    parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--days", type=int, default=5, help="籌碼面回顧天數")
+    args = parser.parse_args(argv)
+
+    if args.no_web:
+        get_logger("llm-research").warning("--no-web 已廢棄，行為與完整研究相同")
+
+    return run_llm_research_batch(
+        tickers=_parse_llm_tickers(args.tickers),
+        root=Path.cwd(),
+        upcoming=args.upcoming,
+        upcoming_days=args.upcoming_days,
+        no_calendar=args.no_calendar,
+        refresh=args.refresh,
+        chip_days=args.days,
+    )
+
+
 __all__ = [
     "auto_analyze_ticker",
     "auto_research_ticker",
     "load_cached_auto_analysis",
+    "llm_research_main",
+    "run_llm_research_batch",
 ]

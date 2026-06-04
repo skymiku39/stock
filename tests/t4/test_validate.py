@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from bot.config import Settings
-from bot.t4_validate import (
+from t4tools.validate import (
     default_exam1st_content,
     parse_t4_build,
     run_t4_validation,

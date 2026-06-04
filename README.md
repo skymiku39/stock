@@ -80,8 +80,9 @@ uv run stock-preflight --json         # 給 CI / 通知用
 或在儀表板 **⚡ 執行與紀錄 → 🩺 交易可行性檢查** 點「立刻檢查」，
 會顯示 6 個分區、每項通過/警告/阻擋狀態與修復建議。
 
-### T4 DLL 實機驗證
+### T4 DLL 實機驗證（實驗工具，非 production bot）
 
+T4 程式已移出 `src/bot` 主線，說明見 [`tools/t4/README.md`](tools/t4/README.md)。
 若要驗證永豐 T4 DLL，先在 `.env` 填入 `T4_LOGIN_ID`、`T4_LOGIN_PASSWORD`、
 `T4_PERSON_ID`、`T4_CA_PATH`、`T4_CA_PASSWORD`，再執行：
 
@@ -93,7 +94,7 @@ uv run stock-t4-validate --order-test   # 會送出真實 T4 stock_order2 測試
 ```
 
 `stock-t4-validate` 會輸出 DLL 版本、帳號清單、CA 驗章、主動回報與受旗標保護的
-官方測試/下單結果；未完成登入、CA 與至少一個官方 order-path 測試前，不應把主交易路由切成 T4。
+官方測試/下單結果。主程式 `stock-bot` 僅支援 Shioaji，勿將 `BROKER_BACKEND` 設為已移除的 `t4`。
 
 ## 🛡 資金/風險控制 (12 道閘門 + Kill Switch)
 
@@ -384,11 +385,14 @@ uv run stock-gemini-test
 「LLM 法說分析」過去要使用者手動貼逐字稿；新版**全程無人值守**：
 
 ```bash
-uv run stock-llm-research                  # 跑 watchlist 所有檔
-uv run stock-llm-research 2330,2317,3231   # 指定多檔
-uv run stock-llm-research --upcoming       # 加入「未來 14 天有法說會」的個股
-uv run stock-llm-research --refresh        # 略過 12h 快取，強制重打 LLM
-uv run stock-llm-research --no-web         # 略過網路搜尋 (省 API)
+# 建議（取代已 deprecated 的 stock-llm-research）
+uv run stock-auto-research --llm-only                  # 跑 watchlist 所有檔
+uv run stock-auto-research --llm-only 2330,2317,3231   # 指定多檔
+uv run stock-auto-research --llm-only --upcoming       # 加入「未來 14 天有法說會」的個股
+uv run stock-auto-research --llm-only --refresh        # 略過 12h 快取，強制重打 LLM
+
+# 仍可用（向後相容，會印 deprecated 提示）
+uv run stock-llm-research
 ```
 
 流程：
@@ -413,12 +417,12 @@ uv run stock-calendar-update --upcoming 14  # 抓完印出未來 14 天的法說
 ```
 
 結果存在 `data/calendar/conferences_<YYYY-MM>.json`，dashboard、
-`stock-llm-research`、`stock-auto-research` 都會直接吃這份快取。
+`stock-auto-research --llm-only`（或 `stock-llm-research`）、`stock-auto-research` 都會直接吃這份快取。
 
 排程建議 (Windows Task Scheduler / cron 每天 06:30)：
 ```
 uv run stock-calendar-update --upcoming 14
-uv run stock-llm-research --upcoming
+uv run stock-auto-research --llm-only --upcoming
 ```
 
 dashboard 「LLM 法說分析」頁進入時也會自動 ensure 行事曆「24 小時內」是新鮮的；
@@ -640,6 +644,8 @@ uv run stock-scheduler --dry-run  # 只印排程計畫，不實際執行
   也會自動回頭重抓**新掛牌 ETF** 的持股，一旦來源公開即補齊 CSV。
 - **company** 任務：定期呼叫 `stock-company-update` 補齊公司基本資料 (名稱/**產業別**/上市日，預設一天一次)。
   解決持股分析與查資料頁面大量顯示「未分類」、名稱空白的問題。
+- **fundamentals** 任務：定期呼叫 `stock-fundamentals-refresh` 慢速刷新基本面佇列 (預設每 360 分)。
+- **cloud_sync** 任務：定期呼叫 `stock-cloud-sync` 同步 Google Sheets (需設定 `GOOGLE_*`，見 `docs/cloud_sync_setup.md`)。
 - **monitor** 托管 (選用，`SCHEDULER_SUPERVISE_MONITOR=true`)：開盤自動啟動 `stock-bot` 監測子行程、收盤自動停止。
 - 各任務間隔、是否只在交易時段執行，皆由 `.env` 的 `SCHEDULER_*` 控制 (見 `.env.example`)。
 
@@ -760,7 +766,7 @@ src/bot/
   conference_calendar.py   # 法說會行事曆自動抓取與本地快取 (上月/本月/下月/+2 月)
   conference_calendar_cli.py # stock-calendar-update CLI 入口
   auto_llm.py              # 全自動 LLM 個股研究 (行事曆 + 搜尋 + 新聞 + LLM + 反查)
-  llm_research_cli.py      # stock-llm-research CLI 入口
+  auto_llm.py              # LLM 研究核心 + stock-llm-research（deprecated shim）
   preflight.py             # 交易可行性檢查邏輯 (六大區塊體檢)
   preflight_cli.py         # stock-preflight CLI 入口
   risk_guard.py            # 資金/風險守門員 (12 道閘門 + Kill Switch)
