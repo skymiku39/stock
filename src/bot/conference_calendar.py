@@ -18,7 +18,7 @@
 使用情境
 ========
 * dashboard 進入「LLM 法說分析」頁時自動呼叫 ``ensure_calendar_fresh()``
-* ``stock-auto-research`` / ``stock-llm-research`` CLI 開頭呼叫
+* ``stock-auto-research`` / ``stock-auto-research --llm-only`` CLI 開頭呼叫
 * ``data_pipeline.run_full_pipeline`` step 0 呼叫
 """
 

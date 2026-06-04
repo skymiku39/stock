@@ -25,17 +25,6 @@ class Settings(BaseSettings):
     api_key: str = ""
     secret_key: str = ""
 
-    # --- T4 DLL 下單元件 (Windows-only；目前作為下單 adapter 測試骨架) ---
-    t4_dll_path: str = ""
-    t4_dll_dir: str = ""
-    t4_login_id: str = ""
-    t4_login_password: str = ""
-    t4_person_id: str = ""
-    t4_ca_path: str = ""
-    t4_ca_password: str = ""
-    t4_stock_branch: str = ""
-    t4_stock_account: str = ""
-
     # --- 電子憑證 ---
     ca_path: str = ""
     ca_password: str = ""

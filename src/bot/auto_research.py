@@ -2,7 +2,7 @@
 
 用法:
     uv run stock-auto-research               # 用 .env 預設參數
-    uv run stock-auto-research --llm-only    # 僅 LLM 個股研究（原 stock-llm-research）
+    uv run stock-auto-research --llm-only    # 僅 LLM 個股研究
     uv run stock-auto-research --llm-only 2330,2317 --upcoming --refresh
     uv run stock-auto-research --no-etf      # 跳過 ETF 抓取
     uv run stock-auto-research --no-chips    # 跳過籌碼面
@@ -95,7 +95,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--llm-only", action="store_true",
-        help="僅跑 LLM 個股研究（跳過 ETF/籌碼/簡報管線；取代 stock-llm-research）",
+        help="僅跑 LLM 個股研究（跳過 ETF/籌碼/簡報管線）",
     )
     parser.add_argument(
         "llm_tickers", nargs="*",

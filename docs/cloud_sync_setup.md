@@ -262,7 +262,7 @@ SCHEDULER_CLOUD_SYNC_INTERVAL_MIN=60   # 選用：排程自動 sync；0=停用
 
 ### 日常流程
 
-1. **機器 A** 跑研究（`stock-auto-research` / `stock-llm-research` / `stock-nextday` 等）
+1. **機器 A** 跑研究（`stock-auto-research` / `stock-auto-research --llm-only` / `stock-nextday` 等）
    - 結果寫入本地 `stock.db`（`llm_analysis_history`、`llm_daily_reports`）
    - 大型 JSON/MD 自動鏡像到 `GOOGLE_CACHE_DIR`（若已設定）
 2. **上傳結構化資料**（擇一）：

@@ -29,7 +29,6 @@
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import json
 import logging
@@ -580,7 +579,7 @@ def auto_research_ticker(
     """完整版自動研究：行事曆刷新 → 抓籌碼 → 自動分析 + 反查。
 
     比 ``auto_analyze_ticker`` 更主動：會強制刷新 + 抓籌碼面 + 強制跑反查。
-    被 ``stock-llm-research`` CLI 與 dashboard「自動研究」按鈕使用。
+    被 ``stock-auto-research --llm-only`` 與 dashboard「自動研究」按鈕使用。
     """
     log = logger or get_logger("auto-llm")
     if refresh_calendar:
@@ -665,7 +664,7 @@ def run_llm_research_batch(
     chip_days: int = 5,
     logger: Optional[logging.Logger] = None,
 ) -> int:
-    """對多檔個股跑 auto_research_ticker（原 stock-llm-research 核心邏輯）。"""
+    """對多檔個股跑 auto_research_ticker（供 stock-auto-research --llm-only 使用）。"""
     log = logger or get_logger("llm-research")
     settings = Settings()
 
@@ -748,44 +747,9 @@ def run_llm_research_batch(
     return 0 if okay > 0 else 2
 
 
-def llm_research_main(argv: Optional[List[str]] = None) -> int:
-    """CLI 入口（``stock-llm-research``，已 deprecated，請改用 ``stock-auto-research --llm-only``）。"""
-    parser = argparse.ArgumentParser(
-        prog="stock-llm-research",
-        description=(
-            "全自動 LLM 個股研究 (deprecated：請改用 stock-auto-research --llm-only)"
-        ),
-    )
-    parser.add_argument(
-        "tickers", nargs="*",
-        help="個股代號 (可逗號分隔；無參數則跑 watchlist)",
-    )
-    parser.add_argument("--upcoming", action="store_true", help="納入未來有法說會的個股")
-    parser.add_argument("--upcoming-days", type=int, default=14)
-    parser.add_argument("--no-calendar", action="store_true")
-    parser.add_argument("--no-web", action="store_true", help="保留相容，目前由 auto_research_ticker 控制")
-    parser.add_argument("--refresh", action="store_true")
-    parser.add_argument("--days", type=int, default=5, help="籌碼面回顧天數")
-    args = parser.parse_args(argv)
-
-    if args.no_web:
-        get_logger("llm-research").warning("--no-web 已廢棄，行為與完整研究相同")
-
-    return run_llm_research_batch(
-        tickers=_parse_llm_tickers(args.tickers),
-        root=Path.cwd(),
-        upcoming=args.upcoming,
-        upcoming_days=args.upcoming_days,
-        no_calendar=args.no_calendar,
-        refresh=args.refresh,
-        chip_days=args.days,
-    )
-
-
 __all__ = [
     "auto_analyze_ticker",
     "auto_research_ticker",
     "load_cached_auto_analysis",
-    "llm_research_main",
     "run_llm_research_batch",
 ]

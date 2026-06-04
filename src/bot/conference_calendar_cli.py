@@ -1,7 +1,7 @@
 """conference_calendar_cli -- 純行事曆自動抓取 CLI。
 
 用途：放進排程 (Windows Task Scheduler / cron)，每天早上跑一次自動更新
-法說會行事曆，dashboard 與 ``stock-llm-research`` 都會直接吃這份快取。
+法說會行事曆，dashboard 與 ``stock-auto-research --llm-only`` 都會直接吃這份快取。
 
 用法
 ====
