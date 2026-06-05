@@ -49,7 +49,9 @@ import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
+
+from bot.models import QtyUnit, qty_multiplier
 
 from bot.utils import get_logger, now_tw
 
@@ -70,6 +72,7 @@ class EntryDecision:
     reason: str = ""
     adjusted_lots: int = 0
     blocking_rule: str = ""    # 觸發的規則 id (用於 metrics / 通知)
+    unit: QtyUnit = "lot"
 
 
 @dataclass
@@ -202,15 +205,21 @@ class RiskGuard:
         price: float,
         requested_lots: int,
         *,
+        unit: QtyUnit = "lot",
         pct_chg: Optional[float] = None,
     ) -> EntryDecision:
-        """檢查是否可以進場。回傳是否允許 + 原因 + 調整後張數。
+        """檢查是否可以進場。回傳是否允許 + 原因 + 調整後數量。
 
-        呼叫端必須使用 `decision.adjusted_lots` 而非原本 requested_lots，
-        因為風控可能會把張數壓低 (例如剩餘資金不夠買原請求數)。
+        呼叫端必須使用 `decision.adjusted_lots` 與 `decision.unit`，
+        因為風控可能會把數量壓低 (例如剩餘資金不夠買原請求數)。
         """
         if requested_lots <= 0:
-            return EntryDecision(False, "request_lots<=0", 0, "input")
+            return EntryDecision(False, "request_lots<=0", 0, "input", unit)
+
+        if unit == "share":
+            return self._check_entry_shares(
+                symbol, price, requested_lots, pct_chg=pct_chg,
+            )
 
         # 1) Kill switch 最高優先
         if self.is_kill_switch_engaged():
@@ -338,9 +347,152 @@ class RiskGuard:
             allowed=True,
             adjusted_lots=adjusted,
             reason="ok",
+            unit="lot",
         )
 
-    def _reject(self, symbol: str, rule: str, msg: str, _lots: int) -> EntryDecision:
+    def _check_entry_shares(
+        self,
+        symbol: str,
+        price: float,
+        requested_shares: int,
+        *,
+        pct_chg: Optional[float] = None,
+    ) -> EntryDecision:
+        """零股進場檢查 (unit=share)。"""
+        if requested_shares <= 0:
+            return EntryDecision(False, "request_shares<=0", 0, "input", "share")
+
+        if self.is_kill_switch_engaged():
+            return self._reject(symbol, "kill_switch_engaged", "🔴 Kill switch 已拉起", 0, "share")
+
+        if symbol in self._blacklist:
+            return self._reject(symbol, "blacklist", f"{symbol} 在黑名單", 0, "share")
+
+        if self.settings.min_price > 0 and price < self.settings.min_price:
+            return self._reject(
+                symbol, "below_min_price",
+                f"{symbol} 價格 {price} < min_price {self.settings.min_price}", 0, "share",
+            )
+        if self.settings.max_price > 0 and price > self.settings.max_price:
+            return self._reject(
+                symbol, "above_max_price",
+                f"{symbol} 價格 {price} > max_price {self.settings.max_price}", 0, "share",
+            )
+
+        if (
+            pct_chg is not None
+            and self.settings.max_pct_chg_on_entry > 0
+            and abs(pct_chg) > self.settings.max_pct_chg_on_entry
+        ):
+            return self._reject(
+                symbol, "pct_chg_too_large",
+                f"{symbol} 漲幅 {pct_chg:.2f}% > 上限 {self.settings.max_pct_chg_on_entry}%",
+                0, "share",
+            )
+
+        if (
+            self.settings.daily_max_orders > 0
+            and self.state.today_orders >= self.settings.daily_max_orders
+        ):
+            return self._reject(
+                symbol, "daily_orders_exceeded",
+                f"今日已下 {self.state.today_orders} 單，達上限 {self.settings.daily_max_orders}",
+                0, "share",
+            )
+
+        per_sym = self.state.today_orders_per_symbol.get(symbol, 0)
+        if (
+            self.settings.per_symbol_daily_max_orders > 0
+            and per_sym >= self.settings.per_symbol_daily_max_orders
+        ):
+            return self._reject(
+                symbol, "per_symbol_orders_exceeded",
+                f"{symbol} 今日已進場 {per_sym} 次，達單檔上限 "
+                f"{self.settings.per_symbol_daily_max_orders}",
+                0, "share",
+            )
+
+        cooldown = float(self.settings.reentry_cooldown_seconds)
+        if cooldown > 0:
+            last = self.state.last_exit_ts.get(symbol)
+            if last is not None:
+                gap = now_tw().timestamp() - float(last)
+                if gap < cooldown:
+                    return self._reject(
+                        symbol, "reentry_cooldown",
+                        f"{symbol} 平倉後僅 {gap:.0f}s，需等 {cooldown:.0f}s 才能再進",
+                        0, "share",
+                    )
+
+        if (
+            self.settings.max_open_positions > 0
+            and self._open_positions >= self.settings.max_open_positions
+        ):
+            return self._reject(
+                symbol, "max_open_positions",
+                f"已有 {self._open_positions} 檔持倉，達上限 {self.settings.max_open_positions}",
+                0, "share",
+            )
+
+        loss_cap_twd = self.settings.daily_max_loss_twd
+        if self.settings.daily_max_loss_pct > 0:
+            implied = self._loss_base * (self.settings.daily_max_loss_pct / 100.0)
+            if loss_cap_twd <= 0 or implied < loss_cap_twd:
+                loss_cap_twd = implied
+        if loss_cap_twd > 0 and self.state.realized_pnl_twd <= -abs(loss_cap_twd):
+            self.engage_kill_switch(
+                f"daily_loss_circuit_breaker (PnL={self.state.realized_pnl_twd:.0f})"
+            )
+            return self._reject(
+                symbol, "daily_loss_circuit_breaker",
+                f"今日已實現虧損 {self.state.realized_pnl_twd:,.0f} TWD，超過熔斷門檻 "
+                f"{loss_cap_twd:,.0f}，自動拉閘",
+                0, "share",
+            )
+
+        if price <= 0:
+            return self._reject(symbol, "invalid_price", f"price={price}", 0, "share")
+
+        max_shares = min(requested_shares, self.settings.odd_lot_max_shares)
+
+        if self.settings.per_order_max_cost_twd > 0:
+            max_by_order = int(self.settings.per_order_max_cost_twd / price)
+            if max_by_order < max_shares:
+                max_shares = max_by_order
+
+        remaining = self.settings.max_fund - self._fund_used
+        if remaining < price:
+            return self._reject(
+                symbol, "insufficient_fund",
+                f"剩餘資金 {remaining:,.0f} < 每股 {price:,.0f}",
+                0, "share",
+            )
+        max_by_fund = int(remaining / price)
+        if max_by_fund < max_shares:
+            max_shares = max_by_fund
+
+        if max_shares <= 0:
+            return self._reject(symbol, "adjusted_to_zero", "經風控調整後股數為 0", 0, "share")
+
+        return EntryDecision(
+            allowed=True,
+            adjusted_lots=max_shares,
+            reason="ok",
+            unit="share",
+        )
+
+    def record_blocked_attempt(self, symbol: str, rule: str, msg: str) -> None:
+        """外部模組 (如 LlmGate) 記錄進場拒絕。"""
+        self._reject(symbol, rule, msg, 0)
+
+    def _reject(
+        self,
+        symbol: str,
+        rule: str,
+        msg: str,
+        _lots: int,
+        unit: QtyUnit = "lot",
+    ) -> EntryDecision:
         self.logger.info("⛔ 進場拒絕 [%s] %s — %s", rule, symbol, msg)
         with self._lock:
             self.state.blocked_attempts.append({
@@ -352,7 +504,7 @@ class RiskGuard:
             # 只保留最近 200 筆
             self.state.blocked_attempts = self.state.blocked_attempts[-200:]
             self._persist()
-        return EntryDecision(False, msg, 0, rule)
+        return EntryDecision(False, msg, 0, rule, unit)
 
     # ------------------------------------------------------------------
     # 對外: 出場永遠允許 (但記錄)
@@ -367,10 +519,18 @@ class RiskGuard:
     # 對外: 事件回呼
     # ------------------------------------------------------------------
 
-    def on_entry_filled(self, symbol: str, price: float, lots: int) -> None:
+    def on_entry_filled(
+        self,
+        symbol: str,
+        price: float,
+        lots: int,
+        *,
+        unit: QtyUnit = "lot",
+    ) -> None:
         """成交 (買進) 後呼叫。"""
         with self._lock:
-            cost = price * lots * 1000
+            mult = qty_multiplier(unit)
+            cost = price * lots * mult
             self._fund_used += cost
             self._open_positions += 1
             self.state.today_orders += 1
@@ -378,9 +538,10 @@ class RiskGuard:
                 self.state.today_orders_per_symbol.get(symbol, 0) + 1
             )
             self._persist()
+            unit_label = "股" if unit == "share" else "張"
             self.logger.info(
-                "📈 部位新增 %s @ %.2f x %d (已用資金 %.0f / %d 檔在倉)",
-                symbol, price, lots, self._fund_used, self._open_positions,
+                "📈 部位新增 %s @ %.2f x %d %s (已用資金 %.0f / %d 檔在倉)",
+                symbol, price, lots, unit_label, self._fund_used, self._open_positions,
             )
 
     def on_exit_filled(
@@ -389,13 +550,16 @@ class RiskGuard:
         avg_entry_price: float,
         exit_price: float,
         lots: int,
+        *,
+        unit: QtyUnit = "lot",
     ) -> None:
         """成交 (賣出) 後呼叫；自動累計實現損益。"""
         with self._lock:
-            released = exit_price * lots * 1000
+            mult = qty_multiplier(unit)
+            released = exit_price * lots * mult
             self._fund_used = max(0.0, self._fund_used - released)
             self._open_positions = max(0, self._open_positions - 1)
-            pnl = (exit_price - avg_entry_price) * lots * 1000
+            pnl = (exit_price - avg_entry_price) * lots * mult
             self.state.realized_pnl_twd += pnl
             self.state.last_exit_ts[symbol] = now_tw().timestamp()
             self._persist()

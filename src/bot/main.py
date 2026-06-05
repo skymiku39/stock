@@ -64,7 +64,21 @@ def main() -> None:
         )
 
     # ---- 建立策略 ----
-    if settings.strategy_type == "etf_follow":
+    if settings.strategy_type == "configurable":
+        from bot.strategy_configurable import ConfigurableStrategy
+
+        strategy = ConfigurableStrategy(
+            broker=broker,
+            settings=settings,
+            market_source=market_source,
+        )
+        logger.info(
+            "策略: ConfigurableStrategy (min_pct=%.1f, odd_lot=%s, llm_gate=%s)",
+            settings.min_pct_chg_on_entry,
+            settings.use_odd_lot,
+            settings.llm_gate_enabled,
+        )
+    elif settings.strategy_type == "etf_follow":
         from bot.strategy_etf_follow import EtfFollowStrategy
 
         strategy = EtfFollowStrategy(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Annotated, Dict, List, Literal
+from typing import Annotated, Dict, List, Literal, Tuple
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -115,7 +115,12 @@ class Settings(BaseSettings):
     per_symbol_daily_max_orders: int = 0 # 單檔當日進場上限 (0=不限)
     reentry_cooldown_seconds: int = 0    # 平倉後同檔冷卻秒數 (0=立即可再進)
 
-    # --- 進場條件 ---
+    # --- 進場條件 (configurable 策略) ---
+    min_pct_chg_on_entry: float = 1.0    # 全域最低進場漲幅 %
+    # 例: BUY_ENTRY_TARGETS=2330:1:5,0050:0.5:3
+    buy_entry_targets: Annotated[Dict[str, Tuple[float, float]], NoDecode] = Field(
+        default_factory=dict,
+    )
     max_pct_chg_on_entry: float = 0.0    # 漲幅超過 N% 不進場 (0=不限)
     min_price: float = 0.0               # 最低股價 (0=不限)，避免低價股
     max_price: float = 0.0               # 最高股價 (0=不限)，避免超高價股
@@ -126,6 +131,43 @@ class Settings(BaseSettings):
     daily_max_loss_pct: float = 0.0      # 當日虧損占 max_fund 百分比 (0=不限)
     # 兩者擇較嚴者；觸發後 RiskGuard 會自動拉起 kill switch
 
+    @field_validator("buy_entry_targets", mode="before")
+    @classmethod
+    def _parse_buy_entry_targets(cls, v: object) -> Dict[str, Tuple[float, float]]:
+        if v in (None, ""):
+            return {}
+        if isinstance(v, dict):
+            out: Dict[str, Tuple[float, float]] = {}
+            for sym, val in v.items():
+                symbol = str(sym).strip()
+                if not symbol:
+                    continue
+                if isinstance(val, (list, tuple)) and len(val) >= 2:
+                    out[symbol] = (float(val[0]), float(val[1]))
+                else:
+                    raise ValueError(
+                        f"BUY_ENTRY_TARGETS[{symbol!r}] must be (min_pct, max_pct)"
+                    )
+            return out
+        if isinstance(v, str):
+            parsed: Dict[str, Tuple[float, float]] = {}
+            for raw_item in v.replace(";", ",").split(","):
+                item = raw_item.strip()
+                if not item:
+                    continue
+                parts = item.split(":")
+                if len(parts) != 3:
+                    raise ValueError(
+                        "BUY_ENTRY_TARGETS must use SYMBOL:MIN_PCT:MAX_PCT triples, "
+                        f"got {item!r}"
+                    )
+                symbol, min_pct, max_pct = (p.strip() for p in parts)
+                if not symbol:
+                    raise ValueError("BUY_ENTRY_TARGETS contains an empty symbol")
+                parsed[symbol] = (float(min_pct), float(max_pct))
+            return parsed
+        raise ValueError(f"Cannot parse buy_entry_targets from {v!r}")
+
     @field_validator("blacklist_symbols", mode="before")
     @classmethod
     def _parse_blacklist(cls, v: object) -> List[str]:
@@ -133,12 +175,23 @@ class Settings(BaseSettings):
             return [s.strip() for s in v.split(",") if s.strip()]
         return list(v)  # type: ignore[arg-type]
 
+    # --- 零股 (小額資金) ---
+    use_odd_lot: bool = False
+    odd_lot_max_shares: int = 999
+
+    # --- LLM 進出場閘門 ---
+    llm_gate_enabled: bool = False
+    llm_min_sentiment_score: float = 0.2
+    llm_min_day_trade_score: float = 62.0
+    llm_exit_on_negative: bool = False
+    llm_refresh_on_entry: bool = False
+
     # --- Telegram 通知 (留空則不啟用) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
     # --- 策略類型 ---
-    strategy_type: Literal["default", "etf_follow"] = "default"
+    strategy_type: Literal["default", "etf_follow", "configurable"] = "default"
 
     # --- 主動 ETF 跟單參數 ---
     etf_min_consensus_new: int = 2

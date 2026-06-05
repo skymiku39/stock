@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from shioaji import Exchange, TickSTKv1
 from shioaji.constant import Action, OrderState
 
-from bot.models import MarketTick, OrderRecord, PositionInfo, SignalEvent
+from bot.models import MarketTick, OrderRecord, PositionInfo, QtyUnit, SignalEvent, qty_multiplier
 from bot.notifier import TelegramNotifier
 from bot.ownership import (
     BOT_OWNER_TAG,
@@ -83,6 +83,9 @@ class BaseStrategy(ABC):
 
         # 資金追蹤: 已投入的總金額
         self._fund_used: float = 0.0
+
+        # 進場單位追蹤 (整張 / 零股)
+        self._entry_units: Dict[str, QtyUnit] = {}
 
         # 前日收盤 (所有模式共用)
         self._prev_close: Dict[str, float] = {}
@@ -333,16 +336,20 @@ class BaseStrategy(ABC):
                         symbol, qty, price, custom,
                     )
                     return
-                cost = price * qty * 1000
+                unit = self._entry_units.pop(symbol, "lot")
+                if symbol in self.positions:
+                    unit = self.positions[symbol].unit
+                mult = qty_multiplier(unit)
+                cost = price * qty * mult
                 self._fund_used += cost
                 if symbol in self.positions:
                     self.positions[symbol].update(price, qty)
                 else:
                     self.positions[symbol] = PositionInfo(
                         symbol=symbol, avg_price=price, quantity=qty,
-                        owner_tag=BOT_OWNER_TAG,
+                        owner_tag=BOT_OWNER_TAG, unit=unit,
                     )
-                self.risk.on_entry_filled(symbol, price, qty)
+                self.risk.on_entry_filled(symbol, price, qty, unit=unit)
                 self.logger.info(
                     "部位更新 (買入): %s | 已用資金: %.0f",
                     self.positions[symbol], self._fund_used,
@@ -362,11 +369,13 @@ class BaseStrategy(ABC):
                         symbol, self.positions[symbol].owner_tag,
                     )
                     return
-                released = price * qty * 1000
+                unit = self.positions[symbol].unit
+                mult = qty_multiplier(unit)
+                released = price * qty * mult
                 self._fund_used = max(0.0, self._fund_used - released)
                 self.notifier.notify_sell(symbol, price, qty, custom)
                 entry_price = self.positions[symbol].avg_price if symbol in self.positions else price
-                self.risk.on_exit_filled(symbol, entry_price, price, qty)
+                self.risk.on_exit_filled(symbol, entry_price, price, qty, unit=unit)
                 if symbol in self.positions:
                     closed = self.positions[symbol].reduce(qty)
                     if closed:
@@ -380,9 +389,17 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------
 
     def _virtual_fill_buy(
-        self, symbol: str, price: float, quantity: int, reason: str,
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        reason: str,
+        *,
+        unit: QtyUnit = "lot",
+        llm_gate: str = "",
     ) -> None:
-        cost = price * quantity * 1000
+        mult = qty_multiplier(unit)
+        cost = price * quantity * mult
         self._fund_used += cost
 
         if symbol in self.positions:
@@ -390,9 +407,9 @@ class BaseStrategy(ABC):
         else:
             self.positions[symbol] = PositionInfo(
                 symbol=symbol, avg_price=price, quantity=quantity,
-                owner_tag=BOT_OWNER_TAG,
+                owner_tag=BOT_OWNER_TAG, unit=unit,
             )
-        self.risk.on_entry_filled(symbol, price, quantity)
+        self.risk.on_entry_filled(symbol, price, quantity, unit=unit)
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -410,28 +427,42 @@ class BaseStrategy(ABC):
             pnl_pct=0.0,
             mode=self.settings.run_mode,
             source=self.settings.market_source,
+            unit=unit,
+            llm_gate=llm_gate,
         ))
+        unit_label = "股" if unit == "share" else "張"
         self.logger.info(
-            "[虛擬買入] %s %.2f x %d [%s]", symbol, price, quantity, reason,
+            "[虛擬買入] %s %.2f x %d %s [%s]", symbol, price, quantity, unit_label, reason,
         )
 
     def _virtual_fill_sell(
-        self, symbol: str, price: float, quantity: int, reason: str,
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        reason: str,
+        *,
+        unit: Optional[QtyUnit] = None,
+        llm_gate: str = "",
     ) -> None:
-        released = price * quantity * 1000
+        pos = self.positions.get(symbol)
+        sell_unit = unit or (pos.unit if pos else "lot")
+        mult = qty_multiplier(sell_unit)
+        released = price * quantity * mult
         self._fund_used = max(0.0, self._fund_used - released)
 
         pnl_pct = 0.0
         entry_price = price
-        if symbol in self.positions:
-            pos = self.positions[symbol]
+        if pos is not None:
             if pos.avg_price > 0:
                 pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
             entry_price = pos.avg_price
             closed = pos.reduce(quantity)
             if closed:
                 del self.positions[symbol]
-        self.risk.on_exit_filled(symbol, entry_price, price, quantity)
+        self.risk.on_exit_filled(
+            symbol, entry_price, price, quantity, unit=sell_unit,
+        )
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -449,10 +480,13 @@ class BaseStrategy(ABC):
             pnl_pct=pnl_pct,
             mode=self.settings.run_mode,
             source=self.settings.market_source,
+            unit=sell_unit,
+            llm_gate=llm_gate,
         ))
+        unit_label = "股" if sell_unit == "share" else "張"
         self.logger.info(
-            "[虛擬賣出] %s %.2f x %d [%s] PnL=%.2f%%",
-            symbol, price, quantity, reason, pnl_pct,
+            "[虛擬賣出] %s %.2f x %d %s [%s] PnL=%.2f%%",
+            symbol, price, quantity, unit_label, reason, pnl_pct,
         )
 
     # ------------------------------------------------------------------
@@ -561,6 +595,28 @@ class BaseStrategy(ABC):
         with self._pending_lock[symbol]:
             return len(self.pending_orders.get(symbol, [])) > 0
 
+    def _calc_quantity(self, price: float) -> tuple[int, QtyUnit]:
+        """依剩餘資金計算可買張數或零股數。"""
+        cost_per_lot = price * 1000
+        if cost_per_lot <= 0:
+            return 0, "lot"
+
+        remaining = self.settings.max_fund - self._fund_used
+        if remaining >= cost_per_lot:
+            max_by_fund = int(remaining / cost_per_lot)
+            qty = min(max_by_fund, self.settings.max_lot_per_symbol)
+            return qty, "lot"
+
+        if getattr(self.settings, "use_odd_lot", False):
+            max_shares = min(
+                int(remaining / price),
+                getattr(self.settings, "odd_lot_max_shares", 999),
+            )
+            if max_shares >= 1:
+                return max_shares, "share"
+
+        return 0, "lot"
+
     def _place_buy(
         self,
         symbol: str,
@@ -569,12 +625,15 @@ class BaseStrategy(ABC):
         custom_field: str = "enter",
         *,
         pct_chg: Optional[float] = None,
+        unit: QtyUnit = "lot",
+        llm_gate: str = "",
     ) -> bool:
         # === 風控守門員 ===
         decision = self.risk.check_entry(
             symbol=symbol,
             price=price,
             requested_lots=quantity,
+            unit=unit,
             pct_chg=pct_chg,
         )
         if not decision.allowed:
@@ -587,26 +646,42 @@ class BaseStrategy(ABC):
             )
             return False
         if decision.adjusted_lots != quantity:
+            unit_label = "股" if decision.unit == "share" else "張"
             self.logger.info(
-                "張數經風控調整: %s %d → %d",
-                symbol, quantity, decision.adjusted_lots,
+                "數量經風控調整: %s %d → %d %s",
+                symbol, quantity, decision.adjusted_lots, unit_label,
             )
         quantity = decision.adjusted_lots
+        unit = decision.unit
 
         if not self._is_trade_mode:
-            self._virtual_fill_buy(symbol, price, quantity, custom_field)
+            self._virtual_fill_buy(
+                symbol, price, quantity, custom_field,
+                unit=unit, llm_gate=llm_gate,
+            )
             self._enter_placed.add(symbol)
             return True
 
         assert self.broker is not None
-        trade = self.broker.place_order(
-            symbol=symbol,
-            action=Action.Buy,
-            quantity=quantity,
-            price=price,
-            custom_field=bot_buy_field(custom_field),
-        )
+        self._entry_units[symbol] = unit
+        if unit == "share":
+            trade = self.broker.place_odd_lot_order(
+                symbol=symbol,
+                action=Action.Buy,
+                shares=quantity,
+                price=price,
+                custom_field=bot_buy_field(custom_field),
+            )
+        else:
+            trade = self.broker.place_order(
+                symbol=symbol,
+                action=Action.Buy,
+                quantity=quantity,
+                price=price,
+                custom_field=bot_buy_field(custom_field),
+            )
         if trade is None:
+            self._entry_units.pop(symbol, None)
             return False
 
         ordno = getattr(trade.order, "ordno", "")
@@ -620,19 +695,36 @@ class BaseStrategy(ABC):
         symbol: str,
         quantity: int,
         custom_field: str = "stop",
+        *,
+        llm_gate: str = "",
     ) -> bool:
         price = self._last_price.get(symbol, 0.0)
         if not self._can_auto_sell(symbol, quantity, custom_field, price=price):
             return False
 
+        pos = self.positions.get(symbol)
+        unit = pos.unit if pos else "lot"
+
         if not self._is_trade_mode:
-            self._virtual_fill_sell(symbol, price, quantity, custom_field)
+            self._virtual_fill_sell(
+                symbol, price, quantity, custom_field,
+                unit=unit, llm_gate=llm_gate,
+            )
             return True
 
         assert self.broker is not None
-        trade = self.broker.place_market_sell(
-            symbol, quantity, bot_sell_field(custom_field),
-        )
+        if unit == "share":
+            trade = self.broker.place_odd_lot_order(
+                symbol=symbol,
+                action=Action.Sell,
+                shares=quantity,
+                price=price,
+                custom_field=bot_sell_field(custom_field),
+            )
+        else:
+            trade = self.broker.place_market_sell(
+                symbol, quantity, bot_sell_field(custom_field),
+            )
         if trade is None:
             return False
 

@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass, field
+from typing import Literal
 
 from bot.ownership import BOT_OWNER_TAG
+
+QtyUnit = Literal["lot", "share"]
+
+
+def qty_multiplier(unit: QtyUnit) -> int:
+    """1 張 = 1000 股；零股 unit=share 時乘數為 1。"""
+    return 1000 if unit == "lot" else 1
 
 
 @dataclass
@@ -14,6 +22,7 @@ class PositionInfo:
     avg_price: float
     quantity: int
     owner_tag: str = BOT_OWNER_TAG
+    unit: QtyUnit = "lot"
     entry_time: datetime.datetime = field(default_factory=datetime.datetime.now)
 
     def update(self, filled_price: float, filled_qty: int) -> None:
@@ -71,3 +80,5 @@ class SignalEvent:
     pnl_pct: float
     mode: str  # "watch" | "report"
     source: str  # "shioaji" | "twse_public"
+    unit: QtyUnit = "lot"
+    llm_gate: str = ""

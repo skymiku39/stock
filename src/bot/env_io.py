@@ -108,6 +108,56 @@ ENV_FIELDS: List[EnvField] = [
         default="2.0",
     ),
     EnvField(
+        "SELL_PROFIT_TARGETS", "個股賣出門檻", "策略", "str",
+        default="",
+        help="格式 2330:8,0050:5.5；達標才允許 AI 自動賣出",
+    ),
+    EnvField(
+        "MIN_PCT_CHG_ON_ENTRY", "最低進場漲幅 (%)", "策略", "float",
+        default="1.0",
+        help="configurable 策略全域進場下限",
+    ),
+    EnvField(
+        "MAX_PCT_CHG_ON_ENTRY", "最高進場漲幅 (%)", "進階風控", "float",
+        default="0",
+        help="0=不限 (風控)；configurable 策略建議設 5",
+    ),
+    EnvField(
+        "BUY_ENTRY_TARGETS", "個股進場範圍", "策略", "str",
+        default="",
+        help="格式 2330:1:5,0050:0.5:3；覆寫全域進場漲幅",
+    ),
+    EnvField(
+        "USE_ODD_LOT", "啟用零股", "策略", "bool",
+        default="false",
+        help="資金不足 1 張時改買零股 (小額模擬建議開啟)",
+    ),
+    EnvField(
+        "ODD_LOT_MAX_SHARES", "單筆零股上限", "策略", "int",
+        default="999",
+    ),
+    EnvField(
+        "LLM_GATE_ENABLED", "啟用 LLM 閘門", "LLM 分析", "bool",
+        default="false",
+        help="LLM 評分達標才允許進場",
+    ),
+    EnvField(
+        "LLM_MIN_SENTIMENT_SCORE", "進場最低 sentiment", "LLM 分析", "float",
+        default="0.2",
+    ),
+    EnvField(
+        "LLM_MIN_DAY_TRADE_SCORE", "進場最低當沖評分", "LLM 分析", "float",
+        default="62",
+    ),
+    EnvField(
+        "LLM_EXIT_ON_NEGATIVE", "負向 sentiment 出場", "LLM 分析", "bool",
+        default="false",
+    ),
+    EnvField(
+        "LLM_REFRESH_ON_ENTRY", "進場時背景刷新 LLM", "LLM 分析", "bool",
+        default="false",
+    ),
+    EnvField(
         "MAX_FUND", "資金上限 (元)", "風控", "int",
         default="500000",
         help="總可用資金的天花板，所有持倉成本加總不會超過此值",
@@ -193,8 +243,9 @@ ENV_FIELDS: List[EnvField] = [
     # 主動 ETF 跟單
     EnvField(
         "STRATEGY_TYPE", "策略類型", "策略", "select",
-        default="default", options=["default", "etf_follow"],
-        help="default=當沖示範策略 / etf_follow=主動 ETF 共識跟單",
+        default="default",
+        options=["default", "etf_follow", "configurable"],
+        help="default=當沖示範 / etf_follow=ETF 跟單 / configurable=可設定觸發+LLM",
     ),
     EnvField(
         "ETF_MIN_CONSENSUS_NEW", "新建倉共識最小 ETF 數", "策略", "int",
