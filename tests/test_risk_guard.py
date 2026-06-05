@@ -74,6 +74,21 @@ class TestEntryBasics:
         assert not d.allowed
         assert "insufficient_fund" in d.blocking_rule
 
+    def test_odd_lot_shares_within_fund(self, tmp_path: Path) -> None:
+        s = _make_settings(max_fund=10_000, odd_lot_max_shares=500)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        d = g.check_entry("2330", price=50, requested_lots=300, unit="share")
+        assert d.allowed
+        assert d.unit == "share"
+        assert d.adjusted_lots == 200
+
+    def test_odd_lot_shares_insufficient_fund(self, tmp_path: Path) -> None:
+        s = _make_settings(max_fund=10, odd_lot_max_shares=500)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        d = g.check_entry("2330", price=50, requested_lots=1, unit="share")
+        assert not d.allowed
+        assert "insufficient_fund" in d.blocking_rule
+
     def test_per_order_max_cost_clamps(self, tmp_path: Path) -> None:
         s = _make_settings(per_order_max_cost_twd=100_000, max_fund=1_000_000)
         g = RiskGuard(settings=s, project_root=tmp_path)

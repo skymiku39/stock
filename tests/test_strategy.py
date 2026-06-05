@@ -10,7 +10,9 @@ import pytest
 from bot.config import Settings
 from bot.models import MarketTick, PositionInfo
 from bot.ownership import BOT_BUY_FIELD, bot_sell_field
+from bot.entry_rules import in_entry_range, resolve_entry_range
 from bot.strategy import MyStrategy
+from bot.strategy_configurable import ConfigurableStrategy
 
 
 def _make_settings(**overrides) -> Settings:
@@ -209,6 +211,59 @@ class TestVirtualPosition:
         assert result is False
         assert strategy.signal_recorder.signal_count == 0
         assert "2330" in strategy.positions
+
+
+class TestOddLotQuantity:
+    def test_calc_quantity_returns_shares_for_small_fund(self) -> None:
+        settings = _make_settings(max_fund=10_000, use_odd_lot=True)
+        strategy = MyStrategy(broker=MagicMock(), settings=settings)
+        qty, unit = strategy._calc_quantity(600.0)
+        assert unit == "share"
+        assert qty == 16
+
+    def test_virtual_fill_share_cost(self) -> None:
+        settings = _make_settings(run_mode="watch", max_fund=10_000)
+        strategy = MyStrategy(broker=MagicMock(), settings=settings)
+        strategy._virtual_fill_buy("2330", 50.0, 100, "enter", unit="share")
+        assert strategy._fund_used == 50.0 * 100
+        assert strategy.positions["2330"].unit == "share"
+
+
+class TestConfigurableStrategy:
+    def test_entry_range_from_env(self) -> None:
+        settings = _make_settings(
+            min_pct_chg_on_entry=2.0,
+            max_pct_chg_on_entry=4.0,
+        )
+        assert resolve_entry_range("2330", settings) == (2.0, 4.0)
+        assert in_entry_range("2330", 3.0, settings) is True
+        assert in_entry_range("2330", 1.5, settings) is False
+
+    def test_per_symbol_entry_override(self) -> None:
+        settings = _make_settings(
+            buy_entry_targets={"2330": (0.5, 3.0)},
+        )
+        assert resolve_entry_range("2330", settings) == (0.5, 3.0)
+
+    def test_configurable_entry_with_llm_gate_off(self) -> None:
+        settings = _make_settings(
+            run_mode="watch",
+            max_fund=1_000_000,
+            min_pct_chg_on_entry=1.0,
+            max_pct_chg_on_entry=5.0,
+            llm_gate_enabled=False,
+            strategy_type="configurable",
+        )
+        strategy = ConfigurableStrategy(broker=MagicMock(), settings=settings)
+        strategy._prev_close["2330"] = 580.0
+
+        with patch("bot.strategy_configurable.now_tw_time") as mock_time:
+            mock_time.return_value = datetime.time(9, 15)
+            tick = _make_tick(symbol="2330", price=600.0, prev_close=580.0)
+            strategy.on_tick(tick)
+
+        buys = [s for s in strategy.signal_recorder._signals if s.action == "would-buy"]
+        assert len(buys) == 1
 
 
 class TestTradeModeRegression:

@@ -11,11 +11,6 @@ from bot.models import MarketTick
 from bot.strategy import BaseStrategy
 from bot.utils import get_logger, now_tw_time
 
-if False:  # TYPE_CHECKING
-    from bot.broker import SjBroker
-    from bot.config import Settings
-    from bot.market_source import TwsePublicMarketSource
-
 
 class ConfigurableStrategy(BaseStrategy):
     """env 驅動進出場 + LLM 閘門。

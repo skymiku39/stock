@@ -105,3 +105,34 @@ class TestSellProfitTargets:
     def test_sell_profit_targets_default_empty(self) -> None:
         s = Settings(symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
         assert s.sell_profit_targets == {}
+
+
+class TestBuyEntryTargets:
+    def test_parse_triples(self) -> None:
+        s = Settings(
+            symbols=["2330"],
+            buy_entry_targets="2330:1:5,0050:0.5:3",
+            _env_file=None,  # type: ignore[call-arg]
+        )
+        assert s.buy_entry_targets == {"2330": (1.0, 5.0), "0050": (0.5, 3.0)}
+
+
+class TestSimulationSettings:
+    def test_defaults(self) -> None:
+        s = Settings(symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
+        assert s.min_pct_chg_on_entry == 1.0
+        assert s.use_odd_lot is False
+        assert s.llm_gate_enabled is False
+        assert s.strategy_type == "default"
+
+    def test_configurable_strategy_type(self) -> None:
+        s = Settings(
+            symbols=["2330"],
+            strategy_type="configurable",
+            use_odd_lot=True,
+            llm_gate_enabled=True,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+        assert s.strategy_type == "configurable"
+        assert s.use_odd_lot is True
+        assert s.llm_gate_enabled is True

@@ -839,6 +839,124 @@ def _render_csv_chart(df: pd.DataFrame, ts_col: str, value_col: str, group_col: 
         st.caption(f"繪圖失敗: {e}")
 
 
+def page_simulation() -> None:
+    st.title("模擬交易監測")
+    st.caption("1 萬元小額模擬 — watch 驗證觸發 / Shioaji 模擬下單 / LLM 閘門")
+
+    from bot.config import Settings
+    from bot.llm_gate import LlmGate
+    from bot.sim_monitor import SIM_TEMPLATES, fund_state_from_signals, load_risk_state
+
+    env_values = load_env()
+    try:
+        settings = Settings()
+    except Exception as exc:
+        st.error(f"無法載入 Settings: {exc}")
+        return
+
+    today = dt.date.today().isoformat()
+    report_dir = _project_path("data", "reports")
+    risk_path = _project_path("data", f"risk_state_{today}.json")
+
+    st.markdown("### 資金與模板")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("MAX_FUND", f"{settings.max_fund:,} 元")
+    c2.metric("策略", settings.strategy_type)
+    c3.metric(
+        "LLM 閘門",
+        "啟用" if settings.llm_gate_enabled else "關閉",
+    )
+
+    sig_files = _list_files(report_dir, f"signals_{today}.csv")
+    sig_df = None
+    if sig_files:
+        sig_df = _safe_read_csv(sig_files[0])
+    fund_state = fund_state_from_signals(sig_df, float(settings.max_fund))
+
+    f1, f2, f3 = st.columns(3)
+    f1.metric("已用資金", f"{fund_state.fund_used:,.0f} 元")
+    f2.metric("剩餘資金", f"{fund_state.remaining:,.0f} 元")
+    f3.metric("今日訊號", fund_state.signal_count)
+
+    st.markdown("#### 一鍵套用模板 (.env)")
+    t1, t2 = st.columns(2)
+    with t1:
+        if st.button("階段 A: watch 驗證 (1 萬)", use_container_width=True):
+            merged = {**env_values, **SIM_TEMPLATES["watch_10k"]}
+            save_env(merged)
+            st.success("已套用 watch 模板")
+            st.rerun()
+    with t2:
+        if st.button("階段 B: Shioaji 模擬 (1 萬)", use_container_width=True):
+            merged = {**env_values, **SIM_TEMPLATES["shioaji_sim_10k"]}
+            save_env(merged)
+            st.success("已套用 trade+SIMULATION 模板")
+            st.rerun()
+
+    tab_pos, tab_sig, tab_llm, tab_risk = st.tabs(
+        ["虛擬持倉", "今日訊號", "LLM 閘門", "風控紀錄"],
+    )
+
+    with tab_pos:
+        if not fund_state.positions:
+            st.info("今日尚無虛擬持倉（或 Bot 尚未產生訊號）。")
+        else:
+            rows = [
+                {
+                    "代號": p.symbol,
+                    "數量": p.quantity,
+                    "單位": "股" if p.unit == "share" else "張",
+                    "均價": round(p.avg_price, 2),
+                    "成本": round(
+                        p.avg_price * p.quantity * (1000 if p.unit == "lot" else 1),
+                        0,
+                    ),
+                }
+                for p in fund_state.positions
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    with tab_sig:
+        if sig_df is None or sig_df.empty:
+            st.info(f"尚無今日 signals_{today}.csv")
+        else:
+            st.dataframe(sig_df, use_container_width=True)
+
+    with tab_llm:
+        symbols = settings.symbols or [
+            s.strip() for s in env_values.get("SYMBOLS", "").split(",") if s.strip()
+        ]
+        gate = LlmGate(settings=settings)
+        gate_rows = []
+        for sym in symbols:
+            snap = gate.snapshot(sym)
+            gate_rows.append({
+                "代號": sym,
+                "有快取": "是" if snap.has_cache else "否",
+                "sentiment": snap.sentiment,
+                "sentiment_score": round(snap.sentiment_score, 3),
+                "當沖評分": round(snap.day_trade_score, 1),
+                "允許進場": "是" if snap.allow_entry else "否",
+                "阻擋原因": snap.block_reason or "-",
+                "快取時間": snap.fetched_at or "-",
+            })
+        st.dataframe(pd.DataFrame(gate_rows), use_container_width=True)
+        if not settings.gemini_api_key:
+            st.caption("未設定 GEMINI_API_KEY；請先執行 stock-auto-research --llm-only 預熱快取。")
+
+    with tab_risk:
+        risk_data = load_risk_state(risk_path)
+        if not risk_data:
+            st.info(f"尚無 {risk_path.name}")
+        else:
+            st.json(risk_data)
+            blocked = risk_data.get("blocked_attempts", [])
+            llm_blocks = [b for b in blocked if b.get("rule") == "llm_gate"]
+            if llm_blocks:
+                st.markdown("#### LLM 閘門拒絕紀錄")
+                st.dataframe(pd.DataFrame(llm_blocks), use_container_width=True)
+
+
 def page_reports() -> None:
     st.title("報表分析")
     report_dir = _project_path("data", "reports")
