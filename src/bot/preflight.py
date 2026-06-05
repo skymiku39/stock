@@ -155,6 +155,28 @@ def _check_env(settings: Settings) -> List[CheckResult]:
     return out
 
 
+def _ca_skip_reason(settings: Settings) -> str:
+    """說明目前設定下 broker 為何不啟用 CA。"""
+    if settings.run_mode != "trade":
+        return f"RUN_MODE={settings.run_mode} — 只接行情/報表，不啟用 CA"
+    if settings.simulation:
+        return "SIMULATION=true — 模擬環境不啟用 CA"
+    return ""
+
+
+def _should_test_ca_activation(
+    settings: Settings,
+    *,
+    test_ca_activate: bool = False,
+) -> bool:
+    """是否應在 preflight 連線階段呼叫 activate_ca。"""
+    if not settings.ca_path:
+        return False
+    if settings.run_mode == "trade" and not settings.simulation:
+        return True
+    return bool(test_ca_activate and not settings.simulation)
+
+
 def _check_ca(settings: Settings) -> List[CheckResult]:
     """電子憑證只在 trade + simulation=false 時必要。其餘只算 info/warn。"""
     out: List[CheckResult] = []
@@ -228,9 +250,12 @@ def _check_ca(settings: Settings) -> List[CheckResult]:
                 "身分證字號 (PERSON_ID)", "ok", f"已設定 ({mask})",
             ))
     elif settings.ca_path:
+        reason = _ca_skip_reason(settings)
         out.append(CheckResult(
             "電子憑證啟用條件", "info",
-            "目前 simulation=true 或非 trade 模式，CA 暫不啟用",
+            f"目前 {reason}，CA 暫不啟用",
+            "若要實單下單請設 RUN_MODE=trade 且 SIMULATION=false；"
+            "或勾選「測試 CA 啟用」驗證憑證",
         ))
 
     return out
@@ -366,22 +391,32 @@ def _check_account(
     stock_account: Any,
     *,
     logger: logging.Logger,
+    test_ca_activate: bool = False,
 ) -> List[CheckResult]:
     out: List[CheckResult] = []
     if api is None or stock_account is None:
         return out
 
-    # CA 啟用 (僅 trade + 真實環境會走到這)
-    if settings.run_mode == "trade" and not settings.simulation:
-        if settings.ca_path and Path(settings.ca_path).expanduser().exists():
+    if _should_test_ca_activation(settings, test_ca_activate=test_ca_activate):
+        ca_path = Path(settings.ca_path).expanduser()
+        if not ca_path.exists():
+            out.append(CheckResult(
+                "電子憑證啟用", "fail",
+                f"activate_ca 略過：檔案不存在 ({ca_path})",
+                "確認 CA_PATH 路徑",
+            ))
+        else:
             try:
                 api.activate_ca(
                     ca_path=settings.ca_path,
                     ca_passwd=settings.ca_password,
                     person_id=settings.person_id,
                 )
+                detail = "activate_ca 成功"
+                if test_ca_activate and settings.run_mode != "trade":
+                    detail += f"（額外測試；RUN_MODE={settings.run_mode} 平常不會啟用 CA）"
                 out.append(CheckResult(
-                    "電子憑證啟用", "ok", "activate_ca 成功",
+                    "電子憑證啟用", "ok", detail,
                 ))
             except Exception as e:
                 out.append(CheckResult(
@@ -611,6 +646,7 @@ def run_preflight(
     settings: Optional[Settings] = None,
     *,
     do_real_login: bool = True,
+    test_ca_activate: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> PreflightReport:
     """跑全部檢查，回傳結構化報告。
@@ -631,7 +667,9 @@ def run_preflight(
     report.section_login, api, stock_account = _check_login(
         settings, do_real_login=do_real_login, logger=log,
     )
-    report.section_account = _check_account(settings, api, stock_account, logger=log)
+    report.section_account = _check_account(
+        settings, api, stock_account, logger=log, test_ca_activate=test_ca_activate,
+    )
     report.section_risk = _check_risk(settings)
     report.section_time = _check_time(settings)
 

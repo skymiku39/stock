@@ -4,6 +4,7 @@
 ====
     uv run stock-preflight                    # 包含真實 Shioaji 登入測試
     uv run stock-preflight --no-login         # 只檢查設定，不打 Shioaji
+    uv run stock-preflight --test-ca          # watch 模式也測試 activate_ca
     uv run stock-preflight --json             # 輸出 JSON (給 CI 用)
 """
 
@@ -46,6 +47,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="略過真實 Shioaji 連線測試 (offline mode)",
     )
     parser.add_argument(
+        "--test-ca", action="store_true",
+        help="即使 RUN_MODE=watch 也測試 activate_ca（需搭配連線測試）",
+    )
+    parser.add_argument(
         "--json", action="store_true",
         help="輸出 JSON 格式 (給 CI / Telegram 用)",
     )
@@ -62,6 +67,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = run_preflight(
         settings,
         do_real_login=not args.no_login,
+        test_ca_activate=args.test_ca,
         logger=logger,
     )
 

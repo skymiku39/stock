@@ -715,6 +715,11 @@ def page_preflight() -> None:
             value=True,
             help="關掉的話只檢查 .env 設定，不會打永豐 API",
         )
+        test_ca = st.checkbox(
+            "即使 watch 模式也測試 CA 啟用",
+            value=False,
+            help="RUN_MODE=watch 時平常不啟用 CA；勾選可在不切模式前先驗證憑證",
+        )
 
     if not run_btn and "preflight_report" not in st.session_state:
         st.info("按上方「🩺 立刻檢查」開始體檢。")
@@ -726,7 +731,11 @@ def page_preflight() -> None:
 
         with st.spinner("檢查中… (連線 Shioaji 約需數秒)"):
             try:
-                report = run_preflight(S(), do_real_login=do_login)
+                report = run_preflight(
+                    S(),
+                    do_real_login=do_login,
+                    test_ca_activate=test_ca and do_login,
+                )
                 st.session_state["preflight_report"] = report_to_dict(report)
             except Exception as e:
                 st.error(f"檢查時發生未預期錯誤: {e}")
