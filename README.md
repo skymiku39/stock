@@ -243,6 +243,20 @@ uv sync
 uv sync --extra dev
 ```
 
+### 執行測試
+
+```bash
+# 建議：直接透過 venv 執行（避免與 stock-dashboard 程序鎖定衝突）
+.venv/Scripts/python.exe -m pytest tests/ -v
+
+# 或使用 uv（需先關閉 stock-dashboard，否則可能因 .exe 被鎖定而失敗）
+uv run pytest tests/ -v
+```
+
+> **注意**：若 `stock-dashboard`（Streamlit 儀表板）正在執行，`uv run pytest` 可能因
+> `.venv/Scripts/stock-dashboard.exe` 被鎖定而失敗。此時請改用上方 venv 直接執行，
+> 或先關閉儀表板程序。
+
 ## 設定
 
 複製 `.env.example` 為 `.env`，填入你的實際資訊：
