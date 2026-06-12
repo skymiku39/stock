@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 
 CONTRACTS_TIMEOUT_MS = 10_000
+BALANCE_CACHE_TTL_SEC = 30
+
+
 class SjBroker:
     """封裝 Shioaji SDK 的所有低階操作。"""
 
@@ -52,6 +55,7 @@ class SjBroker:
 
         self._reconnect_lock = threading.Lock()
         self.last_order_error: Optional[Exception] = None
+        self._balance_cache: Optional[Tuple[float, float]] = None  # (monotonic_ts, amount)
 
     def _should_activate_ca(self) -> bool:
         """Only trade mode may activate CA; watch mode must stay quote-only."""
@@ -111,7 +115,7 @@ class SjBroker:
                 bad_ip = m.group(1) if m else "目前對外 IP"
                 self.logger.error(
                     "登入失敗：IP 白名單阻擋 (%s 不在金鑰允許清單)。"
-                    "請到永豐 e leader → API 金鑰管理移除 IP 限制或加入該 IP。", bad_ip,
+                    "請到永豐 iLeader → API 金鑰管理移除 IP 限制或加入該 IP。", bad_ip,
                 )
             elif "permission" in low or "401" in low:
                 self.logger.error(
@@ -147,6 +151,28 @@ class SjBroker:
             finally:
                 self.api = None
                 self.logger.info("已登出")
+
+    def get_available_balance(self, *, force_refresh: bool = False) -> Optional[float]:
+        """讀取證券帳戶可用餘額 (acc_balance)；失敗回傳 None。"""
+        if self.api is None:
+            return None
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._balance_cache is not None
+            and now - self._balance_cache[0] < BALANCE_CACHE_TTL_SEC
+        ):
+            return self._balance_cache[1]
+        try:
+            balance = self.api.account_balance()
+            if not balance:
+                return None
+            amount = float(getattr(balance, "acc_balance", 0) or 0)
+            self._balance_cache = (now, amount)
+            return amount
+        except Exception as exc:
+            self.logger.warning("讀取 account_balance 失敗: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # 合約
@@ -346,6 +372,7 @@ class SjBroker:
         order_type: OrderType = OrderType.ROD,
         custom_field: str = "",
         order_lot: StockOrderLot = StockOrderLot.Common,
+        max_sell_qty: Optional[int] = None,
     ) -> Optional[Trade]:
         if self.settings.run_mode != "trade":
             self.logger.error(
@@ -353,6 +380,17 @@ class SjBroker:
                 self.settings.run_mode,
             )
             return None
+
+        if action == Action.Sell:
+            if quantity <= 0:
+                self.logger.error("賣單數量無效: %s qty=%d", symbol, quantity)
+                return None
+            if max_sell_qty is not None and quantity > max_sell_qty:
+                self.logger.error(
+                    "僅做多：賣單 %d 超過持倉 %d (%s)，已攔截",
+                    quantity, max_sell_qty, symbol,
+                )
+                return None
 
         contract = self.get_contract(symbol)
         if contract is None:
@@ -422,6 +460,7 @@ class SjBroker:
         symbol: str,
         quantity: int,
         custom_field: str = "close",
+        max_sell_qty: Optional[int] = None,
     ) -> Optional[Trade]:
         """市價 IOC 賣出 (用於停損/全出場)。"""
         return self.place_order(
@@ -432,6 +471,7 @@ class SjBroker:
             price_type=StockPriceType.MKT,
             order_type=OrderType.IOC,
             custom_field=custom_field,
+            max_sell_qty=max_sell_qty,
         )
 
     def place_odd_lot_order(
@@ -441,6 +481,7 @@ class SjBroker:
         shares: int,
         price: float,
         custom_field: str = "odd",
+        max_sell_qty: Optional[int] = None,
     ) -> Optional[Trade]:
         """盤中零股委託 (IntradayOdd)。
 
@@ -456,6 +497,51 @@ class SjBroker:
             order_type=OrderType.ROD,
             custom_field=custom_field,
             order_lot=StockOrderLot.IntradayOdd,
+            max_sell_qty=max_sell_qty,
+        )
+
+    # ------------------------------------------------------------------
+    # 歷史盤中資料 (分 K / Tick)
+    # ------------------------------------------------------------------
+
+    def fetch_kbars(
+        self,
+        symbol: str,
+        start: str,
+        end: str,
+        *,
+        timeout_ms: int = 60_000,
+    ):
+        """抓取 Shioaji 1 分 K 歷史 (start/end: YYYY-MM-DD)。"""
+        assert self.api is not None, "尚未登入"
+        contract = self.get_contract(symbol)
+        if contract is None:
+            return None
+        return self.api.kbars(
+            contract,
+            start=start,
+            end=end,
+            timeout=timeout_ms,
+        )
+
+    def fetch_ticks(
+        self,
+        symbol: str,
+        start: str,
+        end: str,
+        *,
+        timeout_ms: int = 60_000,
+    ):
+        """抓取 Shioaji 逐筆成交歷史 (start/end: YYYY-MM-DD)。"""
+        assert self.api is not None, "尚未登入"
+        contract = self.get_contract(symbol)
+        if contract is None:
+            return None
+        return self.api.ticks(
+            contract,
+            start=start,
+            end=end,
+            timeout=timeout_ms,
         )
 
     # ------------------------------------------------------------------

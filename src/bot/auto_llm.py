@@ -150,14 +150,20 @@ def _gather_calendar(
     root: Path,
     logger: logging.Logger,
 ) -> Dict[str, List[Any]]:
-    """讀取/補抓法說會行事曆並取出此 ticker 的相關項目。"""
+    """讀取/補抓法說會與全球科技事件，取出此 ticker 的相關項目。"""
     try:
         from bot.conference_calendar import (
             conferences_for_ticker,
             ensure_calendar_fresh,
             upcoming_conferences,
         )
+        from bot.global_event_calendar import (
+            ensure_global_events_fresh,
+            format_global_event_text,
+            global_events_for_ticker,
+        )
         ensure_calendar_fresh(root=root, logger=logger)
+        ensure_global_events_fresh(root=root, logger=logger)
         today = now_tw().date()
         all_for_ticker = conferences_for_ticker(ticker, root=root)
         upcoming = [
@@ -168,15 +174,27 @@ def _gather_calendar(
             e for e in all_for_ticker
             if e.date < today and (today - e.date).days <= 365
         ]
+        ge = global_events_for_ticker(ticker, lookahead=60, lookback=2, root=root)
+        global_upcoming = ge.get("upcoming") or []
+        global_recent = ge.get("recent") or []
         upcoming_all = upcoming_conferences(days=14, root=root)
         return {
             "upcoming": upcoming,
             "past": past,
-            "near_market_size": len(upcoming_all),
+            "global_upcoming": global_upcoming,
+            "global_recent": global_recent,
+            "global_upcoming_text": format_global_event_text(global_upcoming),
+            "global_recent_text": format_global_event_text(global_recent),
+            "near_market_size": len(upcoming_all) + len(global_upcoming),
         }
     except Exception:
         logger.exception("[%s] 行事曆整合失敗", ticker)
-        return {"upcoming": [], "past": [], "near_market_size": 0}
+        return {
+            "upcoming": [], "past": [],
+            "global_upcoming": [], "global_recent": [],
+            "global_upcoming_text": "(無)", "global_recent_text": "(無)",
+            "near_market_size": 0,
+        }
 
 
 def _gather_web(
@@ -244,6 +262,135 @@ def _format_news(news: List[NewsItem]) -> str:
     return "\n".join(parts)
 
 
+def _truncate_text(text: str, max_chars: int) -> str:
+    if not text or len(text) <= max_chars:
+        return text or ""
+    return text[:max_chars] + "\n...(已截斷)"
+
+
+def _calendar_lines(items: List[Any], *, include_url: bool = True) -> List[str]:
+    lines: List[str] = []
+    for e in items:
+        try:
+            date_str = e.date.isoformat() if hasattr(e.date, "isoformat") else str(e.date)
+        except Exception:
+            date_str = str(e.date)
+        line = f"- {date_str} {getattr(e, 'time', '') or ''} {getattr(e, 'ticker', '')} {getattr(e, 'company', '')}".rstrip()
+        note = getattr(e, "note", "") or ""
+        if note:
+            line += f" — {note}"
+        if include_url:
+            url = getattr(e, "presentation_url", "") or ""
+            if url:
+                line += f" | 簡報: {url}"
+        lines.append(line)
+    return lines
+
+
+def _build_source_sections(
+    ticker: str,
+    *,
+    materials: List[MaterialInfo],
+    news: List[NewsItem],
+    calendar_data: Dict[str, List[Any]],
+    web_material: Optional[Any],
+    pipeline_text: str,
+    composed_preview: str = "",
+    logger: logging.Logger,
+    detail_limit: int = 5,
+    detail_max_chars: int = 3000,
+) -> Dict[str, Any]:
+    """組合結構化原始素材，供 dashboard 顯示與快取。"""
+    from bot.mops_scraper import fetch_material_detail
+
+    upcoming = calendar_data.get("upcoming") or []
+    past = calendar_data.get("past") or []
+
+    mops_items: List[Dict[str, Any]] = []
+    for m in materials[:12]:
+        mops_items.append({
+            "date": m.date.isoformat() if hasattr(m.date, "isoformat") else str(m.date),
+            "time": m.time,
+            "subject": m.subject,
+            "detail_url": m.detail_url or "",
+            "detail": "",
+        })
+
+    fetched = 0
+    for item in mops_items:
+        if fetched >= detail_limit:
+            break
+        url = str(item.get("detail_url") or "")
+        if not url:
+            continue
+        try:
+            detail = fetch_material_detail(url, logger=logger, max_chars=detail_max_chars)
+            if detail:
+                item["detail"] = detail
+                fetched += 1
+        except Exception:
+            logger.exception("[%s] fetch_material_detail 失敗", ticker)
+
+    news_items = [
+        {
+            "title": n.title,
+            "summary": _truncate_text(n.summary or "", 500),
+            "category": n.category or "",
+        }
+        for n in news[:15]
+    ]
+
+    web_items: List[Dict[str, str]] = []
+    if web_material is not None:
+        for p in (web_material.pages or [])[:10]:
+            web_items.append({
+                "url": p.url,
+                "title": p.title or "",
+                "text": _truncate_text(p.text or "", detail_max_chars),
+            })
+
+    preview = composed_preview.strip()
+    if not preview:
+        parts: List[str] = []
+        up_lines = _calendar_lines(upcoming)
+        past_lines = _calendar_lines(past[:12])
+        global_up_text = calendar_data.get("global_upcoming_text") or ""
+        global_recent_text = calendar_data.get("global_recent_text") or ""
+        if up_lines:
+            parts.append("【即將舉行的法說會】\n" + "\n".join(up_lines))
+        if global_up_text and global_up_text != "(無)":
+            parts.append("【即將發生的全球科技事件】\n" + global_up_text)
+        if global_recent_text and global_recent_text != "(無)":
+            parts.append("【近期全球科技事件】\n" + global_recent_text)
+        if past_lines:
+            parts.append("【過去法說會】\n" + "\n".join(past_lines))
+        if materials:
+            parts.append("【MOPS 重大訊息】\n" + _format_materials(materials))
+        if news:
+            parts.append("【鉅亨網新聞】\n" + _format_news(news))
+        if web_material is not None:
+            block = web_material.compact_text()
+            if block:
+                parts.append("【網路搜尋整理】\n" + block)
+        if pipeline_text:
+            parts.append("【既有法說 / 公開資料文本】\n" + pipeline_text)
+        preview = "\n\n".join(parts)
+
+    global_up_text = calendar_data.get("global_upcoming_text") or "(無)"
+    global_recent_text = calendar_data.get("global_recent_text") or "(無)"
+    return {
+        "calendar_upcoming": "\n".join(_calendar_lines(upcoming)) or "(無)",
+        "calendar_past": "\n".join(_calendar_lines(past[:12])) or "(無)",
+        "global_events_upcoming": global_up_text,
+        "global_events_recent": global_recent_text,
+        "mops_materials": mops_items,
+        "news": news_items,
+        "web_search": web_items,
+        "pipeline_text": _truncate_text(pipeline_text, detail_max_chars) if pipeline_text else "",
+        "composed_preview": _truncate_text(preview, 8000),
+    }
+
+
 def _compose_legacy_text(
     ticker: str,
     name: str,
@@ -261,9 +408,17 @@ def _compose_legacy_text(
     )
     upcoming = calendar_data.get("upcoming") or []
     past = calendar_data.get("past") or []
+    global_up_text = calendar_data.get("global_upcoming_text") or "(無)"
+    global_recent_text = calendar_data.get("global_recent_text") or "(無)"
     if upcoming:
         parts.append("\n【即將舉行的法說會 (未來 60 天)】")
         parts.append(_format_calendar_text(upcoming))
+    if global_up_text and global_up_text != "(無)":
+        parts.append("\n【即將發生的全球科技事件】")
+        parts.append(global_up_text)
+    if global_recent_text and global_recent_text != "(無)":
+        parts.append("\n【近期全球科技事件 (含昨日發表)】")
+        parts.append(global_recent_text)
     if past:
         parts.append("\n【過去 365 天舉行過的法說會】")
         parts.append(_format_calendar_text(past[:8]))
@@ -342,6 +497,8 @@ def _try_research_ticker(
     web_block: str,
     client: GeminiClient,
     logger: logging.Logger,
+    global_upcoming_text: str = "(無)",
+    global_recent_text: str = "(無)",
 ) -> Optional[Dict[str, Any]]:
     """嘗試呼叫 ``research_ticker`` prompt；若 registry 沒有此 prompt 回 None。"""
     try:
@@ -361,7 +518,14 @@ def _try_research_ticker(
         past_events.append(_format_materials(materials))
     past_block = "\n".join(past_events).strip() or "(無)"
 
-    upcoming_block = _format_calendar_text(upcoming) if upcoming else "(無)"
+    upcoming_parts: List[str] = []
+    if upcoming:
+        upcoming_parts.append("【法說會】\n" + _format_calendar_text(upcoming))
+    if global_upcoming_text and global_upcoming_text != "(無)":
+        upcoming_parts.append("【全球科技事件 (未來)】\n" + global_upcoming_text)
+    if global_recent_text and global_recent_text != "(無)":
+        upcoming_parts.append("【全球科技事件 (近期/進行中)】\n" + global_recent_text)
+    upcoming_block = "\n\n".join(upcoming_parts).strip() or "(無)"
     news_block = _format_news(news) if news else "(無)"
 
     raw, info = gemini_call(
@@ -441,7 +605,10 @@ def auto_analyze_ticker(
     pipeline_text = _gather_pipeline_text(ticker, root=root)
     calendar_data: Dict[str, List[Any]] = (
         _gather_calendar(ticker, root=root, logger=log)
-        if enable_calendar else {"upcoming": [], "past": []}
+        if enable_calendar else {
+            "upcoming": [], "past": [],
+            "global_upcoming_text": "(無)", "global_recent_text": "(無)",
+        }
     )
     web_material = (
         _gather_web(ticker, name_hint, root=root, logger=log)
@@ -456,6 +623,8 @@ def auto_analyze_ticker(
         past=calendar_data.get("past") or [],
         materials=materials, news=news, web_block=web_block,
         client=client, logger=log,
+        global_upcoming_text=str(calendar_data.get("global_upcoming_text") or "(無)"),
+        global_recent_text=str(calendar_data.get("global_recent_text") or "(無)"),
     )
 
     analysis: Optional[PresentationAnalysis] = None
@@ -534,6 +703,12 @@ def auto_analyze_ticker(
             "source": "auto_llm_legacy",
         }
 
+    composed_for_preview = ""
+    if res is None:
+        composed_for_preview = _compose_legacy_text(
+            ticker, name_hint, materials, news, pipeline_text,
+            calendar_data, web_block,
+        )
     payload["source_materials"] = {
         "mops_count": len(materials),
         "news_count": len(news),
@@ -543,6 +718,16 @@ def auto_analyze_ticker(
         "web_search_results": len(web_material.search_results) if web_material else 0,
         "web_pages_fetched": len(web_material.pages) if web_material else 0,
     }
+    payload["source_sections"] = _build_source_sections(
+        ticker,
+        materials=materials,
+        news=news,
+        calendar_data=calendar_data,
+        web_material=web_material,
+        pipeline_text=pipeline_text,
+        composed_preview=composed_for_preview,
+        logger=log,
+    )
     payload["fetched_at"] = now_tw().isoformat(timespec="seconds")
 
     if chips is not None and analysis is not None:
@@ -566,6 +751,139 @@ def auto_analyze_ticker(
     return payload
 
 
+def _source_sections_has_content(sections: Optional[Dict[str, Any]]) -> bool:
+    """快取可能含空結構（truthy dict 但無實質內容）。"""
+    if not sections:
+        return False
+    for key in ("calendar_upcoming", "calendar_past", "llm_input_preview"):
+        val = str(sections.get(key) or "").strip()
+        if val and val not in {"(無)", "(即時素材；執行自動研究可取得完整新聞與網頁原文)"}:
+            return True
+    for key in ("mops_materials", "news", "web_search"):
+        if sections.get(key):
+            return True
+    return False
+
+
+def build_live_source_sections(
+    ticker: str,
+    root: Path,
+    *,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[Dict[str, Any]]:
+    """不呼叫 LLM，從行事曆快取與 MOPS 重訊組合即時原始素材。"""
+    log = logger or get_logger("auto-llm")
+    try:
+        from bot.conference_calendar import conferences_for_ticker
+        from bot.mops_scraper import fetch_material_info
+        from bot.utils import now_tw
+
+        today = now_tw().date()
+        all_conf = conferences_for_ticker(ticker, root=root)
+        upcoming = [e for e in all_conf if e.date >= today]
+        past = [e for e in all_conf if e.date < today]
+        past.sort(key=lambda e: e.date, reverse=True)
+        materials = fetch_material_info(ticker, logger=log)
+        if not upcoming and not past and not materials:
+            return None
+        mops_items = [
+            {
+                "date": m.date.isoformat() if hasattr(m.date, "isoformat") else str(m.date),
+                "time": m.time,
+                "subject": m.subject,
+                "detail_url": m.detail_url or "",
+                "detail": "",
+            }
+            for m in materials[:12]
+        ]
+        return {
+            "calendar_upcoming": "\n".join(_calendar_lines(upcoming)) or "(無)",
+            "calendar_past": "\n".join(_calendar_lines(past[:12])) or "(無)",
+            "mops_materials": mops_items,
+            "news": [],
+            "web_search": [],
+            "llm_input_preview": "(即時素材；執行自動研究可取得完整新聞與網頁原文)",
+            "_source": "live",
+        }
+    except Exception:
+        log.exception("[%s] build_live_source_sections 失敗", ticker)
+        return None
+
+
+def patch_material_detail_in_cache(
+    ticker: str,
+    root: Path,
+    *,
+    detail_url: str,
+    text: str,
+) -> bool:
+    """將 MOPS 重訊內文寫回 auto_llm 快取 ``source_sections``。"""
+    if not detail_url or not text:
+        return False
+    cached = load_cached_auto_analysis(ticker, root, max_age_hours=999999)
+    if not cached:
+        return False
+    sections = dict(cached.get("source_sections") or {})
+    items = list(sections.get("mops_materials") or [])
+    updated = False
+    for item in items:
+        if str(item.get("detail_url") or "") == detail_url:
+            item["detail"] = text
+            updated = True
+            break
+    if not updated:
+        return False
+    sections["mops_materials"] = items
+    cached["source_sections"] = sections
+    _save_cache(ticker, root, cached)
+    return True
+
+
+def resolve_llm_bundle(
+    ticker: str,
+    root: Path,
+    *,
+    pipeline_analysis: Optional[Dict[str, Any]] = None,
+    auto_llm: bool = False,
+    name_hint: str = "",
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, Any]:
+    """合併 pipeline 摘要與 auto_llm 原始素材。
+
+    - ``analysis``：優先 ``pipeline_analysis``，否則 auto_llm 快取 / 自動分析
+    - ``source_sections``：來自 auto_llm 快取；僅在 **無** pipeline 摘要時才觸發自動分析
+    """
+    log = logger or get_logger("auto-llm")
+    analysis: Optional[Dict[str, Any]] = pipeline_analysis
+    source_sections: Dict[str, Any] = {}
+
+    cached_any = load_cached_auto_analysis(ticker, root, max_age_hours=999999)
+    if cached_any:
+        source_sections = dict(cached_any.get("source_sections") or {})
+
+    if analysis is None:
+        if cached_any:
+            analysis = cached_any
+        elif auto_llm:
+            fresh = auto_analyze_ticker(
+                ticker, root=root, name_hint=name_hint, logger=log,
+            )
+            if fresh:
+                analysis = fresh
+                source_sections = dict(fresh.get("source_sections") or {})
+    elif not _source_sections_has_content(source_sections) and cached_any:
+        source_sections = dict(cached_any.get("source_sections") or {})
+    if not _source_sections_has_content(source_sections):
+        live = build_live_source_sections(ticker, root, logger=log)
+        if live:
+            source_sections = live
+
+    return {
+        "analysis": analysis,
+        "source_sections": source_sections if _source_sections_has_content(source_sections) else None,
+    }
+
+
 def auto_research_ticker(
     ticker: str,
     *,
@@ -585,7 +903,9 @@ def auto_research_ticker(
     if refresh_calendar:
         try:
             from bot.conference_calendar import update_calendar
+            from bot.global_event_calendar import update_global_events
             update_calendar(root=root, logger=log)
+            update_global_events(root=root, logger=log)
         except Exception:
             log.exception("行事曆更新失敗 (忽略)")
 
@@ -689,10 +1009,15 @@ def run_llm_research_batch(
             log.info("未指定 tickers，使用 watchlist 共 %d 檔", len(work))
     if upcoming:
         extra = upcoming_tickers(days=upcoming_days, root=root)
+        try:
+            from bot.global_event_calendar import upcoming_tickers_from_global_events
+            extra.extend(upcoming_tickers_from_global_events(days=upcoming_days, root=root))
+        except Exception:
+            log.debug("upcoming_tickers_from_global_events 失敗", exc_info=True)
         new_add = [t for t in extra if t not in work]
         work.extend(new_add)
         log.info(
-            "加入未來 %d 天有法說會的 %d 檔: %s",
+            "加入未來 %d 天有法說會或全球科技事件的 %d 檔: %s",
             upcoming_days, len(new_add), new_add[:10],
         )
 

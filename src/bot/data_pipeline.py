@@ -49,6 +49,7 @@ from bot.llm_analyzer import (
     logic_check,
 )
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
+from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -127,6 +128,7 @@ class PipelineRun:
 def run_full_pipeline(
     config: PipelineConfig,
     logger: Optional[logging.Logger] = None,
+    publisher=None,
 ) -> PipelineRun:
     """一鍵跑完整個自動化研究流程。"""
     log = logger or get_logger("pipeline")
@@ -175,18 +177,36 @@ def run_full_pipeline(
                 upcoming_conferences,
                 upcoming_tickers as _upcoming_tickers,
             )
+            from bot.global_event_calendar import (
+                upcoming_global_events,
+                upcoming_tickers_from_global_events,
+                update_global_events,
+            )
 
             summary = _update_cal(root=config.project_root, logger=log)
+            global_summary = update_global_events(root=config.project_root, logger=log)
             upcoming = upcoming_conferences(
+                days=config.auto_focus_upcoming_days,
+                root=config.project_root,
+            )
+            upcoming_global = upcoming_global_events(
                 days=config.auto_focus_upcoming_days,
                 root=config.project_root,
             )
             upcoming_calendar_tickers = _upcoming_tickers(
                 days=config.auto_focus_upcoming_days, root=config.project_root,
             )
+            global_tickers = upcoming_tickers_from_global_events(
+                days=config.auto_focus_upcoming_days, root=config.project_root,
+            )
+            for t in global_tickers:
+                if t and t not in upcoming_calendar_tickers:
+                    upcoming_calendar_tickers.append(t)
             run.calendar_summary = {
                 "months_fetched": summary,
+                "global_events_count": global_summary.get("count", 0),
                 "upcoming_count": len(upcoming),
+                "upcoming_global_count": len(upcoming_global),
                 "upcoming_window_days": config.auto_focus_upcoming_days,
                 "upcoming_tickers": upcoming_calendar_tickers,
                 "upcoming_preview": [
@@ -194,11 +214,17 @@ def run_full_pipeline(
                      "company": e.company, "note": e.note}
                     for e in upcoming[:30]
                 ],
+                "upcoming_global_preview": [
+                    {"date": e.date.isoformat(), "title": e.title,
+                     "tickers": list(e.tickers), "note": e.note}
+                    for e in upcoming_global[:20]
+                ],
             }
             log.info(
-                "行事曆完成: %d 個月, 未來 %d 天 %d 場 (%d 檔)",
-                len(summary), config.auto_focus_upcoming_days,
-                len(upcoming), len(upcoming_calendar_tickers),
+                "行事曆完成: %d 個月, 全球事件 %d 筆, 未來 %d 天法說 %d 場 / 全球 %d 場 (%d 檔)",
+                len(summary), global_summary.get("count", 0),
+                config.auto_focus_upcoming_days,
+                len(upcoming), len(upcoming_global), len(upcoming_calendar_tickers),
             )
         except Exception as e:
             log.exception("行事曆更新失敗")
@@ -291,7 +317,7 @@ def run_full_pipeline(
     focus_list = sorted(focus)
     run.focus_tickers = focus_list
     log.info(
-        "[3/6] 焦點個股 %d 檔 (含未來 %d 天法說會 %d 檔): %s",
+        "[3/6] 焦點個股 %d 檔 (含未來 %d 天法說會/全球事件 %d 檔): %s",
         len(focus_list), config.auto_focus_upcoming_days,
         len(upcoming_calendar_tickers), focus_list[:10],
     )
@@ -497,6 +523,16 @@ def run_full_pipeline(
     log.info(
         "Pipeline 完成 (%s, %.1fs, 焦點 %d, 錯誤 %d)",
         run_id, run.duration_sec, len(run.focus_tickers), len(run.errors),
+    )
+    publish_pipeline_completed(
+        publisher,
+        pipeline="data_research",
+        run_id=run_id,
+        output_dir=str(output_dir),
+        success=len(run.errors) == 0,
+        error_count=len(run.errors),
+        duration_sec=run.duration_sec,
+        extra={"focus_tickers": len(run.focus_tickers)},
     )
     return run
 

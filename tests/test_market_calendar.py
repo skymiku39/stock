@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from bot.market_calendar import (
+    CATEGORY_LABELS,
     fetch_ex_dividend_events,
     load_exhibition_events,
+    load_global_tech_events,
     parse_roc_date,
     parse_tpex_dividend_events,
     parse_twse_dividend_events,
@@ -236,3 +238,33 @@ def test_existing_exhibition_file_is_mirrored_to_cloud(
     assert mirrored.exists()
     payload = json.loads(mirrored.read_text(encoding="utf-8"))
     assert payload["entries"][0]["note"] == "manual edit"
+
+
+def test_load_global_tech_events_from_cache(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "calendar" / "global_tech_events.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({
+            "entries": [{
+                "date": "2026-06-08",
+                "end_date": "2026-06-12",
+                "title": "WWDC 2026 Keynote",
+                "event_type": "keynote",
+                "organizer": "AAPL",
+                "canonical_key": "wwdc-2026-keynote",
+                "enabled": True,
+                "tickers": ["2317", "2330"],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    events = load_global_tech_events(
+        dt.date(2026, 6, 1),
+        dt.date(2026, 6, 30),
+        root=tmp_path,
+    )
+    assert len(events) == 1
+    assert events[0].category == "global_tech"
+    assert events[0].title == "WWDC 2026 Keynote"
+    assert "2317" in events[0].tickers
+    assert CATEGORY_LABELS["global_tech"] == "全球科技"

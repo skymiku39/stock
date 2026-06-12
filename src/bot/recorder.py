@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from bot.models import QtyUnit, qty_multiplier
 from bot.ownership import infer_owner_tag
 from bot.utils import get_logger, mk_folder, now_tw
 
@@ -20,19 +21,38 @@ class TradeRecorder:
         self.logger = logger or get_logger("recorder")
         self._records: List[Dict[str, Any]] = []
 
-    def record_deal(self, msg: dict) -> None:
+    def record_deal(
+        self,
+        msg: dict,
+        *,
+        unit: QtyUnit = "lot",
+        trade_reason: str = "",
+        entry_price: Optional[float] = None,
+        pnl_pct: Optional[float] = None,
+        pnl_twd: Optional[float] = None,
+    ) -> None:
         """從 Shioaji StockDeal callback msg 擷取欄位並暫存。"""
         custom_field = msg.get("custom_field", "")
-        self._records.append({
+        record: Dict[str, Any] = {
             "datetime": now_tw().isoformat(timespec="seconds"),
             "symbol": msg.get("code", ""),
             "action": msg.get("action", ""),
             "price": float(msg.get("price", 0)),
             "quantity": int(msg.get("quantity", 0)),
+            "unit": unit,
             "ordno": msg.get("ordno", ""),
             "custom_field": custom_field,
             "owner_tag": infer_owner_tag(custom_field=custom_field),
-        })
+        }
+        if trade_reason:
+            record["trade_reason"] = trade_reason
+        if entry_price is not None:
+            record["entry_price"] = round(float(entry_price), 4)
+        if pnl_pct is not None:
+            record["pnl_pct"] = round(float(pnl_pct), 4)
+        if pnl_twd is not None:
+            record["pnl_twd"] = round(float(pnl_twd), 2)
+        self._records.append(record)
 
     @property
     def deal_count(self) -> int:
@@ -50,8 +70,12 @@ class TradeRecorder:
 
         df = pd.DataFrame(self._records)
 
-        # 計算每筆成交金額
-        df["amount"] = df["price"] * df["quantity"] * 1000
+        if "unit" not in df.columns:
+            df["unit"] = "lot"
+        df["amount"] = df.apply(
+            lambda r: r["price"] * r["quantity"] * qty_multiplier(r.get("unit", "lot")),
+            axis=1,
+        )
 
         df.to_csv(filepath, index=False, encoding="utf-8-sig")
         self.logger.info("交易紀錄已匯出: %s (%d 筆)", filepath, len(df))
@@ -63,10 +87,24 @@ class TradeRecorder:
             return "今日無成交"
 
         df = pd.DataFrame(self._records)
+        if "unit" not in df.columns:
+            df["unit"] = "lot"
         buys = df[df["action"] == "Buy"]
         sells = df[df["action"] == "Sell"]
-        total_buy = (buys["price"] * buys["quantity"] * 1000).sum() if len(buys) else 0
-        total_sell = (sells["price"] * sells["quantity"] * 1000).sum() if len(sells) else 0
+        total_buy = (
+            buys.apply(
+                lambda r: r["price"] * r["quantity"] * qty_multiplier(r.get("unit", "lot")),
+                axis=1,
+            ).sum()
+            if len(buys) else 0
+        )
+        total_sell = (
+            sells.apply(
+                lambda r: r["price"] * r["quantity"] * qty_multiplier(r.get("unit", "lot")),
+                axis=1,
+            ).sum()
+            if len(sells) else 0
+        )
 
         lines = [
             f"成交筆數: {len(df)}",

@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.app_bootstrap import get_or_create_bus
 from bot.auto_llm import run_llm_research_batch
 from bot.config import Settings
 from bot.data_pipeline import (
@@ -174,7 +175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     logger.info("=== 自動化研究啟動 ===")
-    run = run_full_pipeline(config, logger=logger)
+    run = run_full_pipeline(config, logger=logger, publisher=get_or_create_bus())
     logger.info(
         "=== 完成: run_id=%s, 焦點 %d, 錯誤 %d, 輸出 %s ===",
         run.run_id, len(run.focus_tickers), len(run.errors), run.output_dir,

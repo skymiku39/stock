@@ -22,6 +22,7 @@ import pytest
 
 from bot.config import Settings
 from bot.risk_guard import KILL_SWITCH_FILENAME, RiskGuard
+from bot.trade_cost import buy_cash_required
 
 
 def _make_settings(**overrides):
@@ -80,7 +81,8 @@ class TestEntryBasics:
         d = g.check_entry("2330", price=50, requested_lots=300, unit="share")
         assert d.allowed
         assert d.unit == "share"
-        assert d.adjusted_lots == 200
+        assert buy_cash_required(50, d.adjusted_lots, "share", settings=s) <= 10_000
+        assert d.adjusted_lots >= 198
 
     def test_odd_lot_shares_insufficient_fund(self, tmp_path: Path) -> None:
         s = _make_settings(max_fund=10, odd_lot_max_shares=500)
@@ -90,22 +92,30 @@ class TestEntryBasics:
         assert "insufficient_fund" in d.blocking_rule
 
     def test_per_order_max_cost_clamps(self, tmp_path: Path) -> None:
-        s = _make_settings(per_order_max_cost_twd=100_000, max_fund=1_000_000)
+        s = _make_settings(per_order_max_cost_twd=101_000, max_fund=1_000_000)
         g = RiskGuard(settings=s, project_root=tmp_path)
-        # 100/股 × 1 張 = 100,000 → 剛好 1 張
+        # 含手續費後 1 張約 100,040 元
         d = g.check_entry("2330", price=100, requested_lots=2)
         assert d.allowed and d.adjusted_lots == 1
-        # 200/股 × 1 張 = 200,000 > 100,000 → 0 張被擋
         d2 = g.check_entry("2330", price=200, requested_lots=2)
         assert not d2.allowed
+
+    def test_daily_fund_budget_overrides_max_fund(self, tmp_path: Path) -> None:
+        s = _make_settings(daily_fund_budget=10_000, max_fund=500_000)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        d = g.check_entry("2498", price=9, requested_lots=5)
+        assert d.allowed
+        assert d.adjusted_lots == 1
 
 
 class TestBlacklistAndPrice:
     def test_blacklist_rejects(self, tmp_path: Path) -> None:
-        s = _make_settings(blacklist_symbols=["2498"])
+        s = _make_settings(blacklist_symbols=["2498"], manual_hold_symbols=["0050"])
         g = RiskGuard(settings=s, project_root=tmp_path)
         d = g.check_entry("2498", price=20, requested_lots=1)
         assert not d.allowed and "blacklist" in d.blocking_rule
+        d2 = g.check_entry("0050", price=180, requested_lots=1)
+        assert not d2.allowed and "blacklist" in d2.blocking_rule
 
     def test_min_price_rejects(self, tmp_path: Path) -> None:
         s = _make_settings(min_price=20.0)
@@ -154,7 +164,7 @@ class TestOrderFrequency:
         s = _make_settings(reentry_cooldown_seconds=60)
         g = RiskGuard(settings=s, project_root=tmp_path)
         g.on_entry_filled("2330", 100, 1)
-        g.on_exit_filled("2330", 100, 102, 1)
+        g.on_exit_filled("2330", 100, 102, 1, position_closed=True)
         # 剛平倉，馬上進不准
         d = g.check_entry("2330", price=102, requested_lots=1)
         assert not d.allowed and "cooldown" in d.blocking_rule
@@ -169,7 +179,7 @@ class TestOpenPositions:
         d = g.check_entry("2317", price=100, requested_lots=1)
         assert not d.allowed and "max_open_positions" in d.blocking_rule
         # 平掉一檔後可以再開
-        g.on_exit_filled("2330", 100, 100, 1)
+        g.on_exit_filled("2330", 100, 100, 1, position_closed=True)
         d2 = g.check_entry("2317", price=100, requested_lots=1)
         assert d2.allowed
 
@@ -229,6 +239,26 @@ class TestExitAndState:
         data = json.loads(files[0].read_text(encoding="utf-8"))
         assert data["today_orders"] == 1
         assert data["today_orders_per_symbol"] == {"2330": 1}
+        assert data["fund_used"] == buy_cash_required(100, 1, "lot", settings=s)
+        assert data["open_positions"] == 1
+
+    def test_fund_used_restored_on_restart(self, tmp_path: Path) -> None:
+        s = _make_settings()
+        g1 = RiskGuard(settings=s, project_root=tmp_path)
+        g1.on_entry_filled("2330", 100, 1)
+        g2 = RiskGuard(settings=s, project_root=tmp_path)
+        assert g2.fund_used == buy_cash_required(100, 1, "lot", settings=s)
+        assert g2.open_positions_count == 1
+
+    def test_set_fund_used_persists(self, tmp_path: Path) -> None:
+        s = _make_settings()
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        g.set_fund_used(50_000, open_positions=2)
+        assert g.fund_used == 50_000
+        assert g.open_positions_count == 2
+        g2 = RiskGuard(settings=s, project_root=tmp_path)
+        assert g2.fund_used == 50_000
+        assert g2.open_positions_count == 2
 
     def test_snapshot_keys(self, guard: RiskGuard) -> None:
         guard.on_entry_filled("2330", 100, 1)
@@ -238,5 +268,112 @@ class TestExitAndState:
             "realized_pnl_twd", "kill_switch", "blacklist",
         ):
             assert key in snap
-        assert snap["fund_used"] == 100 * 1 * 1000
+        assert snap["fund_used"] == buy_cash_required(100, 1, "lot", settings=guard.settings)
         assert snap["open_positions"] == 1
+
+
+class TestFeesAndAccountBalance:
+    def test_account_balance_unavailable_rejects(self, tmp_path: Path) -> None:
+        s = _make_settings(check_account_balance=True, max_fund=500_000)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        d = g.check_entry(
+            "2330", 100.0, 1,
+            enforce_account_balance=True,
+            available_balance=None,
+        )
+        assert not d.allowed
+        assert d.blocking_rule == "account_balance_unavailable"
+
+    def test_insufficient_account_balance_rejects(self, tmp_path: Path) -> None:
+        s = _make_settings(check_account_balance=True, max_fund=500_000)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        cost = buy_cash_required(100.0, 1, "lot", settings=s)
+        d = g.check_entry(
+            "2330", 100.0, 1,
+            enforce_account_balance=True,
+            available_balance=cost - 1,
+        )
+        assert not d.allowed
+        assert d.blocking_rule == "insufficient_account_balance"
+
+    def test_budget_with_fees_blocks_edge_case(self, tmp_path: Path) -> None:
+        s = _make_settings(
+            daily_fund_budget=10_000,
+            max_fund=10_000,
+            max_lot_per_symbol=1,
+            use_odd_lot=True,
+            broker_fee_discount=0.28,
+        )
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        price = 200.0
+        shares = 50
+        cost = buy_cash_required(price, shares, "share", settings=s)
+        g.set_fund_used(cost - 1)
+        d = g.check_entry("2330", price, shares, unit="share")
+        assert not d.allowed
+        assert d.blocking_rule == "insufficient_fund"
+
+
+class TestFundUsedExit:
+    def test_fund_used_zero_after_loss_exit(self, tmp_path: Path) -> None:
+        s = _make_settings(max_fund=200_000)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        g.on_entry_filled("2330", 100, 1)
+        cost = buy_cash_required(100, 1, "lot", settings=s)
+        assert g.fund_used == cost
+        g.on_exit_filled("2330", 100, 94, 1, position_closed=True)
+        assert g.fund_used == 0.0
+
+    def test_partial_sell_keeps_open_position_count(self, tmp_path: Path) -> None:
+        s = _make_settings(max_open_positions=2)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        g.on_entry_filled("2330", 100, 2)
+        assert g.open_positions_count == 1
+        g.on_exit_filled("2330", 100, 102, 1, position_closed=False)
+        assert g.open_positions_count == 1
+        released = buy_cash_required(100, 1, "lot", settings=s)
+        assert g.fund_used == buy_cash_required(100, 2, "lot", settings=s) - released
+        g.on_exit_filled("2330", 100, 102, 1, position_closed=True)
+        assert g.open_positions_count == 0
+        assert g.fund_used == 0.0
+
+    def test_addon_buy_does_not_increment_open_positions(self, tmp_path: Path) -> None:
+        s = _make_settings(max_open_positions=1)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        g.on_entry_filled("2330", 100, 1)
+        g.on_entry_filled("2330", 100, 1)
+        assert g.open_positions_count == 1
+        d = g.check_entry("0050", 100, 1)
+        assert not d.allowed
+        assert "max_open_positions" in d.blocking_rule
+
+
+class TestPendingExposure:
+    def test_reserve_reduces_effective_remaining(self, tmp_path: Path) -> None:
+        s = _make_settings(max_fund=200_000)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        cost = buy_cash_required(100, 1, "lot", settings=s)
+        g.reserve_entry_exposure("2330", cost)
+        assert g.effective_fund_remaining() == 200_000 - cost
+        g.release_entry_exposure("2330")
+        assert g.effective_fund_remaining() == 200_000
+
+    def test_pending_blocks_second_entry(self, tmp_path: Path) -> None:
+        s = _make_settings(max_fund=120_000, max_open_positions=5)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        cost = buy_cash_required(100, 1, "lot", settings=s)
+        g.reserve_entry_exposure("2330", cost)
+        d = g.check_entry("0050", 100, 1)
+        assert not d.allowed
+        assert d.blocking_rule == "insufficient_fund"
+
+
+class TestRebuyBypass:
+    def test_rebuy_bypasses_per_symbol_daily_max(self, tmp_path: Path) -> None:
+        s = _make_settings(per_symbol_daily_max_orders=1)
+        g = RiskGuard(settings=s, project_root=tmp_path)
+        g.on_entry_filled("2330", 100, 1)
+        d_enter = g.check_entry("2330", 100, 1, entry_kind="enter")
+        assert not d_enter.allowed
+        d_rebuy = g.check_entry("2330", 97, 1, entry_kind="rebuy")
+        assert d_rebuy.allowed

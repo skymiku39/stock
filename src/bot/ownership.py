@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from bot.config import Settings
 
 
 BOT_OWNER_TAG = "AI"
@@ -21,6 +24,7 @@ _SELL_REASON_FIELDS = {
     "stop": "AISL",
     "stoploss": "AISL",
     "close": "AICLS",
+    "afternoon": "AIAFT",
 }
 _LEGACY_BOT_FIELDS = {
     "enter",
@@ -77,6 +81,18 @@ def is_bot_owner(owner_tag: str) -> bool:
     return clean_order_field(owner_tag).upper() == BOT_OWNER_TAG
 
 
+def effective_trading_blacklist(settings: "Settings") -> set[str]:
+    """黑名單 + 手動長期持股 — 自動交易應排除的代號集合。"""
+    symbols: set[str] = set()
+    for raw in getattr(settings, "blacklist_symbols", []) or []:
+        if str(raw).strip():
+            symbols.add(str(raw).strip())
+    for raw in getattr(settings, "manual_hold_symbols", []) or []:
+        if str(raw).strip():
+            symbols.add(str(raw).strip())
+    return symbols
+
+
 __all__ = [
     "BOT_BUY_FIELD",
     "BOT_OWNER_TAG",
@@ -84,6 +100,7 @@ __all__ = [
     "bot_buy_field",
     "bot_sell_field",
     "clean_order_field",
+    "effective_trading_blacklist",
     "infer_owner_tag",
     "is_bot_order_field",
     "is_bot_owner",

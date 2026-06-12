@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
 from bot.next_day_watch_pipeline import run_next_day_watch
 from bot.utils import get_logger
@@ -56,6 +57,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         force_refresh_macro=refresh_macro,
         target_date=target_date,
         logger=logger,
+        publisher=get_or_create_bus(),
     )
 
     logger.info(

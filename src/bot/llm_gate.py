@@ -41,6 +41,26 @@ class EntryVerdict:
 
 
 @dataclass
+class ExitVerdict:
+    """賣出前 AI 閘門結果。"""
+    allowed: bool
+    reason: str = ""
+    sentiment_score: float = 0.0
+    day_trade_score: float = 0.0
+    sentiment: str = ""
+    confidence: float = 0.0
+
+    @property
+    def summary(self) -> str:
+        if self.allowed:
+            return (
+                f"sell_ok ss={self.sentiment_score:.2f} "
+                f"dt={self.day_trade_score:.1f} ({self.reason})"
+            )
+        return f"hold:{self.reason}"
+
+
+@dataclass
 class GateSnapshot:
     """供 dashboard 顯示的閘門狀態。"""
     symbol: str
@@ -123,8 +143,16 @@ class LlmGate:
         except Exception:
             return True
 
-    def _maybe_refresh_background(self, symbol: str) -> None:
-        if not getattr(self.settings, "llm_refresh_on_entry", False):
+    def _maybe_refresh_background(
+        self,
+        symbol: str,
+        *,
+        on_exit: bool = False,
+    ) -> None:
+        if on_exit:
+            if not getattr(self.settings, "llm_refresh_on_exit", False):
+                return
+        elif not getattr(self.settings, "llm_refresh_on_entry", False):
             return
         if not self.settings.gemini_api_key:
             return
@@ -135,13 +163,14 @@ class LlmGate:
 
         def _worker() -> None:
             try:
-                from bot.auto_llm import auto_research_ticker
+                from bot.auto_llm import auto_analyze_ticker
 
-                auto_research_ticker(
+                auto_analyze_ticker(
                     symbol,
-                    settings=self.settings,
+                    root=self.project_root,
+                    force_refresh=True,
+                    enable_calendar=False,
                     logger=self.logger,
-                    force=True,
                 )
             except Exception:
                 self.logger.exception("[%s] 背景 LLM 刷新失敗", symbol)
@@ -149,7 +178,10 @@ class LlmGate:
                 with self._refresh_lock:
                     self._refreshing.discard(symbol)
 
-        threading.Thread(target=_worker, daemon=True, name=f"llm-refresh-{symbol}").start()
+        tag = "llm-refresh-exit" if on_exit else "llm-refresh"
+        threading.Thread(
+            target=_worker, daemon=True, name=f"{tag}-{symbol}",
+        ).start()
 
     def allow_entry(
         self,
@@ -165,6 +197,13 @@ class LlmGate:
             symbol, price, pct_chg, llm_data, record_block=True,
         )
 
+    def has_limit_up_potential(self, symbol: str) -> bool:
+        """LLM 判定具漲停潛力時，移動停利可略過 trailing_stop_pct 回撤規則。"""
+        llm_data = self.load_llm_cache(symbol)
+        if not llm_data:
+            return False
+        return bool(llm_data.get("limit_up_potential", False))
+
     def should_exit(self, symbol: str, position: PositionInfo) -> Optional[str]:
         """持倉中若 LLM 轉負向，回傳出場原因字串。"""
         if not getattr(self.settings, "llm_exit_on_negative", False):
@@ -178,9 +217,139 @@ class LlmGate:
 
         sentiment = str(llm_data.get("sentiment", "")).lower()
         confidence = float(llm_data.get("confidence", 0.0) or 0.0)
-        if sentiment == "negative" and confidence >= 0.5:
+        min_conf = float(getattr(self.settings, "llm_sell_min_confidence", 0.5))
+        if sentiment == "negative" and confidence >= min_conf:
             return "llm_neg"
         return None
+
+    def allow_exit(
+        self,
+        symbol: str,
+        position: PositionInfo,
+        price: float,
+        pnl_pct: float,
+        trigger_reason: str,
+    ) -> ExitVerdict:
+        """賣出前 AI 分析：策略觸發賣出訊號後，由此決定是否實際送單。"""
+        if not getattr(self.settings, "llm_sell_gate_enabled", False):
+            return ExitVerdict(True, "gate_disabled")
+
+        normalized = (trigger_reason or "").lower()
+        if (
+            normalized in ("sl", "stop", "stoploss")
+            and getattr(self.settings, "llm_sell_gate_bypass_stop_loss", True)
+        ):
+            return ExitVerdict(True, "stop_loss_bypass")
+
+        if (
+            normalized == "close"
+            and getattr(self.settings, "llm_sell_gate_bypass_close", True)
+        ):
+            return ExitVerdict(True, "close_bypass")
+
+        if (
+            normalized == "afternoon"
+            and getattr(self.settings, "llm_sell_gate_bypass_afternoon", True)
+        ):
+            return ExitVerdict(True, "afternoon_bypass")
+
+        llm_data = self.load_llm_cache(symbol)
+        if self._cache_stale(llm_data):
+            self._maybe_refresh_background(symbol, on_exit=True)
+
+        prev_close = price / (1 + pnl_pct / 100) if pnl_pct != -100 else price
+        pct_chg = 0.0
+        if prev_close > 0:
+            pct_chg = 100 * (price - prev_close) / prev_close
+
+        return self._evaluate_exit(
+            symbol,
+            position,
+            price,
+            pnl_pct,
+            pct_chg,
+            trigger_reason,
+            llm_data,
+            record_block=True,
+        )
+
+    def _evaluate_exit(
+        self,
+        symbol: str,
+        position: PositionInfo,
+        price: float,
+        pnl_pct: float,
+        pct_chg: float,
+        trigger_reason: str,
+        llm_data: Optional[Dict[str, Any]],
+        *,
+        record_block: bool,
+    ) -> ExitVerdict:
+        """依 LLM 快取與觸發原因，判斷是否允許賣出。"""
+        normalized = (trigger_reason or "").lower()
+
+        if not llm_data:
+            detail = f"無 {symbol} LLM 快取，暫不賣出"
+            if record_block and self.risk is not None:
+                self.risk.record_blocked_attempt(symbol, "llm_sell_gate", detail)
+            return ExitVerdict(False, "no_llm_cache")
+
+        sentiment = str(llm_data.get("sentiment", "neutral")).lower()
+        sentiment_score = float(llm_data.get("sentiment_score", 0.0) or 0.0)
+        confidence = float(llm_data.get("confidence", 0.0) or 0.0)
+        day_score = self._day_trade_score(symbol, price, pct_chg, llm_data)
+        min_conf = float(getattr(self.settings, "llm_sell_min_confidence", 0.5))
+
+        def _allow(reason: str) -> ExitVerdict:
+            return ExitVerdict(
+                True, reason, sentiment_score, day_score, sentiment, confidence,
+            )
+
+        def _hold(reason: str, detail: str) -> ExitVerdict:
+            if record_block and self.risk is not None:
+                self.risk.record_blocked_attempt(symbol, "llm_sell_gate", detail)
+            return ExitVerdict(
+                False, reason, sentiment_score, day_score, sentiment, confidence,
+            )
+
+        if sentiment == "negative" and confidence >= min_conf:
+            return _allow("negative_sentiment")
+
+        if normalized in ("target", "llm_neg"):
+            return _allow("trigger_confirmed")
+
+        if pnl_pct < 0 and sentiment != "positive":
+            return _allow("loss_with_neutral_or_negative")
+
+        if (
+            sentiment == "positive"
+            and confidence >= min_conf
+            and sentiment_score >= float(
+                getattr(self.settings, "llm_min_sentiment_score", 0.2),
+            )
+        ):
+            detail = (
+                f"AI 建議續抱 sentiment={sentiment} "
+                f"score={sentiment_score:.2f} conf={confidence:.2f} "
+                f"[{trigger_reason}]"
+            )
+            return _hold("ai_hold_positive", detail)
+
+        if normalized in ("trail", "target", "afternoon") and pnl_pct > 0:
+            return _allow("take_profit_signal")
+
+        if normalized == "close":
+            if sentiment == "neutral" or pnl_pct <= 0:
+                return _allow("close_neutral_or_loss")
+            return _hold(
+                "ai_hold_close",
+                f"收盤觸發但 AI 偏多，暫不賣出 [{trigger_reason}]",
+            )
+
+        if normalized in ("sl", "stop", "stoploss"):
+            return _allow("stop_loss_no_bypass")
+
+        return _allow("default_allow")
 
     def _evaluate_entry(
         self,

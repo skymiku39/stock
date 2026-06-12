@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from bot.models import QtyUnit, qty_multiplier
+from bot.models import QtyUnit
+from bot.trade_cost import buy_cash_required
 
 
 @dataclass
@@ -61,10 +62,9 @@ def fund_state_from_signals(df: Optional[pd.DataFrame], max_fund: float) -> SimF
         price = float(row.get("price", 0) or 0)
         qty = int(row.get("quantity", 0) or 0)
         unit: QtyUnit = "share" if str(row.get("unit", "lot")) == "share" else "lot"
-        mult = qty_multiplier(unit)
 
         if action == "would-buy" and qty > 0 and price > 0:
-            cost = price * qty * mult
+            cost = buy_cash_required(price, qty, unit)
             fund_used += cost
             if sym in holdings:
                 pos = holdings[sym]
@@ -77,7 +77,7 @@ def fund_state_from_signals(df: Optional[pd.DataFrame], max_fund: float) -> SimF
         elif action == "would-sell" and sym in holdings:
             pos = holdings[sym]
             sell_qty = min(qty, pos.quantity) if qty > 0 else pos.quantity
-            released = price * sell_qty * mult
+            released = buy_cash_required(pos.avg_price, sell_qty, pos.unit)
             fund_used = max(0.0, fund_used - released)
             pos.quantity -= sell_qty
             if pos.quantity <= 0:

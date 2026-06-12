@@ -26,9 +26,9 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
                  ┌───────────────────┼───────────────────┐
                  │                   │                   │
           ┌──────▼──────┐    ┌───────▼───────┐   ┌──────▼──────┐
-          │  config.py  │    │  broker.py /  │   │ strategy.py │
+          │  config.py  │    │  broker.py /  │   │ strategy*.py│
           │  Settings   │    │ market_source │   │ BaseStrategy│
-          │ (pydantic)  │    │ (Shioaji SDK) │   │ MyStrategy  │
+          │ (pydantic)  │    │ (Shioaji SDK) │   │ + STRATEGY  │
           └──────┬──────┘    └───────┬───────┘   └──────┬──────┘
                  │                   │                   │
                  │            ┌──────┴──────┐    ┌──────┴──────┐
@@ -49,7 +49,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 
 1. 載入 `Settings`（從 `.env`）
 2. `trade/watch` 建立 `SjBroker` 並登入；`report` 建立 `TwsePublicMarketSource`
-3. 建立 `MyStrategy` 並執行 `run()`
+3. 依 `STRATEGY_TYPE` 建立策略（預設 `ConfigurableStrategy`；可選 `EtfFollowStrategy`）並執行 `run()`
 4. 收到中斷信號或策略結束後，依模式匯出交易紀錄或訊號報表，必要時登出 Shioaji
 
 ### config.py -- 組態管理
@@ -66,7 +66,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 | 模式 | `simulation` | bool | True = 模擬環境 |
 | 標的 | `symbols` | List[str] | 逗號分隔的股票代碼 |
 | 時間 | `enter_cutoff_time`, `exit_time` | time | 進場截止 / 全出場時間 |
-| 風控 | `stop_loss_pct`, `take_profit_pct`, `trailing_stop_pct` | float | 停損/停利/移動停利 |
+| 風控 | `stop_loss_pct`, `take_profit_pct`, `trailing_stop_pct` | float | 停損 / 移動停利啟動門檻 / 淨利回撤出場 |
 | 資金 | `max_fund`, `max_lot_per_symbol` | int | 總資金上限 / 每檔張數 |
 | 通知 | `telegram_bot_token`, `telegram_chat_id` | str | Telegram 推播 |
 
@@ -108,6 +108,58 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 **斷線重連**
 - `_handle_reconnect()` -- 指數退避重連（最多 10 次，5s→120s）
 
+### events/ + protocols/ -- 領域事件 Pub/Sub（SOLID）
+
+專案採 **Publish/Subscribe** 作為跨模組通訊主軸，搭配 **protocol 介面** 落實依賴反轉 (DIP)。
+
+#### 事件匯流排 (`src/bot/events/`)
+
+| 模組 | 職責 (SRP) |
+|------|------------|
+| `types.py` | 不可變領域事件（資料、交易、管線） |
+| `protocols.py` | `EventPublisher` / `EventSubscriber` 介面 (ISP, DIP) |
+| `bus.py` | `InMemoryEventBus` — 僅負責路由 |
+| `handlers.py` | 橫切 handler（`LoggingEventHandler`, `JsonlEventRecorder`） |
+| `trading_handlers.py` | 交易側效應（通知 / 紀錄 / 風控） |
+| `pipeline_helpers.py` | 管線步驟/完成事件發布輔助 |
+| `wiring.py` | `wire_trading_handlers`, `wire_application_handlers` |
+
+#### 依賴反轉介面 (`src/bot/protocols/`)
+
+| Protocol | 實作 |
+|----------|------|
+| `BrokerProtocol` | `SjBroker` |
+| `MarketSourceProtocol` | `TwsePublicMarketSource` |
+| `NotifierProtocol` | `TelegramNotifier` |
+| `TradeRecorderProtocol` | `TradeRecorder` |
+
+#### 應用組裝 (`app_bootstrap.py`)
+
+所有 CLI 與 `stock-bot` 透過 `bootstrap_event_bus()` / `get_or_create_bus()` 取得同一匯流排，並自動掛載 JSONL 稽核。
+
+#### 已發布事件
+
+| 領域 | 事件 | 發布者 |
+|------|------|--------|
+| 資料 | `DailyKlineFetched`, `QuantDataFetchCompleted` | `watch_data_fetch` |
+| 選股 | `SmileScreenCompleted`, `SmileAuditCompleted` | smile CLI |
+| 交易 | `BotStarted`, `TickReceived`, `TradeBuyFilled`, `TradeSellFilled`, `RiskEntryBlocked`, `ClosureCompleted`, `BotShutdownRequested` | `BaseStrategy`, `main` |
+| 管線 | `PipelineStepCompleted`, `PipelineCompleted` | `data_pipeline`, `intraday_pipeline`, `next_day_watch_pipeline` |
+| 排程 | `SchedulerStarted`, `SchedulerJobCompleted` | `scheduler` |
+
+#### 訂閱者（handler）
+
+- `NotificationHandler` → Telegram 推播
+- `TradeRecordingHandler` → CSV 成交紀錄
+- `RiskPostTradeHandler` → 成交後資金/部位狀態
+- `LoggingEventHandler` / `JsonlEventRecorder` → 稽核日誌
+
+**事件鏈 (可選)**：`.env` 設 `EVENT_CHAIN_SMILE_SCREEN=true` 時，`QuantDataFetchCompleted` 自動觸發微笑曲線選股（`events/chain_handlers.py`）。
+
+**擴充方式 (Open/Closed)**：新增事件型別 + `bus.subscribe(EventType, handler)`，無需修改 bus 或策略核心。
+
+**策略層行情**：Shioaji callback → Queue（高頻執行緒安全）→ `on_tick()`，同時發布 `TickReceived` 供儀表板/監控訂閱。
+
 ### strategy.py -- 策略引擎
 
 分為兩層：
@@ -115,7 +167,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 **BaseStrategy (抽象基底)**
 
 提供所有策略共用的基礎設施：
-- **Queue 解耦**: Tick 回呼 → Queue → 獨立消費者 Thread
+- **Queue 解耦**: Tick 回呼 → Queue → 獨立消費者 Thread（與 `events/` Pub/Sub 互補）
 - **部位管理**: `positions` dict，成交回報自動更新均價/數量
 - **AI 部位標籤**: 買單使用 `AIBUY`，成交後部位標記 `owner_tag=AI`
 - **委託追蹤**: `pending_orders` 防止重複下單
@@ -124,14 +176,20 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 - **委託輪詢**: 獨立 Thread 定期清理已完成的 pending orders
 - **虛擬成交**: `watch/report` 模式以觀察價記錄 would-buy / would-sell，永不送單
 
-**MyStrategy (示範策略)**
+**策略實作（依 `STRATEGY_TYPE`）**
 
-繼承 BaseStrategy，實作 `on_tick()`：
-- 進場：漲幅 1%~5%、時間 < enter_cutoff_time
-- 使用者目標賣出：若 `SELL_PROFIT_TARGETS` 有該股票門檻，PnL 達標才允許自動賣出
-- 停損：PnL <= stop_loss_pct
-- 移動停利：PnL >= take_profit_pct 且從高點回撤 >= trailing_stop_pct
-- 全出場：exit_time 後由 BaseStrategy 自動處理
+| 類型 | 類別 | 進場特色 |
+|------|------|----------|
+| `configurable`（預設） | `ConfigurableStrategy` | env 漲幅區間 + LLM 進場閘門 + 回落買回 |
+| `etf_follow` | `EtfFollowStrategy` | ETF 共識訊號 + 漲幅區間 |
+
+**出場規則（BaseStrategy 共用，皆以淨利 % 判斷）**：
+- 使用者目標賣出：若 `SELL_PROFIT_TARGETS` 有該檔門檻，須達標才允許自動賣出
+- 停損：淨利 PnL <= `stop_loss_pct`
+- 移動停利：淨利 PnL 先達 `take_profit_pct`（啟動門檻），再從淨利高點回撤 >= `trailing_stop_pct`
+- 全出場：`exit_time` 後由 BaseStrategy 自動處理
+
+詳見 [trading-rules.md](trading-rules.md)、[glossary.md](glossary.md)。
 
 ### models.py -- 資料模型
 
@@ -139,7 +197,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 - `owner_tag=AI` -- 標記此部位由本工具買進，所有自動賣出會先檢查此標籤
 - `OrderRecord` -- 委託紀錄（委託號、股號、方向、類型）
 - `MarketTick` -- 跨來源正規化行情
-- `SignalEvent` -- 看盤/報表模式的交易意圖訊號
+- `SignalEvent` -- 看盤/報表模式的交易意圖訊號（`would-buy` / `would-sell` / `sell-blocked`）
 
 ### recorder.py -- 交易紀錄
 

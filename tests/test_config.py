@@ -8,11 +8,12 @@ from bot.config import Settings
 
 
 class TestRunModeDefaults:
-    def test_default_is_trade(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_watch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("RUN_MODE", raising=False)
         s = Settings(symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
-        assert s.run_mode == "trade"
+        assert s.run_mode == "watch"
         assert s.market_source == "shioaji"
+        assert s.day_trading_archived is True
 
     def test_report_auto_market_source(self) -> None:
         s = Settings(run_mode="report", symbols=["2330"], _env_file=None)  # type: ignore[call-arg]
@@ -123,7 +124,15 @@ class TestSimulationSettings:
         assert s.min_pct_chg_on_entry == 1.0
         assert s.use_odd_lot is False
         assert s.llm_gate_enabled is False
-        assert s.strategy_type == "default"
+        assert s.strategy_type == "configurable"
+
+    def test_strategy_type_default_alias(self) -> None:
+        s = Settings(
+            symbols=["2330"],
+            strategy_type="default",
+            _env_file=None,  # type: ignore[call-arg]
+        )
+        assert s.strategy_type == "configurable"
 
     def test_configurable_strategy_type(self) -> None:
         s = Settings(

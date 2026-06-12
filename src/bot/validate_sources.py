@@ -228,6 +228,22 @@ def check_mops_conference() -> CheckResult:
     return r
 
 
+def check_global_events(root: Path) -> CheckResult:
+    r = CheckResult(name="全球科技事件行事曆", layer="parse")
+    try:
+        from bot.global_event_calendar import load_global_events, update_global_events
+        update_global_events(root=root, include_network=False)
+        events = load_global_events(root)
+        r.rows = len(events)
+        r.ok = r.rows > 0
+        if events:
+            r.sample_date = events[0].date.isoformat()
+        r.note = "種子 + 快取 (未打外網)" if r.ok else "無全球科技事件"
+    except Exception as e:  # noqa: BLE001
+        r.error = f"{type(e).__name__}: {e}"
+    return r
+
+
 def check_mops_material() -> CheckResult:
     """重大訊息：OpenAPI t187ap04_L 全市場當日筆數 + 不可為安全性阻擋。"""
     from bot.mops_scraper import URL_MATERIAL_OPENAPI
@@ -522,6 +538,7 @@ def run_all(
         lambda: check_dividends(root),
         lambda: check_quarterly(root),
         lambda: check_mops_conference(),
+        lambda: check_global_events(root),
         lambda: check_mops_material(),
         lambda: check_chips(root),
         lambda: check_distribution(root),

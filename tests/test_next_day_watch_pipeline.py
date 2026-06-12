@@ -2,10 +2,49 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import bot.next_day_watch_pipeline as pipeline
+
+
+def test_catalyst_events_includes_recent_wwdc_supply_chain(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "data" / "calendar" / "global_tech_events.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({
+            "entries": [{
+                "date": "2026-06-08",
+                "end_date": "2026-06-12",
+                "title": "WWDC 2026 Keynote",
+                "event_type": "keynote",
+                "organizer": "AAPL",
+                "canonical_key": "wwdc-2026-keynote",
+                "enabled": True,
+                "tickers": ["2317", "2330"],
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "now_tw",
+        lambda: dt.datetime(2026, 6, 9, 18, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+    )
+    monkeypatch.setattr(
+        "bot.conference_calendar.load_calendar",
+        lambda _root: [],
+    )
+    monkeypatch.setattr(
+        "bot.global_event_calendar.ensure_global_events_fresh",
+        lambda **_kwargs: None,
+    )
+    target = dt.date(2026, 6, 10)
+    events = pipeline._catalyst_events(target, tmp_path, logging.getLogger("test"))
+    tickers = {e["ticker"] for e in events}
+    assert "2317" in tickers
+    assert any(e.get("event") == "全球科技" for e in events)
 
 
 def test_run_next_day_watch_scans_llm_discovered_candidates(
@@ -22,11 +61,15 @@ def test_run_next_day_watch_scans_llm_discovered_candidates(
     monkeypatch.setattr(pipeline, "fetch_macro_snapshot", lambda **_kwargs: object())
     monkeypatch.setattr(pipeline, "macro_to_dict", lambda _snap: {"adr_premiums": []})
     monkeypatch.setattr(pipeline, "_macro_summary_text", lambda _macro: "macro")
-    monkeypatch.setattr(pipeline, "_tomorrow_event_tickers", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(pipeline, "_catalyst_events", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(pipeline, "_watchlist_tickers", lambda _root: [])
     monkeypatch.setattr(pipeline, "_consensus_tickers_today", lambda _root: [])
     monkeypatch.setattr(
         "bot.conference_calendar.ensure_calendar_fresh",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "bot.global_event_calendar.ensure_global_events_fresh",
         lambda *_args, **_kwargs: None,
     )
 
@@ -108,12 +151,16 @@ def test_run_next_day_watch_mirrors_report_files(
     monkeypatch.setattr(pipeline, "fetch_macro_snapshot", lambda **_kwargs: object())
     monkeypatch.setattr(pipeline, "macro_to_dict", lambda _snap: {"adr_premiums": []})
     monkeypatch.setattr(pipeline, "_macro_summary_text", lambda _macro: "macro")
-    monkeypatch.setattr(pipeline, "_tomorrow_event_tickers", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(pipeline, "_catalyst_events", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(pipeline, "_watchlist_tickers", lambda _root: [])
     monkeypatch.setattr(pipeline, "_consensus_tickers_today", lambda _root: [])
     monkeypatch.setattr(pipeline, "_scan_today_strength", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "bot.conference_calendar.ensure_calendar_fresh",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "bot.global_event_calendar.ensure_global_events_fresh",
         lambda *_args, **_kwargs: None,
     )
 

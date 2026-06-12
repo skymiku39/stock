@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
 from bot.intraday_pipeline import run_intraday
 from bot.utils import get_logger
@@ -38,6 +39,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         candidate_limit=args.limit,
         force_refresh_news=args.refresh_news,
         logger=logger,
+        publisher=get_or_create_bus(),
     )
 
     logger.info(

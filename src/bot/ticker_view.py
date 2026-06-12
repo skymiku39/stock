@@ -119,6 +119,7 @@ class TickerSnapshot:
 
     # LLM
     llm_analysis: Optional[Dict[str, Any]] = None
+    llm_source_sections: Optional[Dict[str, Any]] = None
     logic_check: Optional[Dict[str, Any]] = None
 
     # 原始資料 / 譜系
@@ -472,21 +473,22 @@ def build_snapshot(
     except Exception:
         log.exception("[%s] 季報 view 整合失敗", ticker)
 
-    # ---- 9.5 自動 LLM 法說分析（無逐字稿時用 MOPS + 鉅亨新聞自動跑）----
-    # ⚠ 隱式 LLM 呼叫點：dashboard 的「個股深入分析」「個股總覽 → 計算評分」
-    #    都會走到這裡，呼叫 Gemini 並消耗 token (12 小時內快取)。
-    # 條件：尚未有 pipeline 法說分析、且設了 GEMINI_API_KEY。
-    # 未設 API Key 時 auto_analyze_ticker 會回 None，graceful-skip，不會收費。
-    if auto_llm and snap.llm_analysis is None:
-        try:
-            from bot.auto_llm import auto_analyze_ticker
-            auto = auto_analyze_ticker(
-                ticker, root=project_root, name_hint=snap.name, logger=log,
-            )
-            if auto:
-                snap.llm_analysis = auto
-        except Exception:
-            log.exception("[%s] 自動 LLM 分析失敗", ticker)
+    # ---- 9.5 LLM 法說摘要 + 原始素材（pipeline 摘要與 auto_llm 素材分離）----
+    try:
+        from bot.auto_llm import resolve_llm_bundle
+        bundle = resolve_llm_bundle(
+            ticker,
+            project_root,
+            pipeline_analysis=snap.llm_analysis,
+            auto_llm=auto_llm,
+            name_hint=snap.name,
+            logger=log,
+        )
+        if bundle.get("analysis") is not None and snap.llm_analysis is None:
+            snap.llm_analysis = bundle["analysis"]
+        snap.llm_source_sections = bundle.get("source_sections")
+    except Exception:
+        log.exception("[%s] LLM bundle 解析失敗", ticker)
 
     # ---- 9.6 把不會變動的基本資料持久化到 stock_db (供 Google Sheet 同步) ----
     try:
@@ -603,7 +605,9 @@ def snapshot_to_dict(s: TickerSnapshot) -> Dict[str, Any]:
         "chip_summary": s.chip_summary, "consensus": s.consensus,
         "new_build_signal": s.new_build_signal, "add_signal": s.add_signal,
         "held_by_etfs": s.held_by_etfs,
-        "llm_analysis": s.llm_analysis, "logic_check": s.logic_check,
+        "llm_analysis": s.llm_analysis,
+        "llm_source_sections": s.llm_source_sections,
+        "logic_check": s.logic_check,
         "pipeline_run_id": s.pipeline_run_id, "pipeline_run_dir": s.pipeline_run_dir,
         "source_files": s.source_files,
         "history": [dataclasses.asdict(h) for h in s.history],

@@ -35,8 +35,18 @@ ENV_FIELDS: List[EnvField] = [
     # 執行模式
     EnvField(
         "RUN_MODE", "執行模式", "執行模式", "select",
-        default="trade", options=["trade", "watch", "report"],
-        help="trade=自動交易 / watch=看盤不下單 / report=純報表分析",
+        default="watch", options=["trade", "watch", "report"],
+        help="trade=自動交易(已封存) / watch=看盤不下單 / report=純報表分析",
+    ),
+    EnvField(
+        "DAY_TRADING_ARCHIVED", "當沖已封存", "執行模式", "bool",
+        default="true",
+        help="true=阻擋 RUN_MODE=trade（除非同時解除下方開關）",
+    ),
+    EnvField(
+        "DAY_TRADING_UNFREEZE", "解除當沖封存", "執行模式", "bool",
+        default="false",
+        help="僅維護/回歸測試時設 true，允許 stock-bot trade 模式",
     ),
     EnvField(
         "MARKET_SOURCE", "行情來源", "執行模式", "select",
@@ -84,6 +94,28 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(
         "SYMBOLS", "監控股票 (逗號分隔)", "策略", "symbols",
         default="2330,0050",
+        help="手動基底；SYMBOLS_AUTO_MERGE=true 時與四源關注清單聯集",
+    ),
+    EnvField(
+        "SYMBOLS_AUTO_MERGE", "四源關注自動合併", "策略", "bool",
+        default="true",
+        help="合併昨日/今日戰情室、昨日明日關注、開盤即時調查",
+    ),
+    EnvField(
+        "SYMBOLS_MERGE_TOP_N", "每源取檔數", "策略", "int",
+        default="10",
+    ),
+    EnvField(
+        "SYMBOLS_MERGE_MAX_TOTAL", "合併監控上限", "策略", "int",
+        default="24",
+    ),
+    EnvField(
+        "SYMBOLS_MERGE_REFRESH_MIN", "盤中刷新間隔 (分)", "策略", "int",
+        default="10",
+    ),
+    EnvField(
+        "SYMBOLS_MERGE_BUDGET_FILTER", "預算過濾監控池", "策略", "bool",
+        default="true",
     ),
     EnvField(
         "ENTER_CUTOFF_TIME", "停止進場時間", "策略", "time",
@@ -92,6 +124,12 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(
         "EXIT_TIME", "全部出場時間", "策略", "time",
         default="13:15",
+        help="到此時間後強制市價清倉所有 AI 部位（含虧損未出場）",
+    ),
+    EnvField(
+        "PROFIT_EXIT_START_TIME", "午盤獲利平倉開始", "策略", "time",
+        default="",
+        help="此時間至 EXIT_TIME 前：淨利>0 即賣出；例 12:50 + EXIT_TIME=13:00 = 10 分鐘窗口",
     ),
 
     # 風控
@@ -158,9 +196,57 @@ ENV_FIELDS: List[EnvField] = [
         default="false",
     ),
     EnvField(
+        "LLM_SELL_GATE_ENABLED", "賣出前 AI 分析閘門", "LLM 分析", "bool",
+        default="false",
+        help="策略觸發賣出後，須通過 LLM 分析才會實際送單",
+    ),
+    EnvField(
+        "LLM_SELL_GATE_BYPASS_STOP_LOSS", "停損略過 AI 閘門", "LLM 分析", "bool",
+        default="true",
+        help="true=停損觸發時直接賣出，不等待 AI 判斷",
+    ),
+    EnvField(
+        "LLM_SELL_GATE_BYPASS_CLOSE", "收盤全出略過 AI 閘門", "LLM 分析", "bool",
+        default="true",
+        help="true=13:15 收盤清倉直接賣出；false 時 AI 偏多可能擋下全出",
+    ),
+    EnvField(
+        "LLM_SELL_GATE_BYPASS_AFTERNOON", "午盤獲利平倉略過 AI 閘門", "LLM 分析", "bool",
+        default="true",
+        help="true=12:50 起有賺即賣，不等待 AI 續抱判斷（避免延遲）",
+    ),
+    EnvField(
+        "LLM_REFRESH_ON_EXIT", "賣出判斷時刷新 LLM", "LLM 分析", "bool",
+        default="true",
+    ),
+    EnvField(
+        "LLM_SELL_MIN_CONFIDENCE", "賣出判斷最低信心", "LLM 分析", "float",
+        default="0.5",
+    ),
+    EnvField(
+        "LLM_INTRADAY_REVIEW_ENABLED", "盤中定時 LLM 檢討", "LLM 分析", "bool",
+        default="false",
+        help="盤中每 N 分鐘 + 成交後刷新個股 LLM 並產出 intraday_live_review",
+    ),
+    EnvField(
+        "LLM_INTRADAY_REVIEW_INTERVAL_MIN", "盤中 LLM 檢討間隔 (分)", "LLM 分析", "int",
+        default="60",
+        help="有持倉時盤中 09:00-13:30 定時檢討間隔",
+    ),
+    EnvField(
+        "LLM_INTRADAY_REVIEW_INTERVAL_FLAT_MIN", "空手 LLM 檢討間隔 (分)", "LLM 分析", "int",
+        default="10",
+        help="無持倉時縮短為每 N 分鐘刷新 LLM 與新聞檢討",
+    ),
+    EnvField(
         "MAX_FUND", "資金上限 (元)", "風控", "int",
         default="500000",
         help="總可用資金的天花板，所有持倉成本加總不會超過此值",
+    ),
+    EnvField(
+        "DAILY_FUND_BUDGET", "每日持股預算 (元)", "風控", "int",
+        default="0",
+        help=">0 時覆寫 max_fund 作為當日可用持股預算，例 10000",
     ),
     EnvField(
         "MAX_LOT_PER_SYMBOL", "每檔最大張數", "風控", "int",
@@ -194,6 +280,30 @@ ENV_FIELDS: List[EnvField] = [
         "REENTRY_COOLDOWN_SECONDS", "同檔再進場冷卻 (秒)", "進階風控", "int",
         default="0",
         help="0=立即可再進。建議 300~900 (5~15 分鐘) 避免追漲殺跌",
+    ),
+    EnvField(
+        "ALLOW_SAME_DAY_REENTRY", "同檔當日多次進出", "策略", "bool",
+        default="true",
+        help="平倉後允許回落買回",
+    ),
+    EnvField(
+        "REBUY_TARGET_NET_PCT", "回落買回目標淨利 (%)", "策略", "float",
+        default="2.0",
+        help="含手續費+稅後，買回價到上次賣出價的淨利門檻",
+    ),
+    EnvField(
+        "BROKER_FEE_DISCOUNT", "手續費折扣倍率", "風控", "float",
+        default="0.28",
+        help="0.28 表示約 28 折；依對帳單校準",
+    ),
+    EnvField(
+        "BROKER_MIN_FEE", "最低手續費 (元)", "風控", "float",
+        default="1",
+    ),
+    EnvField(
+        "DAY_TRADE_TAX_RATE", "當沖證交稅率", "風控", "float",
+        default="0.0015",
+        help="0.0015 = 0.15%",
     ),
 
     # 進階風控 - 進場條件

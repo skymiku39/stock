@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import subprocess
 import sys
@@ -48,6 +49,7 @@ from bot.etf_consensus import (  # noqa: E402
 from bot.prompt_registry import get_registry  # noqa: E402
 from bot.llm_log import get_call_logger  # noqa: E402
 from bot.scoring import (  # noqa: E402
+    ADVISORY_RULE_NOTE,
     STRATEGY_RULES,
     TIMEFRAMES,
     TIMEFRAME_LABELS,
@@ -95,6 +97,7 @@ from bot.dashboard.common import (
     LLM_TAG,
     PROJECT_ROOT,
     _badge,
+    _display_altair,
     _human_duration,
     _list_files,
     _llm_auto_banner,
@@ -137,7 +140,7 @@ FEATURE_GRID = [
     ("ETF 持股自動抓取", "依 URL 配置 HTTP 下載 + Gemini 自動抽取持股 JSON"),
     ("籌碼面自動拉取", "TWSE OpenAPI 自動抓三大法人/借券/融資/鉅額交易"),
     ("一鍵研究管線", "ETF×籌碼×法說×LLM×每日簡報全部串連執行"),
-    ("評分量表系統", "六個 factor × 四時間框架 (當沖/短/中/長) 加權，自動產出建議"),
+    ("評分量表系統", "九個 factor × 四時間框架 (當沖/短/中/長) 加權，自動產出建議"),
     ("個股總覽 Watchlist", "表格式列出多檔股票，依時間框分數排序篩選"),
     ("目前持股分析", "用本地成交紀錄彙總 FIFO 成本、市值、損益與曝險權重"),
     ("個股深入分析", "單檔股票六分頁：分析、原資料、分析數據、購買策略、現況、歷史"),
@@ -551,6 +554,36 @@ def page_risk_center() -> None:
                     guard.release_kill_switch()
                     st.rerun()
 
+    # ============ 持倉安全（混倉警示）============
+    if settings.api_key and settings.symbols:
+        from bot.position_safety import (  # noqa: E402
+            audit_manual_overlap,
+            reconcile_broker_vs_bot_records,
+        )
+
+        with st.expander("🔍 持倉安全快檢（監控標的 vs 券商庫存）", expanded=False):
+            try:
+                overlap = audit_manual_overlap(settings, project_root=PROJECT_ROOT)
+                reconcile = reconcile_broker_vs_bot_records(
+                    settings, project_root=PROJECT_ROOT,
+                )
+                if not overlap and not reconcile:
+                    st.success(
+                        f"監控 {len(settings.symbols)} 檔：無手動持股重疊、對帳一致。"
+                        "（與 preflight / bot 啟動檢查相同邏輯）"
+                    )
+                else:
+                    for issue in overlap:
+                        st.error(issue.message)
+                    for issue in reconcile:
+                        st.warning(issue.message)
+                    st.caption(
+                        "有混倉風險時請調整 SYMBOLS 或設 MANUAL_HOLD_SYMBOLS；"
+                        "bot 啟動時會自動拉 Kill Switch。"
+                    )
+            except Exception as exc:
+                st.warning(f"持倉安全快檢失敗: {exc}")
+
     # ============ 即時概況 =============
     st.markdown("### 📊 今日即時概況")
     fund_used = float(snap["fund_used"])
@@ -605,14 +638,16 @@ def page_risk_center() -> None:
 
     # ============ 當前風控設定 =============
     with st.expander("🛡 當前風控設定 (12 道閘門)", expanded=False):
+        fund_cap = settings.effective_fund_cap()
         rules_data = [
-            ["A. 總資金上限", f"{settings.max_fund:,} TWD", "MAX_FUND"],
+            ["A. 每日持股預算", f"{settings.daily_fund_budget:,} TWD" if settings.daily_fund_budget > 0 else "(沿用 MAX_FUND)", "DAILY_FUND_BUDGET"],
+            ["A. 總資金上限", f"{fund_cap:,} TWD (effective)", "MAX_FUND / DAILY_FUND_BUDGET"],
             ["A. 單筆委託上限", f"{settings.per_order_max_cost_twd:,} TWD" if settings.per_order_max_cost_twd > 0 else "(不限)", "PER_ORDER_MAX_COST_TWD"],
             ["B. 單檔最大張數", f"{settings.max_lot_per_symbol}", "MAX_LOT_PER_SYMBOL"],
             ["B. 同時最多在倉", f"{settings.max_open_positions} 檔" if settings.max_open_positions > 0 else "(不限)", "MAX_OPEN_POSITIONS"],
-            ["B. 黑名單", ", ".join(snap["blacklist"]) or "(無)", "BLACKLIST_SYMBOLS"],
+            ["B. 黑名單", ", ".join(snap["blacklist"]) or "(無)", "BLACKLIST_SYMBOLS / MANUAL_HOLD_SYMBOLS"],
             ["C. 每日虧損 (元)", f"-{settings.daily_max_loss_twd:,} TWD" if settings.daily_max_loss_twd > 0 else "(不限)", "DAILY_MAX_LOSS_TWD"],
-            ["C. 每日虧損 (%)", f"-{settings.daily_max_loss_pct}% × max_fund" if settings.daily_max_loss_pct > 0 else "(不限)", "DAILY_MAX_LOSS_PCT"],
+            ["C. 每日虧損 (%)", f"-{settings.daily_max_loss_pct}% × {fund_cap:,}" if settings.daily_max_loss_pct > 0 else "(不限)", "DAILY_MAX_LOSS_PCT"],
             ["D. 當日進場次數", f"≤ {settings.daily_max_orders}" if settings.daily_max_orders > 0 else "(不限)", "DAILY_MAX_ORDERS"],
             ["D. 單檔進場次數", f"≤ {settings.per_symbol_daily_max_orders}" if settings.per_symbol_daily_max_orders > 0 else "(不限)", "PER_SYMBOL_DAILY_MAX_ORDERS"],
             ["D. 平倉後冷卻", f"{settings.reentry_cooldown_seconds}s" if settings.reentry_cooldown_seconds > 0 else "(立即可再進)", "REENTRY_COOLDOWN_SECONDS"],
@@ -689,8 +724,8 @@ def page_preflight() -> None:
 
             真實下單的硬性條件 (全部要 ✅ 才能下單)：
 
-            1. `API_KEY` / `SECRET_KEY` 已設定 — 在永豐 e leader 申請 Shioaji
-            2. **API 金鑰具備「下單」權限** (不只是 Data) — 在 e leader 勾選後重新產生
+            1. `API_KEY` / `SECRET_KEY` 已設定 — 在永豐 iLeader 申請 Shioaji
+            2. **API 金鑰具備「下單」權限** (不只是 Data) — 在 iLeader 勾選後重新產生
             3. 線上協議已簽署 (stock_account.signed = True)
             4. 電子憑證 `.pfx` 檔存在、密碼正確、未過期
             5. 設定 `RUN_MODE=trade` (watch / report 不會下單)
@@ -789,12 +824,13 @@ def page_preflight() -> None:
         ("account", "4. 帳戶權限"),
         ("risk", "5. 風控設定"),
         ("time", "6. 時間窗口"),
+        ("safety", "7. 持倉安全"),
     ]
     for key, title in section_keys_dash:
         items = sections.get(key, [])
         if not items:
             continue
-        with st.expander(f"{title} ({len(items)} 項)", expanded=(fail > 0 and key in ("env", "login", "account"))):
+        with st.expander(f"{title} ({len(items)} 項)", expanded=(fail > 0 and key in ("env", "login", "account", "safety"))):
             for c in items:
                 icon = _PREFLIGHT_ICON.get(c["status"], " ")
                 cols = st.columns([3, 5])
@@ -834,7 +870,7 @@ def _render_csv_chart(df: pd.DataFrame, ts_col: str, value_col: str, group_col: 
                 y=alt.Y(f"{value_col}:Q", title=value_col),
                 tooltip=list(chart_df.columns),
             )
-        st.altair_chart(base, use_container_width=True)
+        _display_altair(base, width=700, fallback_df=chart_df)
     except Exception as e:
         st.caption(f"繪圖失敗: {e}")
 
@@ -1170,6 +1206,8 @@ def page_docs() -> None:
         ("docs/operations.md", _project_path("docs", "operations.md")),
         ("docs/profit-plan.md", _project_path("docs", "profit-plan.md")),
         ("docs/trading-rules.md", _project_path("docs", "trading-rules.md")),
+        ("docs/glossary.md", _project_path("docs", "glossary.md")),
+        ("docs/dashboard-sop.md", _project_path("docs", "dashboard-sop.md")),
     ]
     src_files = [(n, p) for n, p in src_files if p.exists()]
 
@@ -1196,7 +1234,8 @@ def page_docs() -> None:
             ("main.py", "程式進入點 (多模式分流 + 策略切換)"),
             ("config.py", "組態管理 (pydantic-settings + .env)"),
             ("broker.py", "Shioaji 連線管理 (登入/行情/下單/斷線重連)"),
-            ("strategy.py", "策略引擎 (BaseStrategy + MyStrategy)"),
+            ("strategy.py", "策略引擎 (BaseStrategy)"),
+            ("strategy_configurable.py", "ConfigurableStrategy (預設當沖)"),
             ("strategy_etf_follow.py", "主動 ETF 共識跟單策略"),
             ("models.py", "資料模型 (PositionInfo, MarketTick, SignalEvent)"),
             ("market_source.py", "TWSE 公開延遲行情來源"),
@@ -1577,6 +1616,182 @@ def page_follow_signals() -> None:
 # ======================================================================
 
 
+def _conference_row_dict(e: Any) -> Dict[str, str]:
+    """法說會行事曆單筆 → DataFrame 列。"""
+    url = getattr(e, "presentation_url", "") or ""
+    return {
+        "日期": e.date.isoformat(),
+        "時間": e.time,
+        "代號": e.ticker,
+        "公司": e.company,
+        "備註": e.note,
+        "簡報連結": url,
+    }
+
+
+def _mops_session_key(kind: str, *parts: str) -> str:
+    raw = "|".join(str(p) for p in parts)
+    digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+    return f"{kind}_{digest}"
+
+
+def _render_earnings_source_panel(
+    ticker: str,
+    raw_cache: Optional[Dict[str, Any]] = None,
+    *,
+    source_sections: Optional[Dict[str, Any]] = None,
+    key_prefix: str = "earnings_src",
+) -> None:
+    """顯示法說會 / MOPS / LLM 原始素材（來自 auto_llm 快取）。"""
+    sections: Dict[str, Any] = dict(source_sections or {})
+    if not sections and raw_cache:
+        sections = dict(raw_cache.get("source_sections") or {})
+    if not sections:
+        try:
+            from bot.auto_llm import (
+                _source_sections_has_content,
+                load_cached_auto_analysis,
+            )
+            cached = load_cached_auto_analysis(
+                ticker, PROJECT_ROOT, max_age_hours=999999,
+            )
+            if cached:
+                cached_secs = dict(cached.get("source_sections") or {})
+                if _source_sections_has_content(cached_secs):
+                    sections = cached_secs
+        except Exception:
+            sections = {}
+
+    live_fallback = False
+    if not sections:
+        try:
+            from bot.auto_llm import build_live_source_sections
+            live = build_live_source_sections(ticker, PROJECT_ROOT)
+            if live:
+                sections = live
+                live_fallback = True
+        except Exception:
+            pass
+
+    if not sections:
+        st.info(
+            f"尚無 `{ticker}` 的原始素材快取。"
+            "請在「LLM 法說分析 → 自動研究」執行一次，或於個股深入分析勾選自動 LLM。"
+        )
+        return
+
+    if live_fallback or sections.get("_source") == "live":
+        st.caption(
+            "以下為即時抓取的 MOPS / 行事曆素材（非 auto_llm 快取）。"
+            "執行「自動研究」可取得新聞、網頁原文與 LLM 輸入預覽。"
+        )
+
+    t_cal, t_mops, t_news, t_web, t_preview = st.tabs([
+        "行事曆", "MOPS 重訊", "新聞", "網頁原文", "LLM 輸入預覽",
+    ])
+
+    def _calendar_md(block: str) -> str:
+        lines: List[str] = []
+        for line in (block or "(無)").splitlines():
+            if "| 簡報: " in line:
+                pre, url = line.split("| 簡報: ", 1)
+                u = url.strip()
+                if u.startswith("mops-calendar://"):
+                    fname = u.split("://", 1)[-1]
+                    lines.append(f"{pre}| 簡報檔：`{fname}`")
+                else:
+                    lines.append(f"{pre}| [簡報連結]({u})")
+            else:
+                lines.append(line)
+        return "\n".join(lines)
+
+    with t_cal:
+        st.markdown("**未來法說會**")
+        st.markdown(_calendar_md(sections.get("calendar_upcoming") or "(無)"))
+        st.markdown("**過去法說會**")
+        st.markdown(_calendar_md(sections.get("calendar_past") or "(無)"))
+
+    with t_mops:
+        items = sections.get("mops_materials") or []
+        if not items:
+            if sections.get("_source") == "live":
+                st.info(
+                    "即時查詢尚無重大訊息（非交易日、MOPS 暫時無回應，"
+                    "或該股近期無公告）。可至「LLM 法說分析 → MOPS 重大訊息」手動重試。"
+                )
+            else:
+                st.info("尚無 MOPS 重大訊息。")
+        for i, item in enumerate(items):
+            subject = str(item.get("subject") or "(無主旨)")
+            label = f"{item.get('date', '')} {subject[:80]}"
+            with st.expander(label, expanded=False):
+                detail_url = str(item.get("detail_url") or "")
+                if detail_url:
+                    st.markdown(f"[開啟 MOPS 詳情]({detail_url})")
+                cache_key = _mops_session_key("mops_detail", detail_url)
+                detail = str(
+                    item.get("detail")
+                    or st.session_state.get(cache_key, "")
+                    or ""
+                )
+                if detail:
+                    st.text(detail)
+                elif detail_url:
+                    if st.button("抓取內文", key=f"{key_prefix}_mops_{ticker}_{i}"):
+                        from bot.auto_llm import patch_material_detail_in_cache
+                        from bot.mops_scraper import fetch_material_detail
+                        with st.spinner("自 MOPS 抓取詳情…"):
+                            text = fetch_material_detail(detail_url)
+                        if text:
+                            st.session_state[cache_key] = text
+                            patch_material_detail_in_cache(
+                                ticker, PROJECT_ROOT,
+                                detail_url=detail_url, text=text,
+                            )
+                            st.rerun()
+                        else:
+                            st.warning("抓取失敗或無內容。")
+                else:
+                    st.caption("僅有主旨（OpenAPI 當日重訊通常無詳情連結）。")
+
+    with t_news:
+        news_items = sections.get("news") or []
+        if not news_items:
+            st.info("尚無鉅亨新聞素材。")
+        for n in news_items:
+            title = n.get("title") or "(無標題)"
+            summary = n.get("summary") or ""
+            cat = n.get("category") or ""
+            st.markdown(f"- **[{cat}]** {title}")
+            if summary:
+                st.caption(summary)
+
+    with t_web:
+        web_items = sections.get("web_search") or []
+        if not web_items:
+            st.info("尚無網頁搜尋原文。")
+        for i, p in enumerate(web_items):
+            title = p.get("title") or p.get("url") or f"網頁 {i + 1}"
+            with st.expander(title, expanded=False):
+                url = p.get("url") or ""
+                if url:
+                    st.markdown(f"[來源]({url})")
+                text = p.get("text") or ""
+                if text:
+                    st.text(text)
+                else:
+                    st.caption("(無正文)")
+
+    with t_preview:
+        pipeline_text = sections.get("pipeline_text") or ""
+        if pipeline_text:
+            st.markdown("**既有法說 / 公開資料**")
+            st.text(pipeline_text)
+        preview = sections.get("composed_preview") or ""
+        st.markdown("**彙整預覽 (餵給 LLM)**")
+        st.text(preview or "(無)")
+
+
 def _render_auto_research_tab(api_key: str, model: str) -> None:
     """LLM 法說分析頁 → 「🤖 自動研究」分頁的內容。
 
@@ -1588,14 +1803,28 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
     )
 
     from bot.conference_calendar import upcoming_conferences
+    from bot.global_event_calendar import upcoming_global_events
 
     upcoming = upcoming_conferences(days=14, root=PROJECT_ROOT)
-    if upcoming:
+    upcoming_global = upcoming_global_events(days=14, root=PROJECT_ROOT)
+    if upcoming or upcoming_global:
         upcoming_tickers_list = list({e.ticker for e in upcoming if e.ticker})
+        global_tickers: List[str] = []
+        for ge in upcoming_global:
+            for t in ge.tickers:
+                if t.isdigit() and t not in global_tickers:
+                    global_tickers.append(t)
         st.info(
-            f"📅 未來 14 天有 {len(upcoming)} 場法說會 (涵蓋 {len(upcoming_tickers_list)} 檔)，"
-            f"代號：{', '.join(upcoming_tickers_list[:20])}"
-            + (" ..." if len(upcoming_tickers_list) > 20 else "")
+            f"📅 未來 14 天：法說會 {len(upcoming)} 場 ({len(upcoming_tickers_list)} 檔)"
+            f"｜全球科技 {len(upcoming_global)} 場 ({len(global_tickers)} 檔供應鏈)"
+            + (
+                f"\n法說代號：{', '.join(upcoming_tickers_list[:15])}"
+                if upcoming_tickers_list else ""
+            )
+            + (
+                f"\n全球事件台股：{', '.join(global_tickers[:15])}"
+                if global_tickers else ""
+            )
         )
     else:
         st.caption("未來 14 天行事曆快取為空 (可能 MOPS 還沒公告，或行事曆需要重抓)。")
@@ -1813,6 +2042,14 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
                         f"｜ 更新於 {raw.get('fetched_at','')}"
                     )
 
+                st.markdown("---")
+                st.markdown("**📄 原始素材**")
+                _render_earnings_source_panel(
+                    r["ticker"],
+                    raw_cache=raw,
+                    key_prefix=f"auto_research_{r['ticker']}",
+                )
+
 
 def page_llm_analysis() -> None:
     st.title("LLM 法說會分析 / 邏輯反查")
@@ -1830,9 +2067,17 @@ def page_llm_analysis() -> None:
         from bot.conference_calendar import (
             ensure_calendar_fresh,
             last_refresh_at,
+            presentation_url_fill_rate,
         )
         ensure_calendar_fresh(root=PROJECT_ROOT)
         cal_last = last_refresh_at(PROJECT_ROOT)
+        filled, total, rate = presentation_url_fill_rate(PROJECT_ROOT)
+        if total > 0 and rate < 0.05:
+            st.warning(
+                f"行事曆快取 {total} 場法說會中僅 {filled} 場有簡報連結 "
+                f"({rate:.0%})。系統已嘗試自動重抓；若仍偏低請到「MOPS 行事曆」"
+                "分頁手動「立即重抓」。"
+            )
     except Exception:
         cal_last = ""
 
@@ -1952,33 +2197,57 @@ def page_llm_analysis() -> None:
 
             st.markdown(f"#### 🔮 未來 {int(days_up)} 天 ({len(up)} 場)")
             if up:
-                df_up = pd.DataFrame([
-                    {"日期": e.date.isoformat(), "時間": e.time,
-                     "代號": e.ticker, "公司": e.company, "備註": e.note}
-                    for e in up
-                ])
+                df_up = pd.DataFrame([_conference_row_dict(e) for e in up])
                 st.dataframe(df_up, hide_index=True, use_container_width=True)
+                for e in up:
+                    if getattr(e, "presentation_url", ""):
+                        with st.expander(
+                            f"📎 {e.ticker} {e.company} — {e.date.isoformat()} 簡報",
+                            expanded=False,
+                        ):
+                            from bot.mops_scraper import MOPS_CALENDAR_FILE_PREFIX
+                            if e.presentation_url.startswith(MOPS_CALENDAR_FILE_PREFIX):
+                                pdf_name = e.presentation_url[len(MOPS_CALENDAR_FILE_PREFIX):]
+                                st.caption(f"簡報檔：`{pdf_name}`（MOPS 行事曆 PDF）")
+                            else:
+                                st.markdown(f"[開啟簡報連結]({e.presentation_url})")
+                            pdf_key = _mops_session_key(
+                                "mops_pdf", e.ticker, e.date.isoformat(),
+                            )
+                            cached_pdf = st.session_state.get(pdf_key, "")
+                            if cached_pdf:
+                                st.text(str(cached_pdf)[:8000])
+                            if st.button(
+                                "下載並抽字 (PDF)",
+                                key=f"cal_dl_{e.ticker}_{e.date.isoformat()}",
+                            ):
+                                from bot.mops_scraper import download_presentation
+                                dest = (
+                                    PROJECT_ROOT / "data" / "mops_downloads"
+                                    / e.ticker / f"{e.date.isoformat()}.pdf"
+                                )
+                                with st.spinner("下載中…"):
+                                    pt = download_presentation(
+                                        e.presentation_url, dest,
+                                    )
+                                if pt and pt.text:
+                                    st.session_state[pdf_key] = pt.text
+                                    st.rerun()
+                                else:
+                                    st.warning("下載或抽字失敗（可能非 PDF 或未安裝 pypdf）。")
             else:
                 st.info("未來窗口內目前沒有法說會。")
 
             st.markdown(f"#### 🕘 過去 {int(days_back)} 天 ({len(back)} 場)")
             if back:
-                df_back = pd.DataFrame([
-                    {"日期": e.date.isoformat(), "時間": e.time,
-                     "代號": e.ticker, "公司": e.company, "備註": e.note}
-                    for e in back
-                ])
+                df_back = pd.DataFrame([_conference_row_dict(e) for e in back])
                 st.dataframe(df_back, hide_index=True, use_container_width=True)
             else:
                 st.info("過去窗口內沒有法說會紀錄。")
 
             with st.expander(f"完整快取共 {len(all_items)} 場 (含 ±2 個月)"):
                 if all_items:
-                    df_all = pd.DataFrame([
-                        {"日期": e.date.isoformat(), "時間": e.time,
-                         "代號": e.ticker, "公司": e.company, "備註": e.note}
-                        for e in all_items
-                    ])
+                    df_all = pd.DataFrame([_conference_row_dict(e) for e in all_items])
                     st.dataframe(df_all, hide_index=True, use_container_width=True)
                 else:
                     st.info("尚無任何快取。點上方「立即重抓」即可。")
@@ -1986,18 +2255,78 @@ def page_llm_analysis() -> None:
         with sub_tab_mat:
             mt = st.text_input("股票代號", value="2330", key="mops_mat_ticker")
             if st.button("抓取重大訊息", key="mops_mat_fetch"):
-                from bot.mops_scraper import fetch_material_info
+                from bot.mops_scraper import fetch_material_info, fetch_material_detail
+                mat_stats: Dict[str, Any] = {}
                 with st.spinner(f"自 MOPS 抓取 {mt} 的重大訊息..."):
-                    materials = fetch_material_info(mt)
+                    materials = fetch_material_info(mt, stats=mat_stats)
                 if materials:
+                    oa = int(mat_stats.get("openapi_count", 0))
+                    mp = int(mat_stats.get("mops_count", 0))
+                    wd = int(mat_stats.get("with_detail_url", 0))
+                    st.caption(
+                        f"來源：OpenAPI 當日 {oa} 筆、MOPS 歷史 {mp} 筆；"
+                        f"含詳情連結 {wd}/{len(materials)} 筆。"
+                    )
+                    if mat_stats.get("mops_blocked"):
+                        st.warning(
+                            "MOPS 歷史重訊被安全性阻擋，僅能顯示 OpenAPI 當日重訊"
+                            "（通常無內文連結）。可設環境變數 `MOPS_HOST` 覆寫。"
+                        )
                     df = pd.DataFrame([
-                        {"日期": m.date.isoformat(), "時間": m.time,
-                         "代號": m.ticker, "主旨": m.subject}
+                        {
+                            "日期": m.date.isoformat(),
+                            "時間": m.time,
+                            "代號": m.ticker,
+                            "主旨": m.subject,
+                            "詳情連結": m.detail_url or "",
+                        }
                         for m in materials
                     ])
                     st.dataframe(df, hide_index=True, use_container_width=True)
+                    for i, m in enumerate(materials):
+                        with st.expander(
+                            f"{m.date.isoformat()} {m.subject[:80]}",
+                            expanded=False,
+                        ):
+                            if m.detail_url:
+                                st.markdown(f"[開啟 MOPS 詳情]({m.detail_url})")
+                                mat_key = _mops_session_key("mops_mat", m.detail_url)
+                                cached_text = st.session_state.get(mat_key, "")
+                                if cached_text:
+                                    st.text(cached_text)
+                                if st.button(
+                                    "抓取完整內文",
+                                    key=f"mops_mat_detail_{mt}_{i}",
+                                ):
+                                    with st.spinner("抓取中…"):
+                                        text = fetch_material_detail(m.detail_url)
+                                    if text:
+                                        st.session_state[mat_key] = text
+                                        from bot.auto_llm import (
+                                            patch_material_detail_in_cache,
+                                        )
+                                        patch_material_detail_in_cache(
+                                            mt, PROJECT_ROOT,
+                                            detail_url=m.detail_url, text=text,
+                                        )
+                                        st.rerun()
+                                    else:
+                                        st.warning("抓取失敗或無內容。")
+                            else:
+                                st.caption("此筆無詳情連結（常見於 OpenAPI 當日重訊）。")
                 else:
-                    st.info("查無資料。")
+                    if mat_stats.get("mops_blocked"):
+                        st.warning(
+                            f"{mt} 的 MOPS 歷史重訊被安全性阻擋，且 OpenAPI 當日無此股重訊。"
+                            "請稍後重試或設定 `MOPS_HOST`。"
+                        )
+                    elif int(mat_stats.get("openapi_count", 0)) > 0:
+                        st.info(
+                            "僅有 OpenAPI 當日重訊且無 MOPS 歷史補齊；"
+                            "當日重訊通常無詳情連結。"
+                        )
+                    else:
+                        st.info("查無資料（非交易日或該股近期無公告）。")
 
     with tab_logic:
         st.caption("用『法說會語意』+『籌碼面』交叉檢驗管理階層是否言行一致")
@@ -2697,6 +3026,7 @@ def page_watchlist() -> None:
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
         st.markdown("**建議行動門檻** — `≥78 強烈買進 / ≥62 買進 / ≥45 觀望 / ≥30 減碼 / <30 賣出`")
+        st.caption(ADVISORY_RULE_NOTE)
         strat_rows = []
         for tf, r in STRATEGY_RULES.items():
             strat_rows.append({
@@ -2748,10 +3078,18 @@ def page_watchlist() -> None:
             "依勾選狀態決定是否補抓外部資料或呼叫 Gemini。"
         ),
     ):
+        st.session_state["watchlist_calc_pending"] = True
         st.session_state.pop("watchlist_cards", None)
+        st.rerun()
 
     cards = st.session_state.get("watchlist_cards")
     if cards is None:
+        if not st.session_state.get("watchlist_calc_pending"):
+            st.info(
+                "按 **🤖 計算評分** 才會載入表格（預設不自動計算，避免換頁或首次進入卡頓）。"
+            )
+            return
+        st.session_state.pop("watchlist_calc_pending", None)
         status = st.status("準備計算 watchlist 評分", expanded=True)
         status.write(f"檢查清單：{len(wlist.items)} 檔，優先讀取本地 SQLite / CSV / JSON。")
         if any((refresh_chips, refresh_tech, refresh_fund, refresh_dist)):
@@ -3828,7 +4166,7 @@ def page_ticker_detail() -> None:
     cache_key = (
         f"detail_{ticker}_{refresh_chips}_{refresh_technicals}_"
         f"{refresh_fundamentals}_{refresh_distribution}_"
-        f"{auto_fill_missing}_{auto_llm}"
+        f"{auto_fill_missing}_{auto_llm}_llmv3"
     )
     if (
         st.session_state.get("detail_cache_key") != cache_key
@@ -4019,6 +4357,17 @@ def page_ticker_detail() -> None:
         else:
             st.info("尚無 LLM 法說分析。請在「LLM 法說分析」頁或「自動化管線」中執行。")
 
+        with st.expander("📄 查看原始素材 (MOPS / 新聞 / 網頁 / LLM 輸入)", expanded=False):
+            if snap.llm_analysis and snap.llm_source_sections:
+                st.caption(
+                    "上方 LLM 摘要可能來自 pipeline；下方原始素材來自 auto_llm 快取。"
+                )
+            _render_earnings_source_panel(
+                snap.ticker,
+                source_sections=snap.llm_source_sections,
+                key_prefix=f"ticker_detail_{snap.ticker}",
+            )
+
         st.markdown("#### 言行反查")
         if snap.logic_check:
             lc = snap.logic_check
@@ -4176,7 +4525,7 @@ def page_ticker_detail() -> None:
                         zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
                             color="gray", strokeDash=[4, 4],
                         ).encode(y="y:Q")
-                        st.altair_chart(zero + chart, use_container_width=True)
+                        _display_altair(zero + chart, width=700, fallback_df=df_c)
                     except Exception:
                         st.line_chart(df_c.set_index("date")[
                             [c for c in ["外資累計", "投信累計", "自營累計"] if c in df_c.columns]
@@ -4218,7 +4567,7 @@ def page_ticker_detail() -> None:
                     y=alt.Y("比例:Q", title="持股比例 %"),
                     color=alt.Color("類別:N"),
                 ).properties(height=260)
-                st.altair_chart(chart, use_container_width=True)
+                _display_altair(chart, width=700, fallback_df=df_dist)
             except Exception:
                 st.dataframe(df_dist, hide_index=True, use_container_width=True)
         else:
@@ -4367,7 +4716,7 @@ def _render_fundamentals_tab(snap) -> None:
                 y=alt.Y("YoY %:Q", title="YoY %"),
             )
             chart = alt.layer(bar, yoy_line).resolve_scale(y="independent").properties(height=320)
-            st.altair_chart(chart, use_container_width=True)
+            _display_altair(chart, width=700, fallback_df=df_rev)
         except Exception:
             pass
         st.dataframe(df_rev, hide_index=True, use_container_width=True)
@@ -4397,7 +4746,7 @@ def _render_fundamentals_tab(snap) -> None:
                 y=alt.Y("%:Q", title="比率 (%)"),
                 color="指標:N",
             ).properties(height=300)
-            st.altair_chart(chart, use_container_width=True)
+            _display_altair(chart, width=700, fallback_df=df_q)
         except Exception:
             pass
         st.dataframe(df_q, hide_index=True, use_container_width=True)
@@ -4541,7 +4890,7 @@ def _render_dividends_tab(snap) -> None:
             y=alt.Y("元:Q", title="每股股利"),
             color="類別:N",
         ).properties(height=280, title="歷年股利")
-        st.altair_chart(chart, use_container_width=True)
+        _display_altair(chart, width=700, fallback_df=df_d)
     except Exception:
         pass
     st.dataframe(df_d, hide_index=True, use_container_width=True)
@@ -4618,7 +4967,7 @@ def _render_quarterly_tab(snap) -> None:
                 color="序列:N",
                 xOffset="序列:N",
             ).properties(height=260, title="滾動 EPS vs 去年同期")
-            st.altair_chart(chart, use_container_width=True)
+            _display_altair(chart, width=700, fallback_df=df_eps)
         except Exception:
             pass
     else:
@@ -4651,7 +5000,7 @@ def _render_quarterly_tab(snap) -> None:
                 y=alt.Y("季營收:Q"),
                 tooltip=["年季", "季營收", "YoY %"],
             ).properties(height=240, title="季度營收")
-            st.altair_chart(chart, use_container_width=True)
+            _display_altair(chart, width=700, fallback_df=df_qr)
         except Exception:
             pass
     else:
@@ -5184,23 +5533,45 @@ def _render_kline_workspace(
         st.info("請至少選擇一個面板。")
         return
 
+    def _render_ws_panel(panel_key: str, chart: Any, *, panel_width: int = 700) -> None:
+        if panel_key == "kline":
+            _display_altair(
+                chart, width=panel_width, fallback_df=df_slice,
+                use_ohlc_native=True, chart_height=300,
+            )
+        elif panel_key == "volume" and "volume" in df_slice.columns:
+            vol_df = df_slice.copy()
+            vol_df["date"] = pd.to_datetime(vol_df["date"])
+            st.bar_chart(vol_df, x="date", y="volume", height=100)
+        elif panel_key == "macd" and "macd" in df_slice.columns:
+            from bot.dashboard.common import _display_macd_native
+            _display_macd_native(df_slice, height=180)
+        elif panel_key == "rsi" and "rsi" in df_slice.columns:
+            from bot.dashboard.common import _display_rsi_native
+            _display_rsi_native(df_slice, height=140)
+        else:
+            _display_altair(
+                chart, width=panel_width, fallback_df=df_slice,
+                use_ohlc_native=False,
+            )
+
     if layout_mode == "堆疊":
-        for _, _, chart in panels:
-            st.altair_chart(chart, use_container_width=True)
+        for pkey, _, chart in panels:
+            _render_ws_panel(pkey, chart)
     elif layout_mode == "分頁":
         labels = [label for _, label, _ in panels]
         tabs_obj = st.tabs(labels)
-        for i, (_, _, chart) in enumerate(panels):
+        for i, (pkey, _, chart) in enumerate(panels):
             with tabs_obj[i]:
-                st.altair_chart(chart, use_container_width=True)
+                _render_ws_panel(pkey, chart)
     else:  # 並排兩欄
         for i in range(0, len(panels), 2):
             cols = st.columns(2)
             for j in range(2):
                 if i + j < len(panels):
-                    _, _, chart = panels[i + j]
+                    pkey, _, chart = panels[i + j]
                     with cols[j]:
-                        st.altair_chart(chart, use_container_width=True)
+                        _render_ws_panel(pkey, chart, panel_width=480)
 
 
 def _make_panel_chart(
@@ -5496,9 +5867,22 @@ def _render_grid_view(
             if patt:
                 st.caption(f"型態：{patt}")
             if bars:
-                chart = _spark_chart(bars, height=110, candle_width=candle_width)
-                if chart is not None:
-                    st.altair_chart(chart, use_container_width=True)
+                from bot.dashboard.common import _display_candlestick_chart
+
+                ohlc = [
+                    {
+                        "date": b.date,
+                        "open": b.open,
+                        "high": b.high,
+                        "low": b.low,
+                        "close": b.close,
+                    }
+                    for b in bars
+                ]
+                _display_candlestick_chart(
+                    ohlc, width=300, height=120,
+                    log_key=f"spark_{sym}", show_bar_count=True,
+                )
             else:
                 st.caption("無 K 線資料 - 點上方『一鍵更新』")
 
@@ -5549,10 +5933,13 @@ def _render_compare_view(
                     height=300, title=f"{sym}",
                 )
                 vol = _volume_panel(df_ind, height=80)
-                if chart is not None:
-                    st.altair_chart(chart, use_container_width=True)
-                if vol is not None:
-                    st.altair_chart(vol, use_container_width=True)
+                _display_altair(
+                    chart, width=700, fallback_df=df_ind,
+                    chart_key=f"kline_cmp_{sym}",
+                    use_ohlc_native=True,
+                    include_volume=True,
+                    chart_height=300,
+                )
 
 
 def _render_focus_view(
@@ -5662,7 +6049,11 @@ def _run_batch_extend(symbols: List[str], years: int, delay: float) -> None:
 
 def page_board() -> None:
     """K 線看板：縮圖 grid / 並排大圖 / 單檔專注三種模式 + 長時間範圍 + 批次往前抓。"""
+    from bot.dashboard.common import DASHBOARD_UI_BUILD, _debug_log_session
+
     st.title("📊 K 線看板 (Stock Board)")
+    st.success(f"✅ K 線看板 · `{DASHBOARD_UI_BUILD}`（matplotlib 蠟燭圖）")
+    st.caption(f"渲染引擎：`{DASHBOARD_UI_BUILD}`（側邊欄亦應顯示相同版本）")
     st.caption(
         "三種看板模式：縮圖 grid (多檔一覽) · 並排大圖 (2~3 檔比較) · 單檔專注 (完整 K 線工作台)。"
         "資料來源為本地 SQLite `price_history`，"
@@ -5687,6 +6078,13 @@ def page_board() -> None:
     if source == "Watchlist":
         wlist = wl.load(PROJECT_ROOT)
         symbols = [i.ticker for i in wlist.items]
+        if not symbols:
+            symbols = db.list_price_symbols()
+            if symbols:
+                st.info(
+                    "Watchlist 為空，已自動改顯示 DB 內所有已有 K 線的 symbol。"
+                    "可到「個股總覽」加入 watchlist 後再切回此來源。"
+                )
     elif source == "DB 已有資料的全部 symbol":
         symbols = db.list_price_symbols()
     else:
@@ -5697,7 +6095,10 @@ def page_board() -> None:
         symbols = [s.strip() for s in custom.split(",") if s.strip()]
 
     if not symbols:
-        st.info("尚未選定股票。可到「個股總覽」加入 watchlist，或選『自訂』直接輸入代號。")
+        st.warning(
+            "尚無可顯示的股票：Watchlist 為空且 DB 也無 `price_history`。"
+            "請點下方「一鍵更新所有 K 線」或到「個股深入分析」抓取。"
+        )
         return
 
     # ---- 時間範圍 + 抓取選項 ----
@@ -5766,7 +6167,14 @@ def page_board() -> None:
             _run_batch_extend(symbols, ext_years, ext_delay)
 
     # ---- 摘要表 ----
-    summary = _board_rows_summary(symbols, db)
+    from bot.dashboard.cache_helpers import cached_board_rows_summary
+
+    db_mtime = db.path.stat().st_mtime if db.path.exists() else 0.0
+    summary = cached_board_rows_summary(
+        ",".join(symbols),
+        db_mtime,
+        str(PROJECT_ROOT),
+    )
     if summary.empty:
         st.warning("symbols 為空。")
         return
@@ -5813,9 +6221,28 @@ def page_board() -> None:
     )
 
     sorted_syms = df_view["symbol"].tolist()
+    _debug_log_session(
+        "H15",
+        "pages.py:page_board",
+        "kline board render",
+        {
+            "view_mode": view_mode,
+            "symbol_count": len(sorted_syms),
+            "source": source,
+        },
+    )
+    no_bar = [s for s in sorted_syms if not db.get_price_history(s, limit=1, ascending=True)]
+    if no_bar:
+        st.warning(
+            f"{len(no_bar)} 檔尚無 K 線資料（例：{', '.join(no_bar[:5])}）。"
+            "請點「一鍵更新所有 K 線」。"
+        )
 
     # ---- 三種顯示模式 ----
     if view_mode == "縮圖 grid":
+        st.caption(
+            "縮圖為蠟燭 K 線；「並排大圖」「單檔專注」為完整 K 線 + 均線/成交量/指標。"
+        )
         _render_grid_view(
             sorted_syms, df_view, db,
             n_days=n_days,
@@ -6451,80 +6878,140 @@ def page_intraday() -> None:
                 st.rerun()
 
 
-def page_intraday_live() -> None:
-    st.title("⚡ 今日當沖即時追蹤")
+def page_market_movers() -> None:
+    st.title("📊 盤中強弱排行")
     st.caption(
-        "自動刷新今天 LLM 點名過的股票，只更新公開資料/本地狀態；"
-        "LLM 即時推演與檢討必須手動按鈕觸發。"
-    )
-    _llm_caption(
-        "下方追蹤表格自動刷新不會呼叫 LLM。只有按「手動刷新 LLM 即時推演 / 檢討」時，"
-        "才會把早盤分析、刷新後狀態、新聞與宏觀資料送 Gemini。"
+        "TWSE MIS 全市場掃描 → 依即時漲跌幅排序。"
+        "資料有約 20–30 秒快取，避免每次換頁重打數十批 API。"
     )
 
-    from bot.config import Settings as S
-    from bot.intraday_live import (
-        build_live_tracking_rows,
-        load_live_review,
-        save_live_review,
-    )
+    from bot.dashboard.cache_helpers import cached_market_movers
+    from bot.intraday_live import extract_llm_mentions
     from bot.intraday_pipeline import load_intraday_by_date
     from bot.utils import now_tw
 
-    today = now_tw().date()
-    report = load_intraday_by_date(PROJECT_ROOT, today)
-    if not report:
-        st.warning("今天尚無當沖戰情室報告。請先到「今日當沖戰情室」執行一次盤前/重跑流程。")
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+    direction = c1.selectbox(
+        "排序",
+        options=["gainers", "losers", "abs"],
+        format_func=lambda x: {
+            "gainers": "漲幅 Top",
+            "losers": "跌幅 Top",
+            "abs": "振幅 Top (|漲跌%|)",
+        }[x],
+        key="movers_direction",
+    )
+    top_n = int(c2.number_input("顯示檔數", min_value=10, max_value=100, value=50, step=10))
+    exclude_etf = c3.toggle("排除 ETF", value=True, key="movers_exclude_etf")
+    force = c4.button("🔄 強制重掃", use_container_width=True)
+
+    if force:
+        cached_market_movers.clear()
+        st.rerun()
+
+    with st.spinner("掃描全市場 MIS 報價（首次約 10–20 秒）..."):
+        payload = cached_market_movers(
+            top_n,
+            direction,
+            exclude_etf,
+            str(PROJECT_ROOT),
+        )
+
+    rows = payload.get("rows") or []
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("掃描代號", payload.get("scanned", 0))
+    m2.metric("有效報價", payload.get("quoted", 0))
+    m3.metric("API 批次", payload.get("batch_count", 0))
+    m4.metric("耗時 (秒)", payload.get("duration_sec", 0))
+
+    if payload.get("errors"):
+        with st.expander("掃描警告", expanded=False):
+            for err in payload["errors"]:
+                st.caption(f"• {err}")
+
+    if not rows:
+        st.warning("尚無有效報價（可能非盤中、或 MIS 暫時無資料）。")
         return
 
-    controls = st.columns([1.2, 1, 0.9, 1.2, 1])
-    max_tickers = int(controls[0].number_input(
-        "追蹤檔數",
-        min_value=5,
-        max_value=30,
-        value=12,
-        step=1,
-        help="從 LLM 排名與題材候選中依序取出。",
-    ))
-    auto_refresh = controls[1].toggle(
-        "自動刷新",
-        value=True,
-        key="intraday_live_auto_refresh",
-        help="只刷新表格資料，不會自動呼叫 LLM。",
-    )
-    refresh_seconds = int(controls[2].number_input(
-        "秒數",
-        min_value=10,
-        max_value=180,
-        value=30,
-        step=10,
-    ))
-    refresh_technicals = controls[3].toggle(
-        "慢速技術重算",
-        value=False,
-        key="intraday_live_refresh_tech",
-        help="開啟後才會重新抓公開 K 線/技術資料；自動刷新預設只抓即時報價。",
-    )
-    refresh_chips = controls[4].toggle(
-        "刷新籌碼",
-        value=False,
-        key="intraday_live_refresh_chips",
-        help="較慢；通常手動 LLM 檢討時會自動納入。",
+    table_rows = []
+    for r in rows:
+        table_rows.append({
+            "代號": r.get("ticker", ""),
+            "名稱": r.get("name", ""),
+            "即時價": r.get("price"),
+            "漲跌%": r.get("pct_chg"),
+            "成交量": r.get("volume"),
+            "昨收": r.get("prev_close"),
+            "價格基準": r.get("price_basis", ""),
+            "報價時間": r.get("quote_time", ""),
+        })
+    df = pd.DataFrame(table_rows)
+    st.dataframe(
+        df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "即時價": st.column_config.NumberColumn(format="%.2f"),
+            "漲跌%": st.column_config.NumberColumn(format="%+.2f%%"),
+            "成交量": st.column_config.NumberColumn(format="%.0f"),
+            "昨收": st.column_config.NumberColumn(format="%.2f"),
+        },
     )
 
-    if st.button("立即刷新追蹤表", use_container_width=True):
-        st.session_state["intraday_live_force_refresh"] = time.time()
+    today = now_tw().date()
+    report = load_intraday_by_date(PROJECT_ROOT, today)
+    if report:
+        mentions = {m["ticker"] for m in extract_llm_mentions(report, max_tickers=30)}
+        overlap = [r for r in rows if r.get("ticker") in mentions]
+        if overlap:
+            st.markdown("#### 與今日當沖戰情室交集")
+            st.caption("同時出現在 LLM 排名/題材與本表 Top 的標的。")
+            st.dataframe(
+                pd.DataFrame([{
+                    "代號": r.get("ticker"),
+                    "名稱": r.get("name"),
+                    "漲跌%": r.get("pct_chg"),
+                } for r in overlap]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    pick = st.selectbox(
+        "跳轉深入分析",
+        ["(none)"] + [f"{r.get('ticker')} {r.get('name', '')}" for r in rows[:20]],
+        key="movers_pick",
+    )
+    if pick != "(none)":
+        tk = pick.split()[0]
+        if st.button(f"開啟 {tk} 個股深入分析", key="movers_open_detail"):
+            st.session_state["detail_ticker"] = tk
+            st.session_state.pop("detail_cache", None)
+            st.session_state.pop("detail_cache_key", None)
+            st.session_state["page"] = "個股深入分析"
+            st.rerun()
+
+
+def _render_intraday_live_tracking_table(
+    report: Dict[str, Any],
+    today: dt.date,
+    *,
+    report_date: str,
+    tickers_key: str,
+    max_tickers: int,
+    refresh_technicals: bool,
+    refresh_chips: bool,
+) -> List[Dict[str, Any]]:
+    """渲染當沖即時追蹤表；回傳 rows 供下方 LLM 區塊使用。"""
+    from bot.dashboard.cache_helpers import cached_intraday_tracking
 
     with st.spinner("刷新今日 LLM 點名股票狀態..."):
-        tracking = build_live_tracking_rows(
-            report,
-            root=PROJECT_ROOT,
-            max_tickers=max_tickers,
-            refresh_quotes=True,
-            refresh_technicals=refresh_technicals,
-            refresh_chips=refresh_chips,
-            refresh_news=False,
-            include_news=False,
+        tracking = cached_intraday_tracking(
+            report_date,
+            tickers_key,
+            max_tickers,
+            refresh_technicals,
+            refresh_chips,
+            str(PROJECT_ROOT),
         )
 
     rows = tracking.get("rows") or []
@@ -6536,7 +7023,7 @@ def page_intraday_live() -> None:
 
     if not rows:
         st.info("今日 LLM 報告沒有可追蹤的股票代號。")
-        return
+        return []
 
     stale_count = sum(
         1
@@ -6620,6 +7107,115 @@ def page_intraday_live() -> None:
             "技術變化": st.column_config.NumberColumn(format="%+.1f"),
         },
     )
+    return rows
+
+
+def page_intraday_live() -> None:
+    st.title("⚡ 今日當沖即時追蹤")
+    st.caption(
+        "自動刷新今天 LLM 點名過的股票，只更新公開資料/本地狀態；"
+        "LLM 即時推演與檢討必須手動按鈕觸發。"
+    )
+    _llm_caption(
+        "下方追蹤表格自動刷新不會呼叫 LLM。只有按「手動刷新 LLM 即時推演 / 檢討」時，"
+        "才會把早盤分析、刷新後狀態、新聞與宏觀資料送 Gemini。"
+    )
+
+    from bot.config import Settings as S
+    from bot.intraday_live import (
+        build_live_tracking_rows,
+        load_live_review,
+        save_live_review,
+    )
+    from bot.intraday_pipeline import load_intraday_by_date
+    from bot.utils import now_tw
+
+    today = now_tw().date()
+    report = load_intraday_by_date(PROJECT_ROOT, today)
+    if not report:
+        st.warning("今天尚無當沖戰情室報告。請先到「今日當沖戰情室」執行一次盤前/重跑流程。")
+        return
+
+    controls = st.columns([1.2, 1, 0.9, 1.2, 1])
+    max_tickers = int(controls[0].number_input(
+        "追蹤檔數",
+        min_value=5,
+        max_value=30,
+        value=12,
+        step=1,
+        help="從 LLM 排名與題材候選中依序取出。",
+    ))
+    auto_refresh = controls[1].toggle(
+        "自動刷新",
+        value=True,
+        key="intraday_live_auto_refresh",
+        help="只刷新表格資料，不會自動呼叫 LLM。",
+    )
+    refresh_seconds = int(controls[2].number_input(
+        "秒數",
+        min_value=10,
+        max_value=180,
+        value=30,
+        step=10,
+    ))
+    refresh_technicals = controls[3].toggle(
+        "慢速技術重算",
+        value=False,
+        key="intraday_live_refresh_tech",
+        help="開啟後才會重新抓公開 K 線/技術資料；自動刷新預設只抓即時報價。",
+    )
+    refresh_chips = controls[4].toggle(
+        "刷新籌碼",
+        value=False,
+        key="intraday_live_refresh_chips",
+        help="較慢；通常手動 LLM 檢討時會自動納入。",
+    )
+
+    from bot.dashboard.cache_helpers import cached_intraday_tracking
+    from bot.intraday_live import extract_llm_mentions
+
+    if st.button("立即刷新追蹤表", use_container_width=True):
+        cached_intraday_tracking.clear()
+        st.rerun()
+
+    tickers_key = ",".join(
+        m["ticker"]
+        for m in extract_llm_mentions(report, max_tickers=max_tickers)
+    )
+    report_date = str(report.get("asof") or today.isoformat())
+
+    tracking_kwargs = dict(
+        report=report,
+        today=today,
+        report_date=report_date,
+        tickers_key=tickers_key,
+        max_tickers=max_tickers,
+        refresh_technicals=refresh_technicals,
+        refresh_chips=refresh_chips,
+    )
+
+    def _live_tracking_fragment() -> None:
+        last_rows = _render_intraday_live_tracking_table(**tracking_kwargs)
+        st.session_state["intraday_live_last_rows"] = last_rows
+
+    if auto_refresh and hasattr(st, "fragment"):
+        _run_every = dt.timedelta(seconds=max(refresh_seconds, 20))
+        try:
+            _live_tracking_fragment = st.fragment(run_every=_run_every)(_live_tracking_fragment)
+        except TypeError:
+            _live_tracking_fragment = st.fragment(_live_tracking_fragment)
+        _live_tracking_fragment()
+        st.caption(
+            f"自動刷新：約每 {max(refresh_seconds, 20)} 秒更新表格區塊（不阻塞整頁、不呼叫 LLM）。"
+        )
+    else:
+        _live_tracking_fragment()
+        if auto_refresh:
+            st.caption("此 Streamlit 版本不支援 fragment 自動刷新；請用「立即刷新追蹤表」。")
+
+    rows = st.session_state.get("intraday_live_last_rows") or []
+    if not rows:
+        return
 
     st.markdown("### LLM 即時推演 / 檢討")
     latest_review = load_live_review(PROJECT_ROOT, today)
@@ -6713,11 +7309,6 @@ def page_intraday_live() -> None:
         st.markdown(latest_review["markdown"])
     else:
         st.caption("尚未做過手動 LLM 即時推演。")
-
-    if auto_refresh and not ran_manual_llm:
-        st.caption(f"自動刷新已開啟：{refresh_seconds} 秒後更新追蹤表。LLM 不會自動呼叫。")
-        time.sleep(refresh_seconds)
-        st.rerun()
 
 
 # ======================================================================
@@ -7020,6 +7611,233 @@ def page_next_day_watch() -> None:
 
 
 # ======================================================================
+# 頁面: 熱門個股期貨 (TAIFEX MIS)
+# ======================================================================
+
+
+def page_hot_stock_futures() -> None:
+    from bot.dashboard.cache_helpers import cached_hot_stock_futures
+    from bot.hot_stock_futures import TAIFEX_MIS_PAGE_URL
+
+    st.title("🔥 熱門個股期貨")
+    st.caption(
+        f"資料來源：[TAIFEX MIS 熱門個股期貨]({TAIFEX_MIS_PAGE_URL}) · "
+        "即時期貨最新價、漲跌與漲跌幅（CDiffRate）。"
+        "MIS API 每次回傳約 10 檔熱門契約快照（與官網同頁），"
+        "約 20 秒快取。"
+    )
+
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    direction = c1.selectbox(
+        "排序",
+        options=["volume", "gainers", "losers", "abs"],
+        format_func=lambda x: {
+            "volume": "成交量 Top",
+            "gainers": "漲幅 Top",
+            "losers": "跌幅 Top",
+            "abs": "振幅 Top (|漲跌%|)",
+        }[x],
+        key="hsf_direction",
+    )
+    top_n = int(c2.number_input("顯示檔數", min_value=5, max_value=50, value=20, step=5))
+    force = c3.button("🔄 強制重抓", use_container_width=True, key="hsf_refresh")
+
+    if force:
+        cached_hot_stock_futures.clear()
+        st.rerun()
+
+    with st.spinner("抓取 TAIFEX 熱門個股期貨..."):
+        payload = cached_hot_stock_futures(
+            top_n,
+            direction,
+            str(PROJECT_ROOT),
+        )
+
+    rows = payload.get("rows") or []
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("市場總檔數", payload.get("quote_count", 0))
+    m2.metric("本次回傳", payload.get("fetched", 0))
+    m3.metric("顯示檔數", len(rows))
+    m4.metric("耗時 (秒)", payload.get("duration_sec", 0))
+
+    if payload.get("errors"):
+        with st.expander("抓取警告", expanded=False):
+            for err in payload["errors"]:
+                st.caption(f"• {err}")
+
+    if not rows:
+        st.warning("尚無有效報價（可能非交易時段，或 TAIFEX MIS 暫時無資料）。")
+        return
+
+    table_rows = []
+    for r in rows:
+        table_rows.append({
+            "現貨代號": r.get("spot_id", ""),
+            "期貨代碼": r.get("symbol_id", ""),
+            "名稱": r.get("name", ""),
+            "最新價": r.get("last_price"),
+            "漲跌": r.get("diff"),
+            "漲跌%": r.get("pct_chg"),
+            "振幅%": r.get("amp_rate"),
+            "成交量": r.get("volume"),
+            "參考價": r.get("ref_price"),
+            "買一": r.get("bid_price"),
+            "賣一": r.get("ask_price"),
+            "最高": r.get("high_price"),
+            "最低": r.get("low_price"),
+            "時間": r.get("quote_time", ""),
+        })
+    df = pd.DataFrame(table_rows)
+    st.dataframe(
+        df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "最新價": st.column_config.NumberColumn(format="%.2f"),
+            "漲跌": st.column_config.NumberColumn(format="%+.2f"),
+            "漲跌%": st.column_config.NumberColumn(format="%+.2f%%"),
+            "振幅%": st.column_config.NumberColumn(format="%.2f%%"),
+            "成交量": st.column_config.NumberColumn(format="%.0f"),
+            "參考價": st.column_config.NumberColumn(format="%.2f"),
+            "買一": st.column_config.NumberColumn(format="%.2f"),
+            "賣一": st.column_config.NumberColumn(format="%.2f"),
+            "最高": st.column_config.NumberColumn(format="%.2f"),
+            "最低": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+
+    spot_ids = [r.get("spot_id") for r in rows if r.get("spot_id")]
+    if spot_ids:
+        pick = st.selectbox(
+            "跳轉現貨深入分析",
+            ["(none)"] + spot_ids,
+            key="hsf_pick",
+        )
+        if pick != "(none)" and st.button(f"開啟 {pick} 個股深入分析", key="hsf_open_detail"):
+            st.session_state["detail_ticker"] = pick
+            st.session_state.pop("detail_cache", None)
+            st.session_state.pop("detail_cache_key", None)
+            st.session_state["page"] = "個股深入分析"
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### 📍 約 10 元現貨 · 成交熱度位置")
+    st.caption(
+        "TWSE MIS 全市場掃描 → 篩選價格區間 → 依成交量排名。"
+        "「區間熱度」為該價帶內排名；「全市場量排名」為全體有量股票的成交量名次。"
+        "兩檔% 反映 10 元附近每兩檔約 1% 的刻度適配度。"
+    )
+
+    from bot.dashboard.cache_helpers import cached_price_band_heat
+    from bot.price_band_heat import DEFAULT_PRICE_HIGH, DEFAULT_PRICE_LOW
+
+    f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
+    price_low = float(f1.number_input(
+        "價格下限",
+        min_value=5.0,
+        max_value=20.0,
+        value=DEFAULT_PRICE_LOW,
+        step=0.5,
+        key="pbh_low",
+    ))
+    price_high = float(f2.number_input(
+        "價格上限",
+        min_value=5.0,
+        max_value=20.0,
+        value=DEFAULT_PRICE_HIGH,
+        step=0.5,
+        key="pbh_high",
+    ))
+    band_top_n = int(f3.number_input(
+        "顯示檔數",
+        min_value=10,
+        max_value=100,
+        value=40,
+        step=10,
+        key="pbh_top_n",
+    ))
+    exclude_dr = f4.toggle("排除 DR", value=True, key="pbh_exclude_dr")
+    band_force = st.button("🔄 重掃成交熱度", key="pbh_refresh")
+
+    if band_force:
+        cached_price_band_heat.clear()
+        st.rerun()
+
+    with st.spinner("掃描全市場 MIS（約 10–20 秒）..."):
+        band_payload = cached_price_band_heat(
+            price_low,
+            price_high,
+            band_top_n,
+            exclude_dr,
+            str(PROJECT_ROOT),
+        )
+
+    band_rows = band_payload.get("rows") or []
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("價格區間", f"{band_payload.get('price_low', 0):.1f}–{band_payload.get('price_high', 0):.1f}")
+    b2.metric("區間內檔數", band_payload.get("band_count", 0))
+    b3.metric("全市場掃描", band_payload.get("scanned", 0))
+    b4.metric("耗時 (秒)", band_payload.get("duration_sec", 0))
+
+    if band_payload.get("errors"):
+        with st.expander("掃描警告", expanded=False):
+            for err in band_payload["errors"]:
+                st.caption(f"• {err}")
+
+    if not band_rows:
+        st.info("此價格區間內尚無有效報價（可能非盤中）。")
+        return
+
+    watch_rows = [r for r in band_rows if r.get("in_watchlist")]
+    if watch_rows:
+        st.markdown("**建議監控清單 · 熱度位置**")
+        st.dataframe(
+            pd.DataFrame([{
+                "區間熱度": r.get("band_rank"),
+                "代號": r.get("ticker"),
+                "名稱": r.get("name"),
+                "現價": r.get("price"),
+                "漲跌%": r.get("pct_chg"),
+                "成交量": r.get("volume"),
+                "全市場量排名": r.get("market_volume_rank"),
+                "兩檔%": r.get("tick2_pct"),
+            } for r in sorted(watch_rows, key=lambda x: x.get("band_rank", 9999))]),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "現價": st.column_config.NumberColumn(format="%.2f"),
+                "漲跌%": st.column_config.NumberColumn(format="%+.2f%%"),
+                "成交量": st.column_config.NumberColumn(format="%.0f"),
+                "兩檔%": st.column_config.NumberColumn(format="%.2f%%"),
+            },
+        )
+
+    st.markdown("**區間成交熱度 Top**")
+    st.dataframe(
+        pd.DataFrame([{
+            "區間熱度": r.get("band_rank"),
+            "代號": r.get("ticker"),
+            "名稱": r.get("name"),
+            "監控": "★" if r.get("in_watchlist") else "",
+            "現價": r.get("price"),
+            "漲跌%": r.get("pct_chg"),
+            "成交量": r.get("volume"),
+            "全市場量排名": r.get("market_volume_rank"),
+            "兩檔%": r.get("tick2_pct"),
+            "時間": r.get("quote_time", ""),
+        } for r in band_rows]),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "現價": st.column_config.NumberColumn(format="%.2f"),
+            "漲跌%": st.column_config.NumberColumn(format="%+.2f%%"),
+            "成交量": st.column_config.NumberColumn(format="%.0f"),
+            "兩檔%": st.column_config.NumberColumn(format="%.2f%%"),
+        },
+    )
+
+
+# ======================================================================
 # 頁面: 美股 / 跨市場
 # ======================================================================
 
@@ -7219,7 +8037,7 @@ def page_market_calendar() -> None:
     )
 
     st.title("台股行事曆")
-    st.caption("整合法說會、除權息與重要國際科技展。日期以台北時間為準。")
+    st.caption("整合法說會、除權息、國際展覽與全球科技事件 (WWDC、GTC、CES 等)。日期以台北時間為準。")
 
     today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
     month_options = [_shift_month_for_ui(today, delta) for delta in range(-6, 10)]
@@ -7230,8 +8048,8 @@ def page_market_calendar() -> None:
     picked_month = ctrl[0].selectbox("月份", month_labels, index=default_idx, key="market_cal_month")
     selected_groups = ctrl[1].multiselect(
         "事件類型",
-        ["法說會", "除權息", "國際展覽"],
-        default=["法說會", "除權息", "國際展覽"],
+        ["法說會", "除權息", "國際展覽", "全球科技"],
+        default=["法說會", "除權息", "國際展覽", "全球科技"],
         key="market_cal_groups",
     )
     dividend_scope_label = ctrl[2].selectbox(
@@ -7254,6 +8072,7 @@ def page_market_calendar() -> None:
     include_conf = "法說會" in selected_groups
     include_div = "除權息" in selected_groups
     include_expo = "國際展覽" in selected_groups
+    include_global = "全球科技" in selected_groups
     dividend_scope = "all" if dividend_scope_label == "全部商品" else "stock"
 
     c_refresh, c_hint = st.columns([1, 4])
@@ -7262,9 +8081,12 @@ def page_market_calendar() -> None:
             from bot.conference_calendar import update_calendar
             status = st.status("更新市場行事曆資料", expanded=True)
             status.write("更新 MOPS 法說會快取。")
+            status.write("更新全球科技事件 (WWDC、GTC、Apple Newsroom 等)。")
             status.write("更新 TWSE/TPEx 除權息資料，並套用目前選擇的商品範圍。")
             try:
+                from bot.global_event_calendar import update_global_events
                 update_calendar(root=PROJECT_ROOT)
+                update_global_events(root=PROJECT_ROOT)
                 fetch_ex_dividend_events(
                     grid_start,
                     grid_end,
@@ -7280,7 +8102,9 @@ def page_market_calendar() -> None:
             st.rerun()
         except Exception as exc:  # noqa: BLE001
             st.error(f"更新失敗: {exc}")
-    c_hint.caption("展覽清單可編輯 `data/calendar/exhibitions.json`，缺檔時會自動產生初始清單。")
+    c_hint.caption(
+        "展覽：`data/calendar/exhibitions.json`；全球科技：`data/calendar/global_tech_events.json`。"
+    )
 
     status = st.status("載入市場行事曆", expanded=False)
     try:
@@ -7292,6 +8116,7 @@ def page_market_calendar() -> None:
                     ("法說會", include_conf),
                     ("除權息", include_div),
                     ("國際展覽", include_expo),
+                    ("全球科技", include_global),
                 )
                 if enabled
             )
@@ -7300,6 +8125,10 @@ def page_market_calendar() -> None:
             from bot.conference_calendar import ensure_calendar_fresh
             status.write("檢查 MOPS 法說會快取是否在 24 小時內。")
             ensure_calendar_fresh(root=PROJECT_ROOT, max_age_hours=24)
+        if include_global:
+            from bot.global_event_calendar import ensure_global_events_fresh
+            status.write("檢查全球科技事件快取是否在 12 小時內。")
+            ensure_global_events_fresh(root=PROJECT_ROOT, max_age_hours=12)
         events = build_market_calendar(
             grid_start,
             grid_end,
@@ -7307,6 +8136,7 @@ def page_market_calendar() -> None:
             include_conferences=include_conf,
             include_dividends=include_div,
             include_exhibitions=include_expo,
+            include_global_tech=include_global,
             dividend_security_scope=dividend_scope,
         )
         status.update(label=f"行事曆載入完成：{len(events)} 筆事件", state="complete", expanded=False)
@@ -7321,11 +8151,12 @@ def page_market_calendar() -> None:
 
     month_events = [e for e in events if e.overlaps(month_start, month_end)]
     upcoming = [e for e in month_events if e.effective_end_date >= today]
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("本月事件", len(month_events))
     m2.metric("法說會", sum(1 for e in month_events if e.category == "conference"))
     m3.metric("除權息", sum(1 for e in month_events if e.category.startswith("ex_")))
     m4.metric("展覽", sum(1 for e in month_events if e.category == "exhibition"))
+    m5.metric("全球科技", sum(1 for e in month_events if e.category == "global_tech"))
 
     st.markdown(
         _render_market_calendar_grid(
@@ -7348,7 +8179,8 @@ def page_market_calendar() -> None:
         st.markdown(
             "- 法說會：MOPS 法說會行事曆，沿用本專案 `conference_calendar` 快取。\n"
             "- 除權息：TWSE `TWT48U_ALL` 與 TPEx `tpex_exright_prepost` 官方 OpenAPI；預設只顯示個股，可切換全部商品。\n"
-            "- 展覽：`data/calendar/exhibitions.json`，預設只保留官方確認的主展：COMPUTEX、CYBERSEC、Automation Taipei、SEMICON Taiwan。"
+            "- 展覽：`data/calendar/exhibitions.json`，預設只保留官方確認的主展：COMPUTEX、CYBERSEC、Automation Taipei、SEMICON Taiwan。\n"
+            "- 全球科技：`data/calendar/global_tech_events.json`，自動抓取 WWDC、GTC、CES、MWC 與 Apple Newsroom 發表，並映射台股供應鏈。"
         )
         if month_events:
             source_rows = sorted({
@@ -7451,6 +8283,7 @@ def _render_market_calendar_grid(
 .market-cal-ex-right { border-left-color: #d97706; background: #fffbeb; }
 .market-cal-ex-right-dividend { border-left-color: #059669; background: #ecfdf5; }
 .market-cal-exhibition { border-left-color: #7c3aed; background: #f5f3ff; }
+.market-cal-global-tech { border-left-color: #ea580c; background: #fff7ed; }
 .market-cal-more {
   color: #64748b;
   font-size: 12px;
@@ -7493,6 +8326,8 @@ def _market_calendar_event_label(event: Any) -> str:
     if event.category == "conference":
         label = " ".join(x for x in (event.time, event.ticker, event.company, "法說") if x)
     elif event.category == "exhibition":
+        label = event.title
+    elif event.category == "global_tech":
         label = event.title
     else:
         label = " ".join(x for x in (event.ticker, event.company, event.category_label) if x)

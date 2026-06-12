@@ -23,7 +23,7 @@ inputs:
     desc: 美股盤後或盤中關鍵指標 (S&P/NASDAQ/SOX/VIX 漲跌、ADR 溢價)
   - name: catalyst_text
     required: false
-    desc: 明日法說會、財報、權息、政策事件清單
+    desc: 明日法說會、財報、權息、全球科技發表會 (WWDC/GTC/CES)、國際展覽事件清單
 output_format: json
 template: |
   你是專注台股「**明日當沖預備**」的盤後策略分析師。請依下列資料萃取明日 ({target_date}) 的當沖預備清單。
@@ -50,7 +50,7 @@ template: |
     ],
     "event_focus": [
       {{
-        "event": "事件名稱 (例：台積電法說、權息日)",
+        "event": "事件名稱 (例：台積電法說、WWDC Keynote、COMPUTEX、權息日)",
         "event_time": "明日上午 / 明日下午 / 盤前 / 盤後 / 未指定",
         "tickers": [
           {{"ticker": "代號", "name": "公司名", "side": "受惠 | 受壓 | 中性"}}

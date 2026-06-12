@@ -50,6 +50,7 @@ def _session() -> requests.Session:
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-TW,zh;q=0.9",
+        "Referer": "https://www.twse.com.tw/zh/",
     })
     return s
 
@@ -102,6 +103,86 @@ def _to_float(x: Any) -> float:
         return 0.0
 
 
+@dataclass
+class MonthlyKlineResult:
+    """單月日 K 抓取結果（含 HTTP 狀態，供慢速排程判斷限流）。"""
+
+    rows: List[Dict[str, Any]]
+    http_status: int = 0
+    error: str = ""
+
+
+def fetch_monthly_kline_with_meta(
+    ticker: str,
+    year: int,
+    month: int,
+    *,
+    market: str = "twse",
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+) -> MonthlyKlineResult:
+    """抓單月日 K 並回傳 HTTP 狀態。"""
+    if market == "tpex":
+        rows = _fetch_tpex_monthly_kline(
+            ticker, year, month, session=session, logger=logger,
+        )
+        return MonthlyKlineResult(rows=rows, http_status=200 if rows else 0)
+
+    log = logger or get_logger("technicals")
+    sess = session or _session()
+    ym = f"{year:04d}{month:02d}"
+    url = URL_STOCK_DAY.format(ym=ym, ticker=ticker)
+    try:
+        resp = sess.get(url, timeout=20)
+        status = int(resp.status_code)
+        if status != 200:
+            log.warning("%s/%s K 線 HTTP %d", ticker, ym, status)
+            return MonthlyKlineResult(rows=[], http_status=status)
+        data = resp.json()
+        time.sleep(0.4)
+    except Exception as exc:
+        log.exception("%s/%s K 線抓取失敗", ticker, ym)
+        return MonthlyKlineResult(rows=[], http_status=0, error=str(exc))
+
+    if not isinstance(data, dict) or data.get("stat") != "OK":
+        return MonthlyKlineResult(rows=[], http_status=status)
+
+    fields = data.get("fields") or []
+    raw_rows = data.get("data") or []
+    if not fields or not raw_rows:
+        return MonthlyKlineResult(rows=[], http_status=status)
+
+    def idx(*kw: str) -> int:
+        for i, f in enumerate(fields):
+            for k in kw:
+                if k in f:
+                    return i
+        return -1
+
+    i_date = idx("日期")
+    i_vol = idx("成交股數", "成交量")
+    i_open = idx("開盤價", "開盤")
+    i_high = idx("最高價", "最高")
+    i_low = idx("最低價", "最低")
+    i_close = idx("收盤價", "收盤")
+    out: List[Dict[str, Any]] = []
+    for r in raw_rows:
+        if i_date < 0 or i_date >= len(r):
+            continue
+        d = _roc_to_iso(str(r[i_date]).strip())
+        if not d:
+            continue
+        out.append({
+            "date": d.isoformat(),
+            "open": _to_float(r[i_open]) if i_open >= 0 else 0.0,
+            "high": _to_float(r[i_high]) if i_high >= 0 else 0.0,
+            "low": _to_float(r[i_low]) if i_low >= 0 else 0.0,
+            "close": _to_float(r[i_close]) if i_close >= 0 else 0.0,
+            "volume": _to_float(r[i_vol]) / 1000.0 if i_vol >= 0 else 0.0,
+        })
+    return MonthlyKlineResult(rows=out, http_status=status)
+
+
 def fetch_monthly_kline(
     ticker: str,
     year: int,
@@ -120,58 +201,67 @@ def fetch_monthly_kline(
     """
     if market == "tpex":
         return _fetch_tpex_monthly_kline(ticker, year, month, session=session, logger=logger)
+    return fetch_monthly_kline_with_meta(
+        ticker, year, month, market=market, session=session, logger=logger,
+    ).rows
 
+
+def fetch_monthly_kline_yfinance(
+    ticker: str,
+    year: int,
+    month: int,
+    *,
+    market: str = "twse",
+    logger: Optional[logging.Logger] = None,
+) -> List[Dict[str, Any]]:
+    """以 yfinance 補單月日 K（TWSE 403 時的備援來源）。"""
     log = logger or get_logger("technicals")
-    sess = session or _session()
-    ym = f"{year:04d}{month:02d}"
-    url = URL_STOCK_DAY.format(ym=ym, ticker=ticker)
     try:
-        resp = sess.get(url, timeout=20)
-        if resp.status_code != 200:
-            log.warning("%s/%s K 線 HTTP %d", ticker, ym, resp.status_code)
-            return []
-        data = resp.json()
-        time.sleep(0.4)
-    except Exception:
-        log.exception("%s/%s K 線抓取失敗", ticker, ym)
+        import yfinance as yf  # type: ignore
+    except ImportError:
+        log.warning("yfinance 未安裝，無法備援日 K")
         return []
 
-    if not isinstance(data, dict) or data.get("stat") != "OK":
-        return []
-    fields = data.get("fields") or []
-    rows = data.get("data") or []
-    if not fields or not rows:
-        return []
+    start_d = dt.date(year, month, 1)
+    if month == 12:
+        end_d = dt.date(year, 12, 31)
+    else:
+        end_d = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+    end_excl = (end_d + dt.timedelta(days=1)).isoformat()
 
-    def idx(*kw: str) -> int:
-        for i, f in enumerate(fields):
-            for k in kw:
-                if k in f:
-                    return i
-        return -1
-
-    i_date = idx("日期")
-    i_vol = idx("成交股數", "成交量")
-    i_open = idx("開盤價", "開盤")
-    i_high = idx("最高價", "最高")
-    i_low = idx("最低價", "最低")
-    i_close = idx("收盤價", "收盤")
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        if i_date < 0 or i_date >= len(r):
+    suffixes = (".TWO", ".TW") if market == "tpex" else (".TW", ".TWO")
+    for suffix in suffixes:
+        sym = f"{ticker}{suffix}"
+        try:
+            hist = yf.Ticker(sym).history(
+                start=start_d.isoformat(),
+                end=end_excl,
+                auto_adjust=False,
+            )
+        except Exception as exc:
+            log.warning("%s yfinance %04d/%02d 例外: %s", ticker, year, month, exc)
             continue
-        d = _roc_to_iso(str(r[i_date]).strip())
-        if not d:
+        if hist is None or hist.empty:
             continue
-        out.append({
-            "date": d.isoformat(),
-            "open": _to_float(r[i_open]) if i_open >= 0 else 0.0,
-            "high": _to_float(r[i_high]) if i_high >= 0 else 0.0,
-            "low": _to_float(r[i_low]) if i_low >= 0 else 0.0,
-            "close": _to_float(r[i_close]) if i_close >= 0 else 0.0,
-            "volume": _to_float(r[i_vol]) / 1000.0 if i_vol >= 0 else 0.0,  # 張
-        })
-    return out
+        out: List[Dict[str, Any]] = []
+        for idx, row in hist.iterrows():
+            try:
+                d = idx.date() if hasattr(idx, "date") else dt.date.fromisoformat(str(idx)[:10])
+            except Exception:
+                continue
+            if d < start_d or d > end_d:
+                continue
+            out.append({
+                "date": d.isoformat(),
+                "open": float(row.get("Open", 0) or 0),
+                "high": float(row.get("High", 0) or 0),
+                "low": float(row.get("Low", 0) or 0),
+                "close": float(row.get("Close", 0) or 0),
+                "volume": float(row.get("Volume", 0) or 0) / 1000.0,
+            })
+        if out:
+            return sorted(out, key=lambda r: r["date"])
+    return []
 
 
 def _fetch_tpex_monthly_kline(

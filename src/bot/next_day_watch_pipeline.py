@@ -43,6 +43,7 @@ from bot.pipeline_shared import (
 from bot.llm_analyzer import GeminiClient, gemini_call
 from bot.market_macro import fetch_macro_snapshot, load_supply_chain, macro_to_dict
 from bot.news_fetcher import fetch_today_news, news_to_compact_text
+from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -155,34 +156,97 @@ def _tomorrow_event_tickers(
     root: Path,
     log: logging.Logger,
 ) -> List[Dict[str, Any]]:
-    """從 conference_calendar 取明日法說 / 財報事件。"""
+    """從 MOPS 法說會、全球科技事件、國際展覽取明日與近期催化劑。"""
+    return _catalyst_events(target_date, root, log)
+
+
+def _catalyst_events(
+    target_date: dt.date,
+    root: Path,
+    log: logging.Logger,
+) -> List[Dict[str, Any]]:
+    """整合法說會、全球科技事件、國際展覽催化劑。"""
+    out: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str, str]] = set()
+
+    def _add(
+        ticker: str,
+        name: str,
+        event: str,
+        event_time: str,
+        *,
+        title: str = "",
+    ) -> None:
+        if not ticker or not ticker.isdigit():
+            return
+        key = (ticker, event, title or event_time)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({
+            "ticker": ticker,
+            "name": name,
+            "event": event,
+            "event_time": event_time,
+            "title": title,
+        })
+
     try:
         from bot.conference_calendar import load_calendar
-        items = load_calendar(root)
-        out: List[Dict[str, Any]] = []
-        for e in items:
-            if hasattr(e.date, "isoformat"):
-                d = e.date
-            else:
-                try:
-                    d = dt.date.fromisoformat(str(e.date))
-                except Exception:
-                    continue
+        for e in load_calendar(root):
+            d = e.date if hasattr(e.date, "isoformat") else dt.date.fromisoformat(str(e.date))
             if d != target_date:
                 continue
-            if not (e.ticker and e.ticker.isdigit()):
-                continue
-            out.append({
-                "ticker": e.ticker,
-                "name": e.company or "",
-                "event": "法說會",
-                "event_time": e.time or "未指定",
-            })
-        log.info("明日 (%s) 法說事件 %d 檔", target_date.isoformat(), len(out))
-        return out
+            _add(e.ticker, e.company or "", "法說會", e.time or "未指定")
     except Exception:
         log.debug("load conference_calendar 失敗", exc_info=True)
-        return []
+
+    today = now_tw().date()
+    try:
+        from bot.global_event_calendar import (
+            active_global_events_on,
+            ensure_global_events_fresh,
+            recent_global_events,
+        )
+        ensure_global_events_fresh(root=root, logger=log)
+        global_events = []
+        if target_date >= today:
+            global_events.extend(active_global_events_on(target_date, root=root))
+        if target_date == today + dt.timedelta(days=1):
+            global_events.extend(recent_global_events(days=1, root=root))
+        elif target_date == today:
+            global_events.extend(recent_global_events(days=1, root=root))
+        dedup_ge: Dict[str, Any] = {}
+        for ge in global_events:
+            dedup_ge[ge.canonical_key or ge.title] = ge
+        for ge in dedup_ge.values():
+            event_label = "全球科技"
+            event_time = ge.time or (
+                "進行中" if ge.occurs_on(today) and not ge.occurs_on(target_date)
+                else "明日" if ge.date == target_date else "近期"
+            )
+            for ticker in ge.tickers:
+                _add(ticker, "", event_label, event_time, title=ge.title)
+    except Exception:
+        log.debug("load global_event_calendar 失敗", exc_info=True)
+
+    try:
+        from bot.market_calendar import load_exhibition_events
+        exhibitions = load_exhibition_events(
+            target_date - dt.timedelta(days=1),
+            target_date,
+            root=root,
+        )
+        for ex in exhibitions:
+            if not ex.occurs_on(target_date):
+                continue
+            for ticker in ex.tickers:
+                _add(ticker, "", "國際展覽", ex.time or "進行中", title=ex.title)
+    except Exception:
+        log.debug("load exhibition events 失敗", exc_info=True)
+
+    log.info("催化劑 (%s) 共 %d 檔", target_date.isoformat(), len(out))
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -391,12 +455,14 @@ def _radar_candidate_tickers(report: NextDayReport) -> List[Tuple[str, str]]:
 
 def _catalyst_text(events: List[Dict[str, Any]]) -> str:
     if not events:
-        return "(無已知法說/權息)"
+        return "(無已知法說/權息/全球科技事件)"
     lines: List[str] = []
     for i, e in enumerate(events, 1):
+        title = e.get("title") or ""
+        title_part = f" ｜ {title}" if title else ""
         lines.append(
             f"{i:02d}. {e.get('ticker','')} {e.get('name','')} "
-            f"｜ {e.get('event','法說')} ｜ {e.get('event_time','未指定')}"
+            f"｜ {e.get('event','法說')} ｜ {e.get('event_time','未指定')}{title_part}"
         )
     return "\n".join(lines)
 
@@ -419,6 +485,7 @@ def run_next_day_watch(
     force_refresh_technicals: Optional[bool] = None,
     target_date: Optional[dt.date] = None,
     logger: Optional[logging.Logger] = None,
+    publisher=None,
 ) -> NextDayReport:
     """跑明日當沖預備清單管線。
 
@@ -489,10 +556,12 @@ def run_next_day_watch(
     log.info("[3/7] 取明日 catalysts ...")
     try:
         from bot.conference_calendar import ensure_calendar_fresh
+        from bot.global_event_calendar import ensure_global_events_fresh
         ensure_calendar_fresh(root, logger=log)
+        ensure_global_events_fresh(root=root, logger=log)
     except Exception:
-        log.debug("ensure_calendar_fresh 失敗", exc_info=True)
-    events = _tomorrow_event_tickers(target, root, log)
+        log.debug("ensure calendar/global events 失敗", exc_info=True)
+    events = _catalyst_events(target, root, log)
     report.catalyst_count = len(events)
     catalyst_text = _catalyst_text(events)
 
@@ -759,6 +828,20 @@ def run_next_day_watch(
         "next-day-watch 完成 (%.1fs, 題材 %d / 候選 %d / 事件 %d / 錯誤 %d)",
         report.duration_sec, len(report.carry_themes),
         len(rankings), len(events), len(report.errors),
+    )
+    publish_pipeline_completed(
+        publisher,
+        pipeline=f"next_day_watch:{mode}",
+        run_id=target.isoformat(),
+        output_dir=report.output_dir,
+        success=len(report.errors) == 0,
+        error_count=len(report.errors),
+        duration_sec=report.duration_sec,
+        extra={
+            "themes": len(report.carry_themes),
+            "candidates": len(rankings),
+            "events": len(events),
+        },
     )
     return report
 

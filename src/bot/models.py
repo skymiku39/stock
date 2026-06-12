@@ -72,7 +72,7 @@ class SignalEvent:
 
     ts: datetime.datetime
     symbol: str
-    action: str  # "would-buy" | "would-sell"
+    action: str  # "would-buy" | "would-sell" | "sell-blocked"
     price: float
     quantity: int
     reason: str  # "enter" | "sl" | "trail" | "close"

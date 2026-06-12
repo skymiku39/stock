@@ -3,7 +3,7 @@
 設計
 ====
 跑一次 `run_preflight(settings)` 後，回傳一份 `PreflightReport`，
-裡面是六個區塊、每個區塊一連串 `CheckResult`：
+裡面是七個區塊、每個區塊一連串 `CheckResult`：
 
 1. **環境變數 (essentials)** — API_KEY / SECRET_KEY / RUN_MODE / SIMULATION
 2. **電子憑證 (CA)** — 檔案存在、密碼/身分證設定、過期日
@@ -11,6 +11,7 @@
 4. **帳戶權限** — stock_account.signed、帳號類型 (現股/信用)、可用資金
 5. **風控設定** — 停損/停利合理性、max_fund、max_lot_per_symbol
 6. **時間窗口** — 現在是否在盤中、距離開盤/收盤多久、是否為交易日
+7. **持倉安全** — 監控標的手動持股重疊、本工具 AI 紀錄對帳
 
 CheckResult.status:
   ok    — 通過
@@ -32,6 +33,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bot.archive_status import day_trading_trade_blocked
 from bot.config import Settings
 from bot.utils import get_logger, now_tw
 
@@ -61,12 +63,14 @@ class PreflightReport:
     section_account: List[CheckResult] = field(default_factory=list)
     section_risk: List[CheckResult] = field(default_factory=list)
     section_time: List[CheckResult] = field(default_factory=list)
+    section_safety: List[CheckResult] = field(default_factory=list)
     summary: str = ""
 
     def all_checks(self) -> List[CheckResult]:
         return (
             self.section_env + self.section_ca + self.section_login
             + self.section_account + self.section_risk + self.section_time
+            + self.section_safety
         )
 
     def has_fail(self) -> bool:
@@ -81,7 +85,33 @@ class PreflightReport:
 # ----------------------------------------------------------------------
 
 
-def _check_env(settings: Settings) -> List[CheckResult]:
+def _format_watch_pool_detail(
+    symbols: List[str],
+    *,
+    auto_merge: bool,
+    source_counts: Optional[Dict[str, int]] = None,
+) -> str:
+    preview = ",".join(symbols[:8])
+    if len(symbols) > 8:
+        preview += f" … 共 {len(symbols)} 檔"
+    else:
+        preview = f"{len(symbols)} 檔: {preview}"
+    if auto_merge and source_counts:
+        preview += (
+            f" | 四源 manual={source_counts.get('manual', 0)}"
+            f" 今日={source_counts.get('intraday_today', 0)}"
+            f" 昨日={source_counts.get('intraday_prev', 0)}"
+            f" 明日={source_counts.get('nextday_prev', 0)}"
+            f" 即時={source_counts.get('live_open', 0)}"
+        )
+    return preview
+
+
+def _check_env(
+    settings: Settings,
+    *,
+    watch_pool_source_counts: Optional[Dict[str, int]] = None,
+) -> List[CheckResult]:
     out: List[CheckResult] = []
 
     # API Key / Secret Key
@@ -101,6 +131,25 @@ def _check_env(settings: Settings) -> List[CheckResult]:
             "到 .env 設定，或在儀表板「組態設定」頁填入後存檔",
         ))
 
+    # 當沖封存
+    if day_trading_trade_blocked(settings):
+        out.append(CheckResult(
+            "當沖模組封存", "fail",
+            "RUN_MODE=trade 已封存，stock-bot 啟動會被阻擋",
+            "改用 watch/report，或設 DAY_TRADING_UNFREEZE=true（見 docs/archive/day-trading.md）",
+        ))
+    elif getattr(settings, "day_trading_archived", True) and settings.run_mode == "trade":
+        out.append(CheckResult(
+            "當沖模組封存", "warn",
+            "已解除封存 (DAY_TRADING_UNFREEZE=true)，使用舊版當沖邏輯",
+            "新功能請改走微笑曲線策略（規劃中）",
+        ))
+    else:
+        out.append(CheckResult(
+            "當沖模組封存", "info",
+            "當沖實單未啟用或已解除封存",
+        ))
+
     # RUN_MODE
     if settings.run_mode == "trade":
         out.append(CheckResult(
@@ -111,7 +160,7 @@ def _check_env(settings: Settings) -> List[CheckResult]:
         out.append(CheckResult(
             "執行模式 (RUN_MODE)", "warn",
             "watch — 只訂閱行情並記錄訊號，不會下單",
-            "若要實際下單，把 RUN_MODE 改成 trade",
+            "當沖實單已封存；研究分析請維持 watch/report",
         ))
     elif settings.run_mode == "report":
         out.append(CheckResult(
@@ -138,18 +187,26 @@ def _check_env(settings: Settings) -> List[CheckResult]:
             "false — 接到正式環境，下單會真實成交",
         ))
 
-    # SYMBOLS
+    # 監控池（手動 SYMBOLS + 四源合併後的最終清單）
+    auto_merge = bool(getattr(settings, "symbols_auto_merge", True))
+    pool_label = "監控池 (四源合併)" if auto_merge else "監控標的 (SYMBOLS)"
     if settings.symbols:
         out.append(CheckResult(
-            "監控標的 (SYMBOLS)", "ok",
-            f"{len(settings.symbols)} 檔: {','.join(settings.symbols[:8])}"
-            + (f" … 共 {len(settings.symbols)} 檔" if len(settings.symbols) > 8 else ""),
+            pool_label,
+            "ok",
+            _format_watch_pool_detail(
+                list(settings.symbols),
+                auto_merge=auto_merge,
+                source_counts=watch_pool_source_counts,
+            ),
+            None if auto_merge else "僅 .env SYMBOLS；設 SYMBOLS_AUTO_MERGE=true 可合併戰情室/明日關注",
         ))
     else:
         out.append(CheckResult(
-            "監控標的 (SYMBOLS)", "warn",
-            "未設定 SYMBOLS — trade 模式至少要 1 檔",
-            "在 .env 設 SYMBOLS=2330,0050 之類",
+            pool_label,
+            "warn",
+            "監控池為空 — trade 模式至少要 1 檔",
+            "設 SYMBOLS 或啟用 SYMBOLS_AUTO_MERGE 並確保戰情室/明日關注報告存在",
         ))
 
     return out
@@ -335,7 +392,7 @@ def _check_login(
             out.append(CheckResult(
                 "Shioaji 登入", "fail",
                 f"IP 白名單阻擋：{bad_ip} 不在這把 API 金鑰允許的 IP 清單內 (status 400)",
-                f"到永豐 e leader → API 金鑰管理，編輯這把金鑰的「IP 限制」："
+                f"到永豐 iLeader → API 金鑰管理，編輯這把金鑰的「IP 限制」："
                 f"家用浮動 IP 建議直接「不綁定 IP / 移除限制」，"
                 f"或把 {bad_ip} 加入允許清單。這是金鑰設定問題，非程式碼問題。",
                 extra={"reason": "ip_whitelist", "blocked_ip": bad_ip},
@@ -344,14 +401,14 @@ def _check_login(
             out.append(CheckResult(
                 "Shioaji 登入", "fail",
                 f"API 金鑰權限不足: {msg[:120]}",
-                "到永豐 e leader → API 金鑰管理：勾選「下單」權限後重新產生金鑰",
+                "到永豐 iLeader → API 金鑰管理：勾選「下單」權限後重新產生金鑰",
                 extra={"reason": "no_trade_permission"},
             ))
         else:
             out.append(CheckResult(
                 "Shioaji 登入", "fail",
                 f"登入失敗: {e}",
-                "檢查 API_KEY / SECRET_KEY；若是真實環境需先在永豐 e leader 開通 Shioaji",
+                "檢查 API_KEY / SECRET_KEY；若是真實環境需先在永豐 iLeader 開通 Shioaji",
             ))
         return out, api, None
 
@@ -373,7 +430,7 @@ def _check_login(
         "證券帳戶 (stock_account)", "ok" if signed else "warn",
         f"broker={broker_id} account={masked_acc} signed={signed}"
         + (f" ({username})" if username else ""),
-        "signed=False 代表線上簽署協議尚未完成；登入永豐 e leader 簽完即可" if not signed else "",
+        "signed=False 代表線上簽署協議尚未完成；登入永豐 iLeader 簽完即可" if not signed else "",
         extra={
             "broker_id": broker_id,
             "account_id_masked": masked_acc,
@@ -511,7 +568,7 @@ def _check_account(
         out.append(CheckResult(
             "API Token 下單權限", "fail",
             f"Token 僅有 Data 權限，無法下單 ({permission_detail[:80]})",
-            "到永豐 e leader → API 金鑰管理：勾選「下單」權限後重新產生 API Key/Secret",
+            "到永豐 iLeader → API 金鑰管理：勾選「下單」權限後重新產生 API Key/Secret",
         ))
 
     return out
@@ -627,13 +684,105 @@ def _check_time(settings: Settings) -> List[CheckResult]:
     # 進場/出場時間
     out.append(CheckResult(
         "進場截止時間 (ENTER_CUTOFF_TIME)", "info",
-        f"{settings.enter_cutoff_time.strftime('%H:%M')} 後策略不會再開新倉",
+        f"{settings.enter_cutoff_time.strftime('%H:%M')} "
+        f"(configurable 策略以 EXIT_TIME {settings.exit_time.strftime('%H:%M')} 為進場截止)",
     ))
+    profit_start = getattr(settings, "profit_exit_start_time", None)
+    if profit_start is not None:
+        out.append(CheckResult(
+            "午盤獲利平倉 (PROFIT_EXIT_START_TIME)", "info",
+            f"{profit_start.strftime('%H:%M')}–{settings.exit_time.strftime('%H:%M')} "
+            f"淨利 > 0 即賣出，{settings.exit_time.strftime('%H:%M')} 強制清倉剩餘",
+        ))
     out.append(CheckResult(
         "強制平倉時間 (EXIT_TIME)", "info",
         f"{settings.exit_time.strftime('%H:%M')} 強制將當沖部位平掉",
     ))
 
+    return out
+
+
+def _check_position_safety(
+    settings: Settings,
+    *,
+    do_real_login: bool = True,
+) -> List[CheckResult]:
+    """監控標的 vs 手動持股重疊、本工具紀錄對帳。"""
+    from bot.position_safety import (
+        run_startup_safety_checks,
+        symbols_to_exclude_for_trading,
+    )
+
+    out: List[CheckResult] = []
+    excluded = symbols_to_exclude_for_trading(settings)
+    if excluded:
+        out.append(CheckResult(
+            "手動持股 / 黑名單排除",
+            "info",
+            f"以下代號不會自動交易: {', '.join(excluded)}",
+        ))
+
+    monitored = [s for s in (settings.symbols or []) if s not in set(excluded)]
+    if not monitored:
+        out.append(CheckResult(
+            "監控標的清單",
+            "warn",
+            "SYMBOLS 為空或全數被黑名單/手動持股排除",
+            "確認 SYMBOLS 與 MANUAL_HOLD_SYMBOLS 設定",
+        ))
+        return out
+
+    if not do_real_login or not settings.api_key:
+        out.append(CheckResult(
+            "券商庫存重疊檢查",
+            "info",
+            "略過（未執行真實登入）；啟動 bot 時仍會做對帳",
+        ))
+        return out
+
+    report = run_startup_safety_checks(
+        settings,
+        engage_kill_switch=False,
+        require_broker_snapshot=True,
+    )
+
+    if report.broker_fetch_error:
+        out.append(CheckResult(
+            "券商庫存讀取",
+            "fail",
+            report.broker_fetch_error,
+            "確認 API 連線與下單權限；trade 模式啟動時亦會 fail-closed",
+        ))
+        return out
+
+    if report.ok:
+        out.append(CheckResult(
+            "券商庫存 vs 本工具紀錄",
+            "ok",
+            f"監控 {len(monitored)} 檔無手動持股重疊、對帳一致",
+        ))
+        return out
+
+    for issue in report.overlap_issues:
+        out.append(CheckResult(
+            f"手動持股重疊 [{issue.symbol}]",
+            "fail",
+            issue.message,
+            "將該檔移出 SYMBOLS，或加入 MANUAL_HOLD_SYMBOLS / BLACKLIST_SYMBOLS",
+            extra={
+                "broker_qty": issue.broker_qty,
+                "bot_qty": issue.bot_qty,
+                "manual_qty": issue.manual_qty,
+            },
+        ))
+    for issue in report.reconcile_issues:
+        out.append(CheckResult(
+            f"對帳異常 [{issue.symbol}]",
+            "fail",
+            issue.message,
+            "確認 data/trades_*.csv 與券商庫存；必要時手動平倉後再啟動",
+            extra={"kind": issue.kind},
+        ))
     return out
 
 
@@ -656,13 +805,30 @@ def run_preflight(
     log = logger or get_logger("preflight")
     settings = settings or Settings()
 
+    watch_pool_source_counts: Optional[Dict[str, int]] = None
+    if getattr(settings, "symbols_auto_merge", True):
+        from pathlib import Path
+
+        from bot.watch_symbol_pool import merge_watch_symbols_into_settings
+
+        pool_result = merge_watch_symbols_into_settings(
+            settings,
+            Path.cwd(),
+            reason="preflight",
+            logger=log,
+        )
+        watch_pool_source_counts = pool_result.source_counts
+
     report = PreflightReport(
         fetched_at=now_tw().isoformat(timespec="seconds"),
     )
 
     log.info("=== Preflight 開始 ===")
 
-    report.section_env = _check_env(settings)
+    report.section_env = _check_env(
+        settings,
+        watch_pool_source_counts=watch_pool_source_counts,
+    )
     report.section_ca = _check_ca(settings)
     report.section_login, api, stock_account = _check_login(
         settings, do_real_login=do_real_login, logger=log,
@@ -672,11 +838,13 @@ def run_preflight(
     )
     report.section_risk = _check_risk(settings)
     report.section_time = _check_time(settings)
+    report.section_safety = _check_position_safety(settings, do_real_login=do_real_login)
 
     # ---- 最終結論 ----
     report.can_simulate = not report.has_fail()  # 模擬只需設定齊全 + 登入成功
     report.can_trade_now = (
         report.can_simulate
+        and not day_trading_trade_blocked(settings)
         and not settings.simulation
         and settings.run_mode == "trade"
         and any(
@@ -738,6 +906,7 @@ def report_to_dict(r: PreflightReport) -> Dict[str, Any]:
             "account": [asdict(c) for c in r.section_account],
             "risk": [asdict(c) for c in r.section_risk],
             "time": [asdict(c) for c in r.section_time],
+            "safety": [asdict(c) for c in r.section_safety],
         },
     }
 

@@ -15,7 +15,7 @@ inputs:
     desc: 今日日期 (ISO)
   - name: upcoming_events
     required: false
-    desc: 「未來 30 天的法說會 / 重要事件」純文字列表
+    desc: 「未來 30 天的法說會 / 全球科技事件 (WWDC、GTC 等) / 重要展覽」純文字列表，含台股供應鏈影響
   - name: past_events
     required: false
     desc: 「過去 90 天的法說會 / 重大訊息」純文字列表
@@ -32,7 +32,7 @@ template: |
   你是一位資深台股機構研究員。請依以下「自動上網搜尋並彙整」的素材，
   為 {ticker} ({name}) 寫出**結構化研究報告**。今天日期：{today}。
 
-  --- 1. 即將發生的事件 / 法說會行事曆 ---
+  --- 1. 即將發生的事件 / 法說會 / 全球科技事件 ---
   {upcoming_events}
 
   --- 2. 過往法說會 / 重大訊息摘要 ---
@@ -50,6 +50,7 @@ template: |
   - 若有「即將舉行的法說會」要在 catalyst_outlook 明確點名
   - 若新聞與行事曆出現矛盾、或言論口風變化，請寫進 risks
   - sentiment 看「整體公開資訊基調」，不是只看單篇文章
+  - limit_up_potential：當日盤中若出現強勢上攻、重大催化、籌碼/新聞支持「有機會挑戰漲停」時設 true；僅一般偏多不算
   - 中文撰寫；不可包含 markdown 標記、不可附加說明文字
   - 輸出**必須**為合法 JSON 物件
 
@@ -59,6 +60,8 @@ template: |
     "sentiment": "positive | neutral | negative",
     "sentiment_score": -1.0 到 1.0,
     "confidence": 0.0 到 1.0,
+    "limit_up_potential": true | false,
+    "limit_up_reason": "一句話說明漲停潛力依據；無則填無",
     "key_metrics": {{
       "revenue_guidance": "如有營收指引",
       "gross_margin_guidance": "毛利率指引",

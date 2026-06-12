@@ -21,6 +21,7 @@ dependencies = [
     "pypdf>=4.0",
     "pyyaml>=6.0",
     "yfinance>=0.2.40",
+    "matplotlib>=3.10.9",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +50,14 @@ stock-company-update = "bot.company_update:main"
 stock-gemini-test = "bot.gemini_smoke:main"
 stock-calendar-update = "bot.conference_calendar_cli:main"
 stock-cloud-sync = "bot.cloud_sync_cli:main"
+stock-intraday-fetch = "bot.intraday_fetch_cli:main"
+stock-intraday-backtest = "bot.intraday_backtest_cli:main"
+stock-history-fetch = "bot.history_fetch_cli:main"
+stock-smile-backtest = "bot.smile_curve_backtest_cli:main"
+stock-smile-screen = "bot.smile_curve_screener_cli:main"
+stock-smile-audit = "bot.smile_curve_audit_cli:main"
+stock-watch-snapshot = "bot.watch_snapshot:main"
+stock-watch-data-fetch = "bot.watch_data_fetch:main"
 
 [build-system]
 requires = ["hatchling"]

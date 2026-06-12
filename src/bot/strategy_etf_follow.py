@@ -25,9 +25,9 @@ from bot.etf_consensus import (
     FollowSignal,
     consensus_additions,
     consensus_new_builds,
-    detect_changes_across_etfs,
 )
 from bot.models import MarketTick
+from bot.trade_cost import max_affordable_qty
 from bot.strategy import BaseStrategy
 from bot.utils import get_logger, now_tw_time
 
@@ -46,19 +46,24 @@ class EtfFollowStrategy(BaseStrategy):
         settings: "Settings",
         market_source: Optional["TwsePublicMarketSource"] = None,
         logger: Optional[logging.Logger] = None,
+        publisher=None,
+        *,
+        wire_handlers: bool = True,
         min_consensus_new: int = 2,
         min_consensus_add: int = 3,
         max_pct_chg_on_entry: float = 4.0,
         project_root: Optional[Path] = None,
     ):
-        super().__init__(broker, settings, market_source, logger)
+        super().__init__(
+            broker, settings, market_source, logger,
+            publisher=publisher, wire_handlers=wire_handlers,
+        )
         self.logger = logger or get_logger("strategy-etf")
         self.min_consensus_new = min_consensus_new
         self.min_consensus_add = min_consensus_add
         self.max_pct_chg_on_entry = max_pct_chg_on_entry
         self._project_root = project_root or Path.cwd()
         self._signals: Dict[str, FollowSignal] = {}
-        self._high_watermark: Dict[str, float] = {}
         self._prepare_signals()
 
     # ------------------------------------------------------------------
@@ -184,49 +189,15 @@ class EtfFollowStrategy(BaseStrategy):
                     )
 
         # ---- 出場 (停損 / 移動停利 / 收盤全出) ----
-        if (
-            cur_time < self.settings.exit_time
-            and symbol in self.positions
-            and not self._has_pending(symbol)
-        ):
-            pos = self.positions[symbol]
-            pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
-
-            hw = self._high_watermark.get(symbol, price)
-            if price > hw:
-                self._high_watermark[symbol] = price
-                hw = price
-
-            drawdown_pct = 100 * (hw - price) / hw if hw > 0 else 0
-            user_target_pct = self._sell_profit_target(symbol)
-
-            if user_target_pct is not None and pnl_pct >= user_target_pct:
-                self.logger.info(
-                    "[使用者目標賣出] %s PnL=%.2f%% (>= %.2f%%)",
-                    symbol, pnl_pct, user_target_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="target")
-            elif (
-                pnl_pct >= self.settings.take_profit_pct
-                and drawdown_pct >= self.settings.trailing_stop_pct
-            ):
-                self.logger.info(
-                    "[移動停利] %s PnL=%.2f%% 高點=%.2f 回撤=%.2f%%",
-                    symbol, pnl_pct, hw, drawdown_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="trail")
-            elif pnl_pct <= self.settings.stop_loss_pct:
-                self.logger.info(
-                    "[停損] %s PnL=%.2f%%", symbol, pnl_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="sl")
+        if cur_time < self.settings.exit_time:
+            self._evaluate_standard_exits(symbol, price)
 
     # ------------------------------------------------------------------
     # 資金分配
     # ------------------------------------------------------------------
 
     def _calc_lots(self, price: float, signal: FollowSignal) -> int:
-        """依共識強度動態調整下單張數 (基底 = MAX_LOT_PER_SYMBOL)。"""
+        """依共識強度動態調整下單張數 (基底 = MAX_LOT_PER_SYMBOL，含手續費)。"""
         if price <= 0:
             return 0
         base = self.settings.max_lot_per_symbol
@@ -237,11 +208,12 @@ class EtfFollowStrategy(BaseStrategy):
             boost = 2
 
         target_lots = base * boost
-        cost_per_lot = price * 1000
-        remaining = self.settings.max_fund - self._fund_used
-        if remaining < cost_per_lot:
-            return 0
-        return min(target_lots, int(remaining / cost_per_lot))
+        remaining = self.risk.effective_fund_remaining()
+        return max_affordable_qty(
+            price, remaining, "lot",
+            max_qty=target_lots,
+            settings=self.settings,
+        )
 
 
 __all__ = ["EtfFollowStrategy"]

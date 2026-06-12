@@ -1,5 +1,5 @@
 id: intraday_live_review
-version: "1.0"
+version: "1.1"
 description: Manual intraday live review of LLM-mentioned stocks, using refreshed market data to check whether the morning thesis is still valid.
 model_hint: gemini-2.5-flash
 max_output_tokens: 2600
@@ -53,6 +53,11 @@ template: |
 
   ## 操作規則
   - 只列可執行規則，不要寫泛泛提醒。
+  - **以下停損/停利為人工參考建議，非 bot 自動執行參數**（bot 預設：停損 -3% 淨利、移動停利門檻 +6% 後回撤 2%）。
+  - 若提到停利/停損是否「夠覆蓋成本」，須提醒讀者用**自己券商實際手續費折扣**估算，不可假設 28 折：
+    * 最快：看最近一筆成交的對帳單手續費 ÷ (成交金額 × 0.001425) = 折扣倍率。
+    * 或於 App「帳戶權益 / 手續費率」查電子單折讓；必要時問客服是否日退/月退。
+    * 當沖損益平衡漲幅 ≈ 買入費率 + 賣出費率 + 0.15% 證交稅。
 
   ## 早盤 LLM 簡報
   ```markdown

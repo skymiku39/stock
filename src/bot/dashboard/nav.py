@@ -1,23 +1,30 @@
 """Dashboard navigation and main Streamlit app shell."""
 from __future__ import annotations
 
-import datetime as dt
 import sys
 import time
 from pathlib import Path
 
 import streamlit as st
+from pathlib import Path
 
-from bot.dashboard.common import PROJECT_ROOT, _badge, _human_duration
+from bot.dashboard.common import (
+    DASHBOARD_UI_BUILD,
+    PROJECT_ROOT,
+    _badge,
+    _debug_log_session,
+    _human_duration,
+    write_dashboard_heartbeat,
+)
 from bot.dashboard import pages as dash_pages
-from bot.env_io import env_path, load_env
+from bot.dashboard.cache_helpers import cached_env_values, cached_llm_today_stats
+from bot.env_io import env_path
 from bot.process_runner import get_runner, get_scheduler_runner
 from bot.prompt_registry import get_registry
-from bot.llm_log import get_call_logger
 
 
 def _render_sidebar_quick_controls() -> None:
-    env_values = load_env()
+    env_values = cached_env_values()
     bot_runner = get_runner(PROJECT_ROOT)
     scheduler_runner = get_scheduler_runner(PROJECT_ROOT)
     bot_running = bot_runner.is_running()
@@ -50,12 +57,10 @@ def _render_sidebar_quick_controls() -> None:
             extra_env=dash_pages._quick_scheduler_env(include_reports),
         )
         st.sidebar.success(f"自動更新已啟動 PID {rec.pid}")
-        time.sleep(0.4)
         st.rerun()
     if c2.button("停止更新", disabled=not scheduler_running, use_container_width=True):
         ok = scheduler_runner.stop()
         st.sidebar.success("自動更新已停止" if ok else "自動更新停止逾時")
-        time.sleep(0.4)
         st.rerun()
 
     scheduler_record = scheduler_runner.current()
@@ -77,12 +82,10 @@ def _render_sidebar_quick_controls() -> None:
     if b1.button("啟動 BOT", disabled=bot_running, use_container_width=True):
         rec = bot_runner.start(run_mode=bot_mode)
         st.sidebar.success(f"BOT 已啟動 PID {rec.pid}")
-        time.sleep(0.4)
         st.rerun()
     if b2.button("停止 BOT", disabled=not bot_running, use_container_width=True):
         ok = bot_runner.stop()
         st.sidebar.success("BOT 已停止" if ok else "BOT 停止逾時")
-        time.sleep(0.4)
         st.rerun()
 
     st.sidebar.write("")
@@ -95,12 +98,14 @@ PAGES = {
     "今日當沖即時追蹤": dash_pages.page_intraday_live,
     "明日當沖關注": dash_pages.page_next_day_watch,
     "K 線看板": dash_pages.page_board,
+    "盤中強弱排行": dash_pages.page_market_movers,
     "個股總覽": dash_pages.page_watchlist,
     "目前持股分析": dash_pages.page_portfolio,
     "個股深入分析": dash_pages.page_ticker_detail,
     "自動化管線": dash_pages.page_pipeline,
     # 監控與訊號
     "美股 / 跨市場": dash_pages.page_macro,
+    "熱門個股期貨": dash_pages.page_hot_stock_futures,
     "跟單訊號": dash_pages.page_follow_signals,
     "主動 ETF 追蹤": dash_pages.page_etf_tracker,
     "LLM 法說分析": dash_pages.page_llm_analysis,
@@ -122,8 +127,14 @@ PAGES = {
 }
 
 NAV_GROUPS = {
-    "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "今日當沖即時追蹤", "明日當沖關注", "K 線看板", "個股總覽", "目前持股分析", "個股深入分析", "自動化管線"],
-    "📡 監控與訊號": ["美股 / 跨市場", "跟單訊號", "主動 ETF 追蹤", "LLM 法說分析"],
+    "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "今日當沖即時追蹤", "明日當沖關注", "K 線看板", "盤中強弱排行", "個股總覽", "目前持股分析", "個股深入分析", "自動化管線"],
+    "📡 監控與訊號": [
+        "美股 / 跨市場",
+        "熱門個股期貨",
+        "跟單訊號",
+        "主動 ETF 追蹤",
+        "LLM 法說分析",
+    ],
     "⚡ 執行與紀錄": ["啟動 / 監控", "模擬交易", "🛡 風控中心", "交易可行性檢查", "交易紀錄", "報表分析"],
     "⚙️ 系統與診斷": ["組態設定", "資料庫 / 雲端同步", "Prompt 管理",
                   "LLM 呼叫紀錄", "日誌檢視", "通知測試", "策略與文件"],
@@ -181,8 +192,9 @@ def main_app() -> None:
                 use_container_width=True,
                 type="primary" if is_current else "secondary",
             ):
-                st.session_state.page = p
-                st.rerun()
+                if st.session_state.page != p:
+                    st.session_state.page = p
+                    st.rerun()
         st.sidebar.write("")  # 區塊之間的空隙
 
     pick = st.session_state.page
@@ -195,7 +207,7 @@ def main_app() -> None:
         st.sidebar.markdown(_badge("Bot 待機", "gray"), unsafe_allow_html=True)
 
     try:
-        env_values_for_sb = load_env()
+        env_values_for_sb = cached_env_values()
         if env_values_for_sb.get("GEMINI_API_KEY"):
             st.sidebar.markdown(
                 _badge("🤖 LLM 已啟用 (會收費)", "purple"),
@@ -209,13 +221,12 @@ def main_app() -> None:
         except Exception:
             pass
         try:
-            today_log = get_call_logger().read(dt.date.today(), limit=10000)
-            tokens_in = sum(r.tokens_in or 0 for r in today_log)
-            tokens_out = sum(r.tokens_out or 0 for r in today_log)
-            st.sidebar.caption(
-                f"今日 LLM 呼叫: {len(today_log)} 筆 "
-                f"({tokens_in:,}→{tokens_out:,} tokens)"
-            )
+            n_calls, tokens_in, tokens_out = cached_llm_today_stats(str(PROJECT_ROOT))
+            if n_calls:
+                st.sidebar.caption(
+                    f"今日 LLM 呼叫: {n_calls}+ 筆 "
+                    f"({tokens_in:,}→{tokens_out:,} tokens)"
+                )
         except Exception:
             pass
     except Exception:
@@ -223,7 +234,25 @@ def main_app() -> None:
 
     st.sidebar.caption(f".env: `{env_path()}`")
     st.sidebar.caption(f"專案: `{PROJECT_ROOT}`")
+    st.sidebar.caption(f"UI build: `{DASHBOARD_UI_BUILD}`")
+    try:
+        from bot.dashboard import common as _dash_common
 
+        st.sidebar.caption(f"模組: `{Path(_dash_common.__file__).name}`")
+    except Exception:
+        pass
+
+    write_dashboard_heartbeat(pick)
+    _debug_log_session(
+        "H11",
+        "nav.py:main_app",
+        "dashboard page render",
+        {"page": pick},
+    )
+    st.caption(
+        f"🔧 儀表板版本 **`{DASHBOARD_UI_BUILD}`** · 專案 `{PROJECT_ROOT}` · "
+        f"目前頁面：**{pick}**"
+    )
     PAGES[pick]()
 
 

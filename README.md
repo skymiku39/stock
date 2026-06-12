@@ -1,6 +1,9 @@
-# Stock Bot - 台股當沖自動交易機器人
+# Stock Bot - 台股研究與分析平台
 
-基於 **Shioaji (永豐金證券)** API 的台股當沖自動交易機器人。
+基於 **Shioaji (永豐金證券)** API 的台股研究、法說分析與行情工具；**當沖自動交易模組已封存**（2026-06-11）。
+
+> **封存說明**：`RUN_MODE=trade` 預設已阻擋。日常請用 `watch` / `report` 或 `stock-dashboard`；詳見 [docs/archive/day-trading.md](docs/archive/day-trading.md)。  
+> 暫時恢復舊版當沖實單：`.env` 設 `DAY_TRADING_UNFREEZE=true`。
 
 > **Disclaimer**: 本專案僅供教學與參考之用，實務交易應自行評估並承擔相關風險。
 
@@ -11,7 +14,7 @@
 - **Queue 解耦架構** -- Tick 行情與策略運算分離，避免阻塞回呼執行緒
 - **盤前收盤價載入** -- 透過 snapshots API 取得精確的前日收盤價
 - **多檔資金追蹤** -- 即時追蹤已用資金，避免超額下單
-- **移動停利** -- 追蹤持倉最高價，從高點回撤 N% 觸發出場
+- **移動停利** -- 追蹤持倉淨利高點，從高點回撤 N 百分點觸發出場（含費損益）
 - **部位管理** -- 即時追蹤持倉均價、數量，成交回報自動更新
 - **委託單追蹤** -- 防止重複下單，自動輪詢委託狀態
 - **斷線重連** -- 指數退避重試，自動恢復登入與行情訂閱
@@ -40,7 +43,7 @@
 - **K 線看板 (Stock Board)** -- 三種顯示模式 (縮圖 grid / 並排大圖 / 單檔專注)、9 段時間範圍 (1 個月 ~ 10 年 / 自訂日期)、可手動 Y 軸縮放、批次分月往前抓 1/2/3/5/10 年歷史，並直接推送到 Google Sheets
 - **個股總覽 Watchlist** -- 表格化呈現多檔個股，四時間框架評分排序篩選
 - **個股深入分析** -- 單檔股票完整 KPI + 4 張量表卡 + 6 個分頁 (分析/原資料/分析數據/購買策略/現況/歷史)
-- **評分量表系統** -- 六個 factor × 四時間框架 (當沖/短/中/長) 加權算分，附完整策略 (進場/停損/停利/部位)
+- **評分量表系統** -- 九個 factor × 四時間框架 (當沖/短/中/長) 加權算分，附完整策略 (進場/停損/停利/部位)
 - **本地 SQLite 冷/溫資料庫** -- 集中管理公司基本面、ETF Meta、月營收、季報、watchlist、**歷史日 K 線**；Cache-Aside 降低 API 用量
 - **歷史 K 線入庫** -- TWSE 抓到的 OHLCV 自動寫入 `price_history` table，跨機可同步、可離線分析
 - **Google Sheets 雲端同步** -- 多台電腦/手機共用同一份資料 (含歷史 K 線)；推/拉/智能同步三鍵搞定，可接 Google Forms 從手機新增股票
@@ -55,19 +58,28 @@
 | **加權指 / SOX / VIX** | 純分析 (跨市場連動) | ❌ | yfinance |
 | 期貨、選擇權、興櫃 | — | ❌ (未實作) | — |
 
-### 真實下單的 7 道閘門 (全部要過才會送單)
+### Preflight 交易可行性（7 個分區）
+
+以下為「能不能連上券商、現在能不能送單」的**連線層檢查**（由 `stock-preflight` 驗證）。
+儀表板會顯示 **7 個分區**：環境 / CA / 連線 / 帳戶 / 風控 / 時間 / **持倉安全**（最後一區）。
+
+常見前提條件包括：
 
 | # | 條件 | 設定位置 | 驗證方式 |
 |---|------|----------|---------|
 | 1 | `API_KEY` / `SECRET_KEY` 已設定 | `.env` 或「組態設定」頁 | 「交易可行性檢查」自動驗證 |
-| 2 | **API 金鑰開了「下單」權限** (不只是 Data) | 永豐 e leader → API 金鑰管理 | 嘗試 `list_positions` 拿不到 401 |
-| 3 | 線上協議已簽署 `stock_account.signed=True` | 永豐 e leader | 登入後讀 stock_account |
+| 2 | **API 金鑰開了「下單」權限** (不只是 Data) | 永豐 iLeader → API 金鑰管理 | 嘗試 `list_positions` 拿不到 401 |
+| 3 | 線上協議已簽署 `stock_account.signed=True` | 永豐 iLeader | 登入後讀 stock_account |
 | 4 | 電子憑證 `.pfx` 存在、密碼正確、未過期 | `CA_PATH` / `CA_PASSWORD` | 用 cryptography 解 PFX 拿過期日 |
 | 5 | `RUN_MODE=trade` (`watch` / `report` 不會下單) | `.env` | settings.run_mode |
 | 6 | `SIMULATION=false` (true 為模擬環境) | `.env` | settings.simulation |
 | 7 | 現在處於台股盤中 **09:00–13:30** 且為交易日 | — | preflight 即時判斷 |
 
+**持倉安全**（第 7 分區）：監控標的不得與券商「手動/外部」庫存混倉，且本工具 AI 紀錄須與券商庫存對帳一致。
+`stock-bot` 啟動時會再跑一次啟動安全檢查（見下方）。
+
 > 缺任何一項 → preflight 會明確列出「為什麼還不能下單」+ 修正建議。
+> 下方「12 道閘門」則是**每一筆買單**送單前 `RiskGuard.check_entry()` 的規則，兩者層級不同。
 
 ### 一鍵體檢
 
@@ -78,7 +90,11 @@ uv run stock-preflight --json         # 給 CI / 通知用
 ```
 
 或在儀表板 **⚡ 執行與紀錄 → 🩺 交易可行性檢查** 點「立刻檢查」，
-會顯示 6 個分區、每項通過/警告/阻擋狀態與修復建議。
+會顯示 **7 個分區**（環境 / CA / 連線 / 帳戶 / 風控 / 時間 / **持倉安全**）、
+每項通過/警告/阻擋狀態與修復建議。
+
+`stock-bot` 啟動時還會再跑一次**啟動安全檢查**（券商庫存 vs 本工具 AI 紀錄）；
+若重疊或對帳失敗會自動拉 Kill Switch（僅擋新進場）。
 
 ## 🛡 資金/風險控制 (12 道閘門 + Kill Switch)
 
@@ -89,8 +105,13 @@ uv run stock-preflight --json         # 給 CI / 通知用
 
 | 設定 | 預設 | 說明 |
 |------|------|------|
-| `MAX_FUND` | 500000 | 總可用資金天花板 (元)；已用 + 即將下單 不可超過 |
+| `DAILY_FUND_BUDGET` | 0 (沿用 MAX_FUND) | **每日同時曝險上限** (元)；>0 時優先於 `MAX_FUND`，例 10000 = 同時最多占用 1 萬 |
+| `MAX_FUND` | 500000 | 總可用資金天花板 (元)；`DAILY_FUND_BUDGET=0` 時生效 |
 | `PER_ORDER_MAX_COST_TWD` | 0 (不限) | 單筆委託金額上限；例 100000 = 每次下單最多 10 萬 |
+
+程式內以 `effective_fund_cap()` 取實際上限（`DAILY_FUND_BUDGET` 優先）。
+買進成本以 `buy_cash_required` 計入（含手續費）；`CHECK_ACCOUNT_BALANCE=true` 時進場前還會讀券商 `account_balance`，讀不到則拒絕進場。
+儀表板「已用資金」= 當日同時占用額度（買進含手續費、賣出依成本價釋放），完全平倉後歸零可再買。回落買回（`rebuy`）不受 `PER_SYMBOL_DAILY_MAX_ORDERS` 限制。
 
 ### B. 持倉控制 (`.env`)
 
@@ -99,6 +120,7 @@ uv run stock-preflight --json         # 給 CI / 通知用
 | `MAX_LOT_PER_SYMBOL` | 2 | 單檔最多持有張數 |
 | `MAX_OPEN_POSITIONS` | 0 (不限) | 同時最多 N 檔在倉 |
 | `BLACKLIST_SYMBOLS` | (空) | 永遠不下單的代號，逗號分隔 |
+| `MANUAL_HOLD_SYMBOLS` | (空) | 手動長期持股；併入黑名單、永不自動交易（語意上標記「這檔是我手動拿的」） |
 
 ### B2. 出場授權 (`.env`)
 
@@ -106,7 +128,21 @@ uv run stock-preflight --json         # 給 CI / 通知用
 |------|------|------|
 | `SELL_PROFIT_TARGETS` | (空) | 每檔使用者指定賣出門檻；例 `2330:8,0050:5.5` |
 
-本工具送出的買單會標記 `AIBUY`，成交紀錄會寫入 `owner_tag=AI`。自動賣出只會處理這類 AI 標籤部位；若某檔有設定 `SELL_PROFIT_TARGETS`，則必須達到該報酬率門檻後才會賣，未達標時停損、移動停利與收盤全出場都會被擋下。
+本工具有**兩層標記**（勿混淆）：
+- 送單時 `custom_field=AIBUY`（券商委託欄位）
+- 成交後本地紀錄 `owner_tag=AI`（`data/trades_*.csv` 與持倉追蹤）
+
+自動賣出只處理 `owner_tag=AI` 的部位。若某檔有設定 `SELL_PROFIT_TARGETS`，須達門檻才賣；
+未達標時停損、移動停利與收盤全出場會被擋下。
+
+| 設定 | 預設 | 說明 |
+|------|------|------|
+| `LLM_SELL_GATE_ENABLED` | false | 技術賣點觸發後，須通過 AI 分析才送賣單 |
+| `LLM_SELL_GATE_BYPASS_STOP_LOSS` | true | 停損是否略過 AI 賣出閘門（建議 true） |
+| `LLM_SELL_GATE_BYPASS_CLOSE` | true | 收盤全出是否略過 AI 閘門（建議 true，避免留倉） |
+| `LLM_SELL_MIN_CONFIDENCE` | 0.5 | AI 允許賣出的最低信心 |
+
+> 若 `LLM_SELL_GATE_BYPASS_CLOSE=false` 且 AI 偏多，收盤全出可能被擋下而保留隔夜部位。
 
 ### C. 損失熔斷 (`.env`) - **🚨 最重要**
 
@@ -115,7 +151,7 @@ uv run stock-preflight --json         # 給 CI / 通知用
 | 設定 | 預設 | 說明 |
 |------|------|------|
 | `DAILY_MAX_LOSS_TWD` | 0 (不限) | 絕對值，例 5000 = 一天虧 5000 元就熔斷 |
-| `DAILY_MAX_LOSS_PCT` | 0 (不限) | 占 max_fund 百分比，例 2 = 虧 max_fund 的 2% 熔斷 |
+| `DAILY_MAX_LOSS_PCT` | 0 (不限) | 占 **effective_fund_cap()** 百分比，例 1.0 + 預算 1 萬 = 虧 100 元熔斷 |
 
 兩者擇較嚴者；觸發後**仍可平倉**（停損/停利/收盤強平），但不會再開新倉。
 
@@ -155,6 +191,8 @@ rm data/.kill_switch      # Unix
 
 ### 推薦的保守設定 (新手 / 小額)
 
+**大額帳戶範例**（50 萬）：
+
 ```env
 # 50 萬資金，單筆最多 5 萬，最多 3 檔，當日虧 1% 就收手
 MAX_FUND=500000
@@ -171,8 +209,23 @@ MIN_PRICE=10
 MAX_PRICE=500
 
 DAILY_MAX_LOSS_PCT=1.0     # 一天最多虧 1% (= 5000 元)
-STOP_LOSS_PCT=-2.0          # 單筆停損 -2%
-TAKE_PROFIT_PCT=4.0         # 單筆停利 +4%
+STOP_LOSS_PCT=-2.0          # 單筆停損 -2%（淨利 %）
+TAKE_PROFIT_PCT=4.0         # 移動停利啟動門檻 +4%（淨利 %，非固定停利）
+```
+
+**每日 1 萬零股當沖範例**：
+
+```env
+DAILY_FUND_BUDGET=10000
+MAX_FUND=10000
+PER_ORDER_MAX_COST_TWD=10000
+MAX_LOT_PER_SYMBOL=1
+USE_ODD_LOT=true
+DAILY_MAX_ORDERS=10
+PER_SYMBOL_DAILY_MAX_ORDERS=5
+DAILY_MAX_LOSS_PCT=1.0      # 1% of 1 萬 = 100 元熔斷
+LLM_SELL_GATE_ENABLED=true
+# MANUAL_HOLD_SYMBOLS=2330  # 若手動長期持有某檔，列在此避免混倉
 ```
 
 ### 風控中心儀表板
@@ -283,7 +336,7 @@ cp .env.example .env
 | `ENTER_CUTOFF_TIME` | 停止進場時間 | `09:30` |
 | `EXIT_TIME` | 全部出場時間 | `13:15` |
 | `STOP_LOSS_PCT` | 停損百分比 | `-3.0` |
-| `TAKE_PROFIT_PCT` | 停利門檻百分比 | `6.0` |
+| `TAKE_PROFIT_PCT` | 移動停利啟動門檻（淨利 %，非固定停利） | `6.0` |
 | `TRAILING_STOP_PCT` | 移動停利回撤百分比 | `2.0` |
 | `SELL_PROFIT_TARGETS` | 每檔使用者指定賣出門檻，例如 `2330:8` | (空) |
 | `MAX_FUND` | 總資金上限 | `500000` |
@@ -349,6 +402,10 @@ uv run streamlit run src/bot/dashboard.py
 | **資料庫 / 雲端同步** | 瀏覽 / 編輯 SQLite 各 table、CSV 匯入、Google Sheets 雙向同步 |
 | 策略與文件 | 內建 README / docs / strategy.py 原始碼閱讀器 |
 
+### 策略切換
+
+預設 `STRATEGY_TYPE=configurable` 使用 **ConfigurableStrategy**（env 漲幅區間 + LLM 閘門 + 回落買回）。可改 `etf_follow`（EtfFollowStrategy）。詳見 [docs/trading-rules.md](docs/trading-rules.md) 與 [docs/glossary.md](docs/glossary.md)。
+
 ### 啟用 ETF 跟單策略
 
 在 `.env` 設定：
@@ -406,12 +463,17 @@ uv run stock-auto-research --llm-only --refresh        # 略過 12h 快取，強
 ### 📅 法說會行事曆自動快取
 
 ```bash
-uv run stock-calendar-update                # 自動抓上月 / 本月 / 下月 / +2 月
-uv run stock-calendar-update --upcoming 14  # 抓完印出未來 14 天的法說會
+uv run stock-calendar-update                # MOPS 法說會 + 全球科技事件
+uv run stock-calendar-update --global-only  # 只更新全球科技事件
+uv run stock-calendar-update --upcoming 14  # 抓完印出未來 14 天的法說會與全球事件
 ```
 
-結果存在 `data/calendar/conferences_<YYYY-MM>.json`，dashboard、
-`stock-auto-research --llm-only` 與 `stock-auto-research` 都會直接吃這份快取。
+結果存在：
+- `data/calendar/conferences_<YYYY-MM>.json` — MOPS 法說會
+- `data/calendar/global_tech_events.json` — 科技巨頭發表會 (Apple / Microsoft / Google / Samsung / Meta / AWS / NVIDIA / AMD) + CES/MWC/GTC，自動抓取官方頁與新聞關鍵字，並映射 `supply_chain.json` 台股供應鏈
+
+dashboard「台股行事曆」、`stock-auto-research --llm-only`、明日當沖關注與 LLM 個股研究都會使用這些快取。
+全球科技事件預設 12 小時內視為新鮮 (可用 `GLOBAL_EVENTS_MAX_AGE_HOURS` 調整)。
 
 排程建議 (Windows Task Scheduler / cron 每天 06:30)：
 ```
@@ -538,7 +600,7 @@ uv run stock-intraday --limit 30       # 候選 30 檔
 
 1. **題材延續 (carry_themes)** — 沿用今日 / 今晚熱門題材，挑明日續熱的補漲、二線、設備代工
 2. **強勢承接 (strong_carry)** — 今日收盤漲幅 > 0、量比放大、外資/投信買超的個股 (規則層自動掃描 + LLM 篩選)
-3. **明日事件 (event_focus)** — 法說 / 財報 / 權息 / 政策事件對應受惠股 (來源：`conference_calendar` + 新聞)
+3. **明日事件 (event_focus)** — 法說 / 財報 / 權息 / 全球科技 (WWDC/GTC) / 國際展覽對應受惠股 (來源：`conference_calendar` + `global_tech_events` + 新聞)
 
 ```
 [今日新聞] + [今日 K 線/籌碼掃描 (watchlist + ETF + 明日法說)] + [美股 macro] + [明日法說]
@@ -603,8 +665,8 @@ uv run stock-nextday --scan-limit 80       # 強勢承接掃描範圍 80 檔
 
 3. **分析層 (LLM)**
    - `prompts/us_market_brief.yaml` — 把美股盤後資料 + 供應鏈對照丟給 Gemini，產出「對台股早盤影響」中文簡報，含偏多/偏空標的清單
-   - `prompts/supply_chain_impact.yaml` — 給單篇美股財報/新聞 + 供應鏈，輸出結構化 JSON (每檔台股的 impact_score 與理由)
-   - `prompts/analyst_real_sentiment.yaml` — 把外資報告文字 + 實際買賣超丟給 LLM，偵測「言行不一」(報告唱多但實際倒貨/報告唱空但默默吸籌)
+   - `prompts/supply_chain_impact.yaml` — （規劃中）給單篇美股財報/新聞 + 供應鏈，輸出結構化 JSON
+   - `prompts/analyst_real_sentiment.yaml` — （規劃中）外資報告語意 vs 實際買賣超反指標分析
 
 **CLI 排程化**
 
@@ -679,7 +741,7 @@ uv run stock-oddlot-test --no-sell            # 只測買進
 
 九個 factor 詳細邏輯在 `src/bot/scoring.py`：
 * `llm_sentiment` — Gemini 法說情緒分 + confidence 混合
-* `logic` — 言行反查結果 (外資報告 vs 實際買賣超)
+* `logic` — 言行反查結果 (`logic_check`：法說語意 vs 籌碼面)
 * `etf_consensus` — 持有 ETF 檔數 + 共識新建倉/加碼加分
 * `chips` — 三大法人累計 + 借券/融資扣分項
 * `technical` — MA/MACD/RSI/KD/量比 (技術面 snapshot)
@@ -706,21 +768,7 @@ uv run stock-oddlot-test --no-sell            # 只測買進
 
 ### Prompt 管理 (prompts/*.yaml)
 
-所有對 LLM 的 prompt 都集中在 `prompts/` 目錄，每份 YAML 對應一個 `id`：
-
-```
-prompts/
-  analyze_presentation.yaml    # 解析法說會逐字稿
-  research_ticker.yaml         # 🤖 全自動研究 (行事曆+搜尋+新聞 → 結構化 JSON)
-  logic_check.yaml             # 言行反查
-  extract_etf_holdings.yaml    # 從 HTML/PDF 抽 ETF 持股 JSON
-  daily_brief.yaml             # 每日盤後簡報
-  classify_news.yaml           # 重大訊息分類
-  us_market_brief.yaml         # 美股盤後 → 台股早盤影響評估
-  supply_chain_impact.yaml     # 美股財報/新聞 → 對應台股供應鏈影響
-  analyst_real_sentiment.yaml  # 外資報告語意 vs 實際買賣超 反指標分析
-  README.md                    # 規範說明
-```
+所有對 LLM 的 prompt 都集中在 `prompts/` 目錄。完整清單與狀態（active / planned / archived）見 **[prompts/README.md](prompts/README.md)**。
 
 在儀表板「Prompt 管理」頁可直接編輯 YAML 並即時生效；每筆 LLM 呼叫的
 `input` / `output` / `latency_ms` / `tokens_in` / `tokens_out` 都會自動寫入
@@ -733,7 +781,8 @@ src/bot/
   main.py                  # 程式進入點 (多模式分流 + 策略切換)
   config.py                # 組態管理 (pydantic-settings + .env)
   broker.py                # Shioaji 連線管理 (登入/行情/下單/斷線重連)
-  strategy.py              # 策略引擎 (BaseStrategy + MyStrategy)
+  strategy.py              # 策略引擎 (BaseStrategy)
+  strategy_configurable.py # ConfigurableStrategy (預設當沖)
   strategy_etf_follow.py   # 主動 ETF 共識跟單策略
   models.py                # 資料模型 (PositionInfo, MarketTick, SignalEvent)
   market_source.py         # TWSE 公開延遲行情來源
@@ -760,7 +809,8 @@ src/bot/
   conference_calendar.py   # 法說會行事曆自動抓取與本地快取 (上月/本月/下月/+2 月)
   conference_calendar_cli.py # stock-calendar-update CLI 入口
   auto_llm.py              # 全自動 LLM 個股研究 (行事曆 + 搜尋 + 新聞 + LLM + 反查)
-  preflight.py             # 交易可行性檢查邏輯 (六大區塊體檢)
+  preflight.py             # 交易可行性檢查邏輯 (七大區塊體檢)
+  position_safety.py       # 啟動安全檢查 (混倉重疊 / 對帳)
   preflight_cli.py         # stock-preflight CLI 入口
   risk_guard.py            # 資金/風險守門員 (12 道閘門 + Kill Switch)
   data_pipeline.py         # 自動化研究管線編排器 (含 macro + us_brief 步驟)
@@ -773,16 +823,7 @@ src/bot/
   process_runner.py        # 儀表板的 stock-bot 子行程管理 (啟動/停止/tail log)
   stock_db.py              # 集中管理冷/溫資料的 SQLite 資料庫 + DAO (含 price_history) (Cache-Aside)
   cloud_sync.py            # Google Sheets 雙向同步 (push / pull / 智能 sync，含 price_history)
-prompts/
-  analyze_presentation.yaml
-  research_ticker.yaml         # 全自動研究 (行事曆+搜尋+新聞 → 結構化 JSON)
-  logic_check.yaml
-  extract_etf_holdings.yaml
-  daily_brief.yaml
-  classify_news.yaml
-  us_market_brief.yaml
-  supply_chain_impact.yaml
-  analyst_real_sentiment.yaml
+prompts/                   # 見 prompts/README.md（含 planned / archive）
 data/
   supply_chain.json            # 美股 → 台股供應鏈對照表
   macro/                       # 每日美股/ADR 快取 JSON
@@ -973,18 +1014,21 @@ dashboard 的「個股深入分析」頁採用 **3D + 催化劑** 視角，把�
 
 ### 綜合分析邏輯（評分系統）
 
-`scoring.py` 將上述六大面向壓縮為 **0-100 分** 的 factor，並依時間框架做加權：
+`scoring.py` 將多面向資料壓縮為 **九個 0-100 分 factor**，並依時間框架做加權（完整權重見上方「評分量表系統」章節）：
 
-| Factor          | 當沖 | 短期 | 中期 | 長期 |
-|-----------------|:----:|:----:|:----:|:----:|
-| 技術面           | 50%  | 25%  |  7%  |  —   |
-| 三大法人         | 22%  | 22%  |  7%  |  —   |
-| 大戶結構 (TDCC) |  8%  | 13%  | 10%  |  7%  |
-| ETF 共識        |  8%  | 15%  | 18%  | 18%  |
-| 基本面           |  —   | 10%  | 20%  | 30%  |
-| 法說語意         |  —   | 10%  | 18%  | 22%  |
-| 言行一致性       |  —   |  —   | 15%  | 18%  |
-| 風險警示         | 12%  |  5%  |  5%  |  5%  |
+| Factor          | 程式 ID | 當沖 | 短期 | 中期 | 長期 |
+|-----------------|---------|:----:|:----:|:----:|:----:|
+| 技術面           | `technical` | 42% | 22% |  5% |  —  |
+| 美股連動         | `us_market` | 18% | 15% | 10% |  5% |
+| 三大法人         | `chips` | 18% | 18% |  6% |  —  |
+| 大戶結構 (TDCC) | `distribution` |  7% | 10% |  8% |  5% |
+| ETF 共識        | `etf_consensus` |  5% | 12% | 16% | 17% |
+| 基本面           | `fundamental` |  —  | 10% | 20% | 28% |
+| 法說語意         | `llm_sentiment` |  —  |  8% | 16% | 22% |
+| 言行一致性       | `logic` |  —  |  —  | 14% | 18% |
+| 風險警示         | `risk` | 10% |  5% |  5% |  5% |
+
+> 評分量表的停損/停利建議為**分析參考**，與 bot 自動下單參數不同。見 [docs/glossary.md](docs/glossary.md)。
 
 對應到 `STRONG_BUY / BUY / HOLD / REDUCE / SELL` 五級建議，
 搭配每個時間框架的進場/停損/停利規則。
@@ -1039,16 +1083,21 @@ class MyCustomStrategy(BaseStrategy):
             self._place_stop_sell(symbol, self.positions[symbol].quantity)
 ```
 
-然後在 `main.py` 中替換 `MyStrategy` 為你的策略類別即可。
+然後在 `main.py` 依 `STRATEGY_TYPE` 分支加入你的策略類別，或擴充現有 `configurable` / `etf_follow`。
 三種模式皆可使用，watch/report 模式會自動以虛擬成交記錄訊號。
 
 ## 策略規劃文件
 
-- **[docs/futures-spot-strategy.md](docs/futures-spot-strategy.md)** -- 「期貨為輔、現貨為主」的 AI 自動化交易策略架構：
-  期貨 QA 精華（盤前跌開盤漲現象、4 大期貨觀察指標）+ 三套自動化策略（夜盤跳空捕捉 / 外資籌碼防禦網 / 本地 LLM 情緒分析）+ 與現有系統的落地路徑。
-  其中「台指期正逆價差」已作為**期貨領先指標**整合進當沖 / 投資分析的 LLM prompts。
-- **[docs/data-sources.md](docs/data-sources.md)** -- 所有外部資料源清單（URL、用途、是否需憑證、失敗 fallback）
-  與一鍵只讀健康度驗證 `uv run stock-validate` 的用法。
+- **[docs/setup.md](docs/setup.md)** -- 安裝與開戶設定（權威安裝指南）
+- **[docs/architecture.md](docs/architecture.md)** -- 系統架構與模組職責
+- **[docs/operations.md](docs/operations.md)** -- 日常運維、排程與 log
+- **[docs/glossary.md](docs/glossary.md)** -- 全專案術語對照表（代號、損益、停損停利、持倉、風控層級）
+- **[docs/trading-rules.md](docs/trading-rules.md)** -- 自動買賣規則（ConfigurableStrategy / EtfFollowStrategy / 出場規則）
+- **[docs/profit-plan.md](docs/profit-plan.md)** -- 資金與風險規劃
+- **[docs/dashboard-sop.md](docs/dashboard-sop.md)** -- Dashboard 開發與操作 SOP
+- **[prompts/README.md](prompts/README.md)** -- Prompt 清單與狀態（active / planned / archived）
+- **[docs/futures-spot-strategy.md](docs/futures-spot-strategy.md)** -- 「期貨為輔、現貨為主」的 AI 自動化交易策略架構（規劃文件）
+- **[docs/data-sources.md](docs/data-sources.md)** -- 所有外部資料源清單與 `uv run stock-validate` 用法
 
 ## 參考
 

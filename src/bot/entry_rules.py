@@ -24,6 +24,6 @@ def resolve_entry_range(symbol: str, settings: Settings) -> Tuple[float, float]:
 
 
 def in_entry_range(symbol: str, pct_chg: float, settings: Settings) -> bool:
-    """漲幅是否在允許的進場區間內 (不含邊界)。"""
+    """漲幅是否在允許的進場區間內（含邊界，例：漲 1.0% 即符合下限）。"""
     lo, hi = resolve_entry_range(symbol, settings)
-    return lo < pct_chg < hi
+    return lo <= pct_chg <= hi

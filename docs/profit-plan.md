@@ -54,7 +54,7 @@
 
 | 風控項目 | 設計 |
 |----------|------|
-| 每檔只進場一次 | `_enter_placed` 確保停損後不會同一支再進場 |
+| 防重複送單 | `_enter_placed` 防止同一檔重複委託；平倉後清除。若 `ALLOW_SAME_DAY_REENTRY=true`（ConfigurableStrategy），可回落買回再進 |
 | 總資金上限 | `MAX_FUND` 限制當日最大曝險 |
 | 全出場時間 | `EXIT_TIME` (13:15) 確保不留部位 |
 

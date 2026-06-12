@@ -1,4 +1,4 @@
-"""策略引擎 -- BaseStrategy 基底類別 + MyStrategy 示範當沖策略。
+"""策略引擎 -- BaseStrategy 基底類別。
 
 BaseStrategy 提供：
   - 部位管理 / 委託單追蹤
@@ -6,26 +6,39 @@ BaseStrategy 提供：
   - 收盤全出場定時器
   - 委託狀態輪詢更新器 (trade 模式)
   - watch/report 模式的虛擬部位 + SignalRecorder
+  - 共用出場邏輯（使用者目標 / 移動停利 / 停損）
 
-MyStrategy 示範：
-  - 開盤 N 分鐘內、漲幅 1%~5% 買進
-  - 固定百分比停損 / 停利
-  - 收盤前市價全出
+具體進場邏輯由子類別實作：`ConfigurableStrategy`、`EtfFollowStrategy`。
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from shioaji import Exchange, TickSTKv1
 from shioaji.constant import Action, OrderState
 
+from bot.events import (
+    BotStarted,
+    ClosureCompleted,
+    RiskEntryBlocked,
+    TickReceived,
+    TradeBuyFilled,
+    TradeSellFilled,
+    get_event_bus,
+    publish_if_bus,
+    wire_trading_handlers,
+)
+from bot.events.protocols import EventPublisher
 from bot.models import MarketTick, OrderRecord, PositionInfo, QtyUnit, SignalEvent, qty_multiplier
 from bot.notifier import TelegramNotifier
 from bot.ownership import (
@@ -35,15 +48,34 @@ from bot.ownership import (
     is_bot_order_field,
     is_bot_owner,
 )
+from bot.intraday_llm_advisor import IntradayLlmAdvisor
+from bot.llm_gate import LlmGate
 from bot.recorder import TradeRecorder
-from bot.risk_guard import RiskGuard
+from bot.risk_guard import EntryKind, RiskGuard
 from bot.signal_recorder import SignalRecorder
+from bot.trade_cost import (
+    buy_cash_required,
+    max_affordable_qty,
+    net_pnl_twd,
+    position_net_pnl_pct,
+    rebuy_opportunity,
+)
 from bot.utils import get_logger, now_tw, now_tw_time
 
 if TYPE_CHECKING:
     from bot.broker import SjBroker
     from bot.config import Settings
     from bot.market_source import TwsePublicMarketSource
+
+
+@dataclass
+class SymbolExitRecord:
+    """單檔最近一次賣出紀錄（供回落買回）。"""
+    exit_price: float
+    exit_net_pnl_pct: float
+    exit_time: dt.datetime
+    quantity: int
+    unit: QtyUnit
 
 
 class BaseStrategy(ABC):
@@ -55,11 +87,15 @@ class BaseStrategy(ABC):
         settings: Settings,
         market_source: Optional[TwsePublicMarketSource] = None,
         logger: Optional[logging.Logger] = None,
+        publisher: Optional[EventPublisher] = None,
+        *,
+        wire_handlers: bool = True,
     ):
         self.broker = broker
         self.settings = settings
         self._market_source = market_source
         self.logger = logger or get_logger("strategy")
+        self._publisher: EventPublisher = publisher or get_event_bus()
 
         # 部位管理
         self.positions: Dict[str, PositionInfo] = {}
@@ -71,18 +107,25 @@ class BaseStrategy(ABC):
         # 已送出進場/出場的 order record
         self.order_records: Dict[str, OrderRecord] = {}
 
-        # 已送出進場單的 symbol (避免重複進場)
+        # 已送出進場單的 symbol (避免重複送單；平倉後清除)
         self._enter_placed: Set[str] = set()
+
+        # 單檔最近一次賣出（回落買回用）
+        self._symbol_exits: Dict[str, SymbolExitRecord] = {}
+
+        # 持倉期間淨利高點 %（移動停利用）
+        self._peak_net_pnl: Dict[str, float] = {}
 
         # 收盤全出場標記
         self._closure_placed: Set[str] = set()
+        self._closure_pending: Set[str] = set()
         self._closure_blocked: Set[str] = set()
+
+        # 委託 metadata: ordno -> {symbol, action, custom_field}
+        self._order_meta: Dict[str, dict] = {}
 
         # Tick 佇列: (exchange, tick) -- trade/watch 模式
         self._tick_queue: Queue = Queue(maxsize=50_000)
-
-        # 資金追蹤: 已投入的總金額
-        self._fund_used: float = 0.0
 
         # 進場單位追蹤 (整張 / 零股)
         self._entry_units: Dict[str, QtyUnit] = {}
@@ -109,9 +152,37 @@ class BaseStrategy(ABC):
 
         # 風險 / 資金控制 (所有實際下單都會經過)
         self.risk = RiskGuard(settings=settings, logger=self.logger)
+        self._fund_used = self.risk.fund_used
+
+        # LLM 進出場閘門 (賣出前 AI 分析等)
+        self.llm_gate = LlmGate(
+            settings=settings,
+            risk=self.risk,
+            logger=self.logger,
+        )
+        self.intraday_advisor = IntradayLlmAdvisor(
+            settings,
+            project_root=Path.cwd(),
+            risk=self.risk,
+            llm_gate=self.llm_gate,
+            logger=self.logger,
+        )
+
+        if wire_handlers:
+            wire_trading_handlers(
+                self._publisher,
+                recorder=self.recorder,
+                notifier=self.notifier,
+                risk=self.risk,
+            )
 
         # 控制旗標
         self._running = False
+
+        # 四源監控池
+        self._watch_pool_lock = threading.Lock()
+        self._last_watch_pool_refresh = 0.0
+        self._watch_subscribed: Set[str] = set()
 
     # ------------------------------------------------------------------
     # 模式判斷
@@ -120,6 +191,77 @@ class BaseStrategy(ABC):
     @property
     def _is_trade_mode(self) -> bool:
         return self.settings.run_mode == "trade"
+
+    def _fund_cap(self) -> int:
+        return self.settings.effective_fund_cap()
+
+    def _run_startup_safety_and_restore(self) -> None:
+        """啟動對帳 + 恢復持久化資金與 AI 部位。"""
+        from bot.position_safety import run_startup_safety_checks
+        from bot.portfolio import load_bot_portfolio
+
+        report = run_startup_safety_checks(
+            self.settings,
+            project_root=Path.cwd(),
+            broker=self.broker,
+            risk=self.risk,
+        )
+        if not report.ok:
+            for msg in report.blocking_messages:
+                self.logger.warning("啟動安全檢查: %s", msg)
+            self.logger.warning(
+                "啟動安全檢查未通過 (%s)，Kill Switch 已拉起，僅允許平倉既有 AI 部位",
+                report.summary,
+            )
+        else:
+            self.logger.info("啟動安全檢查通過")
+
+        self._fund_used = self.risk.fund_used
+        _, bot_positions = load_bot_portfolio(Path.cwd())
+        monitored = set(self.settings.symbols or [])
+        for symbol, ppos in bot_positions.items():
+            if symbol not in monitored or ppos.qty <= 0:
+                continue
+            if ppos.qty >= 1.0 - 1e-9:
+                unit: QtyUnit = "lot"
+                quantity = int(round(ppos.qty))
+            elif self.settings.use_odd_lot:
+                unit = "share"
+                quantity = int(round(ppos.qty * 1000))
+            else:
+                continue
+            if quantity <= 0:
+                continue
+            self.positions[symbol] = PositionInfo(
+                symbol=symbol,
+                avg_price=ppos.avg_cost,
+                quantity=quantity,
+                owner_tag=BOT_OWNER_TAG,
+                unit=unit,
+            )
+            self._enter_placed.add(symbol)
+            self.logger.info(
+                "恢復 AI 部位: %s %d %s @ %.2f",
+                symbol,
+                quantity,
+                "股" if unit == "share" else "張",
+                ppos.avg_cost,
+            )
+
+        if self._fund_used <= 0 and self.positions:
+            restored_cost = sum(
+                buy_cash_required(
+                    pos.avg_price, pos.quantity, pos.unit, settings=self.settings,
+                )
+                for pos in self.positions.values()
+            )
+            if restored_cost > 0:
+                self._fund_used = restored_cost
+                self.risk.set_fund_used(
+                    restored_cost,
+                    open_symbols=list(self.positions.keys()),
+                )
+                self.logger.info("由部位推算已用資金: %.0f", self._fund_used)
 
     # ------------------------------------------------------------------
     # 啟動 / 停止
@@ -137,6 +279,13 @@ class BaseStrategy(ABC):
     def _run_shioaji_mode(self) -> None:
         """trade / watch 模式: Shioaji 即時行情。"""
         assert self.broker is not None, "trade/watch 模式需要 SjBroker"
+
+        if getattr(self.settings, "symbols_auto_merge", True):
+            self._merge_watch_pool(reason="startup", refresh_live_quotes=False)
+
+        if self._is_trade_mode:
+            self._run_startup_safety_and_restore()
+            self._ensure_position_symbols_monitored()
 
         self.broker.set_on_tick(self._enqueue_tick)
         if self._is_trade_mode:
@@ -161,15 +310,36 @@ class BaseStrategy(ABC):
                     name="order-updater",
                 )
             )
+        if getattr(self.settings, "llm_intraday_review_enabled", False):
+            threads.append(
+                threading.Thread(
+                    target=lambda: self.intraday_advisor.run_loop(
+                        lambda: self._running,
+                    ),
+                    daemon=True,
+                    name="intraday-llm-advisor",
+                )
+            )
+        if getattr(self.settings, "symbols_auto_merge", True):
+            threads.append(
+                threading.Thread(
+                    target=self._watch_pool_refresh_loop,
+                    daemon=True,
+                    name="watch-pool-refresh",
+                )
+            )
         for t in threads:
             t.start()
 
         mode_label = "交易" if self._is_trade_mode else "看盤"
         self.logger.info("策略已啟動 [%s 模式]，監控 %s", mode_label, self.settings.symbols)
-        self.notifier.notify_start(
-            self.settings.symbols,
-            self.settings.simulation,
-            self.settings.run_mode,
+        publish_if_bus(
+            self._publisher,
+            BotStarted(
+                symbols=tuple(self.settings.symbols),
+                run_mode=self.settings.run_mode,
+                simulation=self.settings.simulation,
+            ),
         )
 
         try:
@@ -203,6 +373,15 @@ class BaseStrategy(ABC):
                 for tick in ticks:
                     self._last_price[tick.symbol] = tick.price
                     self.signal_recorder.record_tick(tick)
+                    publish_if_bus(
+                        self._publisher,
+                        TickReceived(
+                            symbol=tick.symbol,
+                            price=tick.price,
+                            pct_chg=tick.pct_chg,
+                            source=tick.source,
+                        ),
+                    )
                     try:
                         self.on_tick(tick)
                     except Exception:
@@ -248,6 +427,16 @@ class BaseStrategy(ABC):
             if not self._is_trade_mode:
                 self.signal_recorder.record_tick(tick)
 
+            publish_if_bus(
+                self._publisher,
+                TickReceived(
+                    symbol=tick.symbol,
+                    price=tick.price,
+                    pct_chg=tick.pct_chg,
+                    source=tick.source,
+                ),
+            )
+
             try:
                 self.on_tick(tick)
             except Exception:
@@ -279,8 +468,83 @@ class BaseStrategy(ABC):
     def _subscribe_symbols(self) -> None:
         assert self.broker is not None
         for symbol in self.settings.symbols:
+            if symbol in self._watch_subscribed:
+                continue
             self.broker.subscribe_tick(symbol)
+            self._watch_subscribed.add(symbol)
             time.sleep(0.1)
+
+    def _ensure_position_symbols_monitored(self) -> None:
+        """持倉標的永遠留在監控池（即使已跌出四源排行）。"""
+        symbols = list(self.settings.symbols or [])
+        changed = False
+        for symbol in self.positions:
+            if symbol not in symbols:
+                symbols.append(symbol)
+                changed = True
+        if changed:
+            self.settings.symbols = symbols
+
+    def _merge_watch_pool(
+        self,
+        *,
+        reason: str,
+        refresh_live_quotes: bool = False,
+    ) -> List[str]:
+        from bot.watch_symbol_pool import merge_watch_symbols_into_settings
+
+        if not getattr(self.settings, "symbols_auto_merge", True):
+            return []
+        with self._watch_pool_lock:
+            before = set(self.settings.symbols or [])
+            merge_watch_symbols_into_settings(
+                self.settings,
+                Path.cwd(),
+                reason=reason,
+                refresh_live_quotes=refresh_live_quotes,
+                logger=self.logger,
+            )
+            self._ensure_position_symbols_monitored()
+            return [s for s in self.settings.symbols if s not in before]
+
+    def _sync_watch_subscriptions(self, added: List[str]) -> None:
+        if not added or self.broker is None:
+            return
+        need = [s for s in added if s not in self._watch_subscribed]
+        if not need:
+            return
+        refs = self.broker.get_snapshots(need)
+        self._prev_close.update(refs)
+        for symbol in need:
+            self.broker.subscribe_tick(symbol)
+            self._watch_subscribed.add(symbol)
+            time.sleep(0.1)
+
+    def _watch_pool_refresh_loop(self) -> None:
+        from bot.watch_symbol_pool import in_watch_pool_refresh_window
+
+        tick_sec = 60
+        while self._running:
+            time.sleep(tick_sec)
+            if not getattr(self.settings, "symbols_auto_merge", True):
+                continue
+            if not in_watch_pool_refresh_window():
+                continue
+            interval_sec = max(
+                60,
+                int(getattr(self.settings, "symbols_merge_refresh_min", 10)) * 60,
+            )
+            if time.time() - self._last_watch_pool_refresh < interval_sec:
+                continue
+            try:
+                added = self._merge_watch_pool(
+                    reason="scheduled",
+                    refresh_live_quotes=True,
+                )
+                self._sync_watch_subscriptions(added)
+                self._last_watch_pool_refresh = time.time()
+            except Exception:
+                self.logger.exception("監控池盤中刷新失敗")
 
     # ------------------------------------------------------------------
     # 委託回報處理 (trade 模式)
@@ -310,8 +574,6 @@ class BaseStrategy(ABC):
 
     def _handle_deal(self, msg: dict) -> None:
         """處理成交回報，更新部位並推入交易紀錄 (trade 模式)。"""
-        self.recorder.record_deal(msg)
-
         symbol = msg.get("code", "")
         action = msg.get("action", "")
         price = float(msg.get("price", 0))
@@ -337,11 +599,10 @@ class BaseStrategy(ABC):
                     )
                     return
                 unit = self._entry_units.pop(symbol, "lot")
+                buy_meta = self._order_meta.pop(ordno, {})
+                trade_reason = str(buy_meta.get("custom_field", "enter"))
                 if symbol in self.positions:
                     unit = self.positions[symbol].unit
-                mult = qty_multiplier(unit)
-                cost = price * qty * mult
-                self._fund_used += cost
                 if symbol in self.positions:
                     self.positions[symbol].update(price, qty)
                 else:
@@ -350,11 +611,23 @@ class BaseStrategy(ABC):
                         owner_tag=BOT_OWNER_TAG, unit=unit,
                     )
                 self.risk.on_entry_filled(symbol, price, qty, unit=unit)
+                self._fund_used = self.risk.fund_used
+                publish_if_bus(
+                    self._publisher,
+                    TradeBuyFilled(
+                        symbol=symbol,
+                        price=price,
+                        quantity=qty,
+                        unit=unit,
+                        order_msg=dict(msg),
+                        trade_reason=trade_reason,
+                    ),
+                )
                 self.logger.info(
                     "部位更新 (買入): %s | 已用資金: %.0f",
                     self.positions[symbol], self._fund_used,
                 )
-                self.notifier.notify_buy(symbol, price, qty)
+                self.intraday_advisor.request_refresh(f"fill:buy:{symbol}")
 
             elif action == "Sell":
                 if symbol not in self.positions:
@@ -363,6 +636,17 @@ class BaseStrategy(ABC):
                         symbol, qty, price, custom,
                     )
                     return
+                sell_unit = self.positions[symbol].unit
+                sell_meta = self._order_meta.pop(ordno, {})
+                entry_price = self.positions[symbol].avg_price
+                sell_pnl_pct = self._position_pnl_pct(symbol, price) or 0.0
+                sell_pnl_twd = net_pnl_twd(
+                    entry_price, price, qty, sell_unit,
+                    settings=self.settings,
+                )
+                trade_reason = str(
+                    sell_meta.get("custom_field", custom) or custom,
+                )
                 if not is_bot_owner(self.positions[symbol].owner_tag):
                     self.logger.warning(
                         "阻擋非 AI 標籤部位賣出更新: %s owner=%s",
@@ -370,16 +654,37 @@ class BaseStrategy(ABC):
                     )
                     return
                 unit = self.positions[symbol].unit
-                mult = qty_multiplier(unit)
-                released = price * qty * mult
-                self._fund_used = max(0.0, self._fund_used - released)
-                self.notifier.notify_sell(symbol, price, qty, custom)
-                entry_price = self.positions[symbol].avg_price if symbol in self.positions else price
-                self.risk.on_exit_filled(symbol, entry_price, price, qty, unit=unit)
                 if symbol in self.positions:
                     closed = self.positions[symbol].reduce(qty)
+                    self.risk.on_exit_filled(
+                        symbol, entry_price, price, qty, unit=unit,
+                        position_closed=closed,
+                    )
+                    self._fund_used = self.risk.fund_used
+                    publish_if_bus(
+                        self._publisher,
+                        TradeSellFilled(
+                            symbol=symbol,
+                            price=price,
+                            quantity=qty,
+                            unit=unit,
+                            order_msg=dict(msg),
+                            trade_reason=trade_reason,
+                            entry_price=entry_price,
+                            pnl_pct=sell_pnl_pct,
+                            pnl_twd=sell_pnl_twd,
+                            position_closed=closed,
+                        ),
+                    )
+                    self.intraday_advisor.request_refresh(f"fill:sell:{symbol}")
                     if closed:
+                        self._on_position_closed(
+                            symbol, entry_price, price, qty, unit,
+                        )
                         del self.positions[symbol]
+                        self._closure_pending.discard(symbol)
+                        if custom == bot_sell_field("close"):
+                            self._closure_placed.add(symbol)
                         self.logger.info("部位已清空: %s", symbol)
                     else:
                         self.logger.info("部位更新 (賣出): %s", self.positions[symbol])
@@ -398,10 +703,6 @@ class BaseStrategy(ABC):
         unit: QtyUnit = "lot",
         llm_gate: str = "",
     ) -> None:
-        mult = qty_multiplier(unit)
-        cost = price * quantity * mult
-        self._fund_used += cost
-
         if symbol in self.positions:
             self.positions[symbol].update(price, quantity)
         else:
@@ -410,6 +711,7 @@ class BaseStrategy(ABC):
                 owner_tag=BOT_OWNER_TAG, unit=unit,
             )
         self.risk.on_entry_filled(symbol, price, quantity, unit=unit)
+        self._fund_used = self.risk.fund_used
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -447,22 +749,28 @@ class BaseStrategy(ABC):
     ) -> None:
         pos = self.positions.get(symbol)
         sell_unit = unit or (pos.unit if pos else "lot")
-        mult = qty_multiplier(sell_unit)
-        released = price * quantity * mult
-        self._fund_used = max(0.0, self._fund_used - released)
 
         pnl_pct = 0.0
         entry_price = price
+        closed = False
         if pos is not None:
             if pos.avg_price > 0:
-                pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
+                pnl_pct = self._position_pnl_pct(symbol, price) or 0.0
             entry_price = pos.avg_price
             closed = pos.reduce(quantity)
             if closed:
+                self._on_position_closed(
+                    symbol, entry_price, price, quantity, sell_unit,
+                )
                 del self.positions[symbol]
+                self._peak_net_pnl.pop(symbol, None)
         self.risk.on_exit_filled(
             symbol, entry_price, price, quantity, unit=sell_unit,
+            position_closed=closed,
         )
+        self._fund_used = self.risk.fund_used
+        if closed and reason == "close":
+            self._closure_placed.add(symbol)
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -508,11 +816,24 @@ class BaseStrategy(ABC):
                     status = trade.status.status.value
                     ordno = getattr(trade.order, "ordno", "")
                     symbol = getattr(trade.contract, "code", "")
+                    action = str(getattr(trade.order, "action", ""))
 
                     if status in ("Filled", "Cancelled", "Failed"):
                         with self._pending_lock[symbol]:
                             if ordno in self.pending_orders.get(symbol, []):
                                 self.pending_orders[symbol].remove(ordno)
+                        if status in ("Cancelled", "Failed"):
+                            meta = self._order_meta.pop(ordno, {})
+                            meta_symbol = meta.get("symbol", symbol)
+                            meta_action = meta.get("action", action)
+                            if meta_action == "Buy" and meta_symbol not in self.positions:
+                                self._enter_placed.discard(meta_symbol)
+                                self.risk.release_entry_exposure(meta_symbol)
+                            elif meta_action == "Sell":
+                                if meta.get("custom_field") == "close":
+                                    self._closure_pending.discard(meta_symbol)
+                        elif status == "Filled":
+                            self._order_meta.pop(ordno, None)
             except Exception:
                 self.logger.exception("委託狀態更新例外")
 
@@ -531,7 +852,7 @@ class BaseStrategy(ABC):
                 continue
 
             for symbol, pos in list(self.positions.items()):
-                if symbol in self._closure_placed:
+                if symbol in self._closure_placed or symbol in self._closure_pending:
                     continue
 
                 if pos.quantity <= 0:
@@ -549,29 +870,27 @@ class BaseStrategy(ABC):
                         if len(self.pending_orders.get(symbol, [])) > 0:
                             continue
 
-                        self.logger.info(
-                            "全出場: %s %d 張 (市價 IOC)", symbol, pos.quantity,
-                        )
-                        assert self.broker is not None
-                        trade = self.broker.place_market_sell(
-                            symbol, pos.quantity,
-                            custom_field=bot_sell_field("close"),
-                        )
-                        if trade:
-                            ordno = getattr(trade.order, "ordno", "")
-                            self.pending_orders[symbol].append(ordno)
-                            self._closure_placed.add(symbol)
+                    self.logger.info(
+                        "全出場: %s %d 張 (市價 IOC)", symbol, pos.quantity,
+                    )
+                    self._place_stop_sell(
+                        symbol, pos.quantity, custom_field="close",
+                    )
                 else:
                     self.logger.info(
                         "[虛擬全出場] %s %d 張 @ %.2f", symbol, pos.quantity, price,
                     )
-                    self._virtual_fill_sell(symbol, price, pos.quantity, "close")
-                    self._closure_placed.add(symbol)
+                    self._place_stop_sell(
+                        symbol, pos.quantity, custom_field="close",
+                    )
 
             if not self.positions:
                 self.logger.info("所有部位已清空，策略結束")
                 if self._is_trade_mode:
-                    self.notifier.notify_closure(self.recorder.summary())
+                    publish_if_bus(
+                        self._publisher,
+                        ClosureCompleted(trade_summary=self.recorder.summary()),
+                    )
                 self._running = False
                 break
 
@@ -596,21 +915,24 @@ class BaseStrategy(ABC):
             return len(self.pending_orders.get(symbol, [])) > 0
 
     def _calc_quantity(self, price: float) -> tuple[int, QtyUnit]:
-        """依剩餘資金計算可買張數或零股數。"""
-        cost_per_lot = price * 1000
-        if cost_per_lot <= 0:
+        """依剩餘資金計算可買張數或零股數（含手續費）。"""
+        if price <= 0:
             return 0, "lot"
 
-        remaining = self.settings.max_fund - self._fund_used
-        if remaining >= cost_per_lot:
-            max_by_fund = int(remaining / cost_per_lot)
-            qty = min(max_by_fund, self.settings.max_lot_per_symbol)
+        remaining = self.risk.effective_fund_remaining()
+        qty = max_affordable_qty(
+            price, remaining, "lot",
+            max_qty=self.settings.max_lot_per_symbol,
+            settings=self.settings,
+        )
+        if qty >= 1:
             return qty, "lot"
 
         if getattr(self.settings, "use_odd_lot", False):
-            max_shares = min(
-                int(remaining / price),
-                getattr(self.settings, "odd_lot_max_shares", 999),
+            max_shares = max_affordable_qty(
+                price, remaining, "share",
+                max_qty=getattr(self.settings, "odd_lot_max_shares", 999),
+                settings=self.settings,
             )
             if max_shares >= 1:
                 return max_shares, "share"
@@ -629,20 +951,40 @@ class BaseStrategy(ABC):
         llm_gate: str = "",
     ) -> bool:
         # === 風控守門員 ===
+        available_balance = None
+        enforce_account_balance = False
+        if self._is_trade_mode and self.settings.check_account_balance and self.broker:
+            enforce_account_balance = True
+            available_balance = self.broker.get_available_balance()
+
+        if custom_field == "rebuy":
+            entry_kind: EntryKind = "rebuy"
+        elif custom_field == "reenter":
+            entry_kind = "reenter"
+        else:
+            entry_kind = "enter"
         decision = self.risk.check_entry(
             symbol=symbol,
             price=price,
             requested_lots=quantity,
             unit=unit,
             pct_chg=pct_chg,
+            available_balance=available_balance,
+            enforce_account_balance=enforce_account_balance,
+            entry_kind=entry_kind,
         )
         if not decision.allowed:
             self.logger.warning(
                 "進場被風控拒絕 [%s] %s: %s",
                 decision.blocking_rule, symbol, decision.reason,
             )
-            self.notifier.send(
-                f"⛔ 進場被風控擋下 {symbol}：{decision.reason}",
+            publish_if_bus(
+                self._publisher,
+                RiskEntryBlocked(
+                    symbol=symbol,
+                    reason=decision.reason,
+                    blocking_rule=decision.blocking_rule,
+                ),
             )
             return False
         if decision.adjusted_lots != quantity:
@@ -663,6 +1005,10 @@ class BaseStrategy(ABC):
             return True
 
         assert self.broker is not None
+        reserved_cost = buy_cash_required(
+            price, quantity, unit, settings=self.settings,
+        )
+        self.risk.reserve_entry_exposure(symbol, reserved_cost)
         self._entry_units[symbol] = unit
         if unit == "share":
             trade = self.broker.place_odd_lot_order(
@@ -681,12 +1027,18 @@ class BaseStrategy(ABC):
                 custom_field=bot_buy_field(custom_field),
             )
         if trade is None:
+            self.risk.release_entry_exposure(symbol)
             self._entry_units.pop(symbol, None)
             return False
 
         ordno = getattr(trade.order, "ordno", "")
         with self._pending_lock[symbol]:
             self.pending_orders[symbol].append(ordno)
+        self._order_meta[ordno] = {
+            "symbol": symbol,
+            "action": "Buy",
+            "custom_field": custom_field,
+        }
         self._enter_placed.add(symbol)
         return True
 
@@ -699,11 +1051,34 @@ class BaseStrategy(ABC):
         llm_gate: str = "",
     ) -> bool:
         price = self._last_price.get(symbol, 0.0)
+        pos = self.positions.get(symbol)
+        if pos is None:
+            return False
+        quantity = min(quantity, pos.quantity)
+        if quantity <= 0:
+            return False
+
         if not self._can_auto_sell(symbol, quantity, custom_field, price=price):
             return False
 
-        pos = self.positions.get(symbol)
-        unit = pos.unit if pos else "lot"
+        pnl_pct = self._position_pnl_pct(symbol, price) or 0.0
+        exit_verdict = self.llm_gate.allow_exit(
+            symbol, pos, price, pnl_pct, custom_field,
+        )
+        if not exit_verdict.allowed:
+            self.logger.info(
+                "🤖 AI 建議續抱，暫不賣出 %s [%s]: %s",
+                symbol, custom_field, exit_verdict.summary,
+            )
+            self._record_sell_blocked(
+                symbol, price, quantity, custom_field,
+                pnl_pct=pnl_pct, llm_gate=exit_verdict.summary,
+                unit=pos.unit,
+            )
+            return False
+
+        llm_gate = exit_verdict.summary or llm_gate
+        unit = pos.unit
 
         if not self._is_trade_mode:
             self._virtual_fill_sell(
@@ -720,10 +1095,12 @@ class BaseStrategy(ABC):
                 shares=quantity,
                 price=price,
                 custom_field=bot_sell_field(custom_field),
+                max_sell_qty=pos.quantity,
             )
         else:
             trade = self.broker.place_market_sell(
                 symbol, quantity, bot_sell_field(custom_field),
+                max_sell_qty=pos.quantity,
             )
         if trade is None:
             return False
@@ -731,6 +1108,13 @@ class BaseStrategy(ABC):
         ordno = getattr(trade.order, "ordno", "")
         with self._pending_lock[symbol]:
             self.pending_orders[symbol].append(ordno)
+        self._order_meta[ordno] = {
+            "symbol": symbol,
+            "action": "Sell",
+            "custom_field": custom_field,
+        }
+        if custom_field == "close":
+            self._closure_pending.add(symbol)
         return True
 
     def _sell_profit_target(self, symbol: str) -> Optional[float]:
@@ -744,7 +1128,67 @@ class BaseStrategy(ABC):
         pos = self.positions.get(symbol)
         if pos is None or pos.avg_price <= 0 or price <= 0:
             return None
-        return 100 * (price - pos.avg_price) / pos.avg_price
+        return position_net_pnl_pct(
+            pos.avg_price, price, pos.quantity, pos.unit,
+            settings=self.settings,
+        )
+
+    def _on_position_closed(
+        self,
+        symbol: str,
+        entry_price: float,
+        exit_price: float,
+        quantity: int,
+        unit: QtyUnit,
+    ) -> None:
+        """平倉後記錄賣出價、清除進場鎖，供回落買回。"""
+        self._enter_placed.discard(symbol)
+        self._peak_net_pnl.pop(symbol, None)
+        net_pct = position_net_pnl_pct(
+            entry_price, exit_price, quantity, unit,
+            settings=self.settings,
+        )
+        self._symbol_exits[symbol] = SymbolExitRecord(
+            exit_price=exit_price,
+            exit_net_pnl_pct=net_pct,
+            exit_time=now_tw(),
+            quantity=quantity,
+            unit=unit,
+        )
+
+    def _update_peak_net_pnl(self, symbol: str, price: float) -> tuple[float, float]:
+        """回傳 (current_net_pnl, peak_net_pnl)。"""
+        current = self._position_pnl_pct(symbol, price) or 0.0
+        peak = self._peak_net_pnl.get(symbol, current)
+        if current > peak:
+            peak = current
+            self._peak_net_pnl[symbol] = peak
+        return current, peak
+
+    def _in_profit_exit_window(self) -> bool:
+        """是否處於午盤獲利平倉窗口 [profit_exit_start_time, exit_time)。"""
+        start = getattr(self.settings, "profit_exit_start_time", None)
+        if start is None:
+            return False
+        cur = now_tw_time()
+        return start <= cur < self.settings.exit_time
+
+    def _trailing_stop_triggered(self, symbol: str, price: float) -> bool:
+        """淨利達門檻後，從淨利高點回撤超過 trailing_stop_pct。"""
+        if self.llm_gate.has_limit_up_potential(symbol):
+            return False
+        current, peak = self._update_peak_net_pnl(symbol, price)
+        if peak < self.settings.take_profit_pct:
+            return False
+        return (peak - current) >= self.settings.trailing_stop_pct
+
+    def _can_rebuy(self, symbol: str, price: float, qty: int, unit: QtyUnit) -> bool:
+        rec = self._symbol_exits.get(symbol)
+        if rec is None:
+            return False
+        return rebuy_opportunity(
+            rec.exit_price, price, qty, unit, settings=self.settings,
+        )
 
     def _can_auto_sell(
         self,
@@ -783,6 +1227,82 @@ class BaseStrategy(ABC):
 
         return self.risk.check_exit(symbol, reason)
 
+    def _record_sell_blocked(
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        reason: str,
+        *,
+        pnl_pct: float,
+        llm_gate: str,
+        unit: QtyUnit,
+    ) -> None:
+        """watch/report 模式記錄 AI 阻擋賣出的訊號。"""
+        if self._is_trade_mode:
+            return
+        prev_close = self._prev_close.get(symbol, 0.0)
+        pct_chg = (
+            100 * (price - prev_close) / prev_close if prev_close > 0 else 0.0
+        )
+        self.signal_recorder.record(SignalEvent(
+            ts=now_tw(),
+            symbol=symbol,
+            action="sell-blocked",
+            price=price,
+            quantity=quantity,
+            reason=reason,
+            pct_chg=pct_chg,
+            pnl_pct=pnl_pct,
+            mode=self.settings.run_mode,
+            source=self.settings.market_source,
+            unit=unit,
+            llm_gate=llm_gate,
+        ))
+
+    def _evaluate_standard_exits(self, symbol: str, price: float) -> bool:
+        """使用者目標 / 移動停利 / 停損出場。若已下賣單回傳 True。"""
+        if symbol not in self.positions or self._has_pending(symbol):
+            return False
+        pos = self.positions[symbol]
+        pnl_pct = self._position_pnl_pct(symbol, price) or 0.0
+        user_target_pct = self._sell_profit_target(symbol)
+
+        if user_target_pct is not None and pnl_pct >= user_target_pct:
+            self.logger.info(
+                "[使用者目標賣出] %s 淨利=%.2f%% (>= %.2f%%)",
+                symbol, pnl_pct, user_target_pct,
+            )
+            self._place_stop_sell(symbol, pos.quantity, custom_field="target")
+            return True
+
+        if self._in_profit_exit_window() and pnl_pct > 0:
+            self.logger.info(
+                "[午盤獲利平倉] %s 淨利=%.2f%% (窗口內有賺即出)",
+                symbol, pnl_pct,
+            )
+            self._place_stop_sell(symbol, pos.quantity, custom_field="afternoon")
+            return True
+
+        if self._trailing_stop_triggered(symbol, price):
+            current, peak = self._update_peak_net_pnl(symbol, price)
+            self.logger.info(
+                "[移動停利] %s 淨利=%.2f%% 高點=%.2f%%",
+                symbol, current, peak,
+            )
+            self._place_stop_sell(symbol, pos.quantity, custom_field="trail")
+            return True
+
+        if pnl_pct <= self.settings.stop_loss_pct:
+            self.logger.info(
+                "[停損] %s 淨利=%.2f%% (<= %.1f%%)",
+                symbol, pnl_pct, self.settings.stop_loss_pct,
+            )
+            self._place_stop_sell(symbol, pos.quantity, custom_field="sl")
+            return True
+
+        return False
+
     # ------------------------------------------------------------------
     # 抽象方法
     # ------------------------------------------------------------------
@@ -791,126 +1311,3 @@ class BaseStrategy(ABC):
     def on_tick(self, tick: MarketTick) -> None:
         """收到正規化 Tick 時的策略邏輯，由子類別實作。"""
         ...
-
-
-# ======================================================================
-# 示範策略
-# ======================================================================
-
-
-class MyStrategy(BaseStrategy):
-    """簡單當沖示範策略。
-
-    進場: 開盤後至 enter_cutoff_time 前，漲幅 1%~5% 時限價買進。
-    出場: 停損 / 停利 百分比觸發 → 市價 IOC 賣出。
-    全出場: exit_time 後市價清倉。
-    """
-
-    def __init__(
-        self,
-        broker: Optional[SjBroker],
-        settings: Settings,
-        market_source: Optional[TwsePublicMarketSource] = None,
-        logger: Optional[logging.Logger] = None,
-    ):
-        super().__init__(broker, settings, market_source, logger)
-        self._high_watermark: Dict[str, float] = {}
-
-    def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
-        self.logger.info("前日收盤已載入: %s", refs)
-
-    def on_tick(self, tick: MarketTick) -> None:
-        symbol = tick.symbol
-        price = tick.price
-        self._last_price[symbol] = price
-        cur_time = now_tw_time()
-
-        if symbol not in self._prev_close:
-            if tick.pct_chg:
-                ref = price / (1 + tick.pct_chg / 100)
-            else:
-                ref = price
-            self._prev_close[symbol] = ref
-            self.logger.debug("反推前日收盤: %s = %.2f", symbol, ref)
-
-        prev_close = self._prev_close[symbol]
-        if prev_close <= 0:
-            return
-
-        pct_chg = 100 * (price - prev_close) / prev_close
-
-        # === 進場邏輯 ===
-        if (
-            cur_time < self.settings.enter_cutoff_time
-            and symbol not in self._enter_placed
-            and not self._has_pending(symbol)
-            and symbol not in self.positions
-        ):
-            if 1.0 < pct_chg < 5.0:
-                lots = self._calc_lots(price)
-                if lots > 0:
-                    self.logger.info(
-                        "[進場] %s 漲幅 %.2f%% price=%.2f lots=%d",
-                        symbol, pct_chg, price, lots,
-                    )
-                    self._place_buy(
-                        symbol, price, lots,
-                        custom_field="enter", pct_chg=pct_chg,
-                    )
-
-        # === 停損 / 停利邏輯 ===
-        if (
-            cur_time < self.settings.exit_time
-            and symbol in self.positions
-            and not self._has_pending(symbol)
-        ):
-            pos = self.positions[symbol]
-            pnl_pct = 100 * (price - pos.avg_price) / pos.avg_price
-
-            hw = self._high_watermark.get(symbol, price)
-            if price > hw:
-                self._high_watermark[symbol] = price
-                hw = price
-
-            drawdown_pct = 100 * (hw - price) / hw if hw > 0 else 0
-            user_target_pct = self._sell_profit_target(symbol)
-
-            if user_target_pct is not None and pnl_pct >= user_target_pct:
-                self.logger.info(
-                    "[使用者目標賣出] %s PnL=%.2f%% (>= %.2f%%)",
-                    symbol, pnl_pct, user_target_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="target")
-
-            elif (
-                pnl_pct >= self.settings.take_profit_pct
-                and drawdown_pct >= self.settings.trailing_stop_pct
-            ):
-                self.logger.info(
-                    "[移動停利] %s PnL=%.2f%% 高點=%.2f 回撤=%.2f%%",
-                    symbol, pnl_pct, hw, drawdown_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="trail")
-
-            elif pnl_pct <= self.settings.stop_loss_pct:
-                self.logger.info(
-                    "[停損] %s PnL=%.2f%% (<= %.1f%%)",
-                    symbol, pnl_pct, self.settings.stop_loss_pct,
-                )
-                self._place_stop_sell(symbol, pos.quantity, custom_field="sl")
-
-    def _calc_lots(self, price: float) -> int:
-        """根據剩餘可用資金與每檔最大張數計算可買張數。"""
-        cost_per_lot = price * 1000
-        if cost_per_lot <= 0:
-            return 0
-
-        remaining = self.settings.max_fund - self._fund_used
-        if remaining < cost_per_lot:
-            self.logger.debug(
-                "資金不足: 剩餘 %.0f < 每張 %.0f", remaining, cost_per_lot,
-            )
-            return 0
-
-        max_by_fund = int(remaining / cost_per_lot)
-        return min(max_by_fund, self.settings.max_lot_per_symbol)

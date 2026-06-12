@@ -15,8 +15,9 @@ B. **持倉控制**
    * `blacklist_symbols` — 強制不交易
 
 C. **損失熔斷**
-   * `daily_max_loss_twd` — 當日累計虧損 (含未實現) 超過此值 → 停止開新倉
-   * `daily_max_loss_pct` — 同上，以 max_fund 百分比表示
+   * `daily_max_loss_twd` — 當日**已實現**累計虧損超過此值 → 停止開新倉並拉 Kill Switch
+   * `daily_max_loss_pct` — 同上，以 effective_fund_cap 百分比表示
+   * 未實現浮虧不計入熔斷（`update_unrealized_pnl` 僅供快照顯示）
 
 D. **下單頻率**
    * `daily_max_orders` — 當日進場單數上限
@@ -34,7 +35,7 @@ F. **手動 Kill Switch**
 
 G. **每日狀態**
    * 持久化到 `data/risk_state_YYYY-MM-DD.json` (每日清零)
-   * 內含: today_orders, today_pnl, last_exit_ts, kill_switch_engaged
+   * 內含: today_orders, realized_pnl_twd, last_exit_ts, kill_switch_engaged
 
 依賴注入
 ========
@@ -49,9 +50,12 @@ import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple
+
+EntryKind = Literal["enter", "reenter", "rebuy"]
 
 from bot.models import QtyUnit, qty_multiplier
+from bot.trade_cost import buy_cash_required, max_affordable_qty, net_pnl_twd
 
 from bot.utils import get_logger, now_tw
 
@@ -85,6 +89,8 @@ class DailyState:
     last_exit_ts: Dict[str, float] = field(default_factory=dict)
     kill_switch_engaged: bool = False
     blocked_attempts: List[Dict[str, str]] = field(default_factory=list)
+    fund_used: float = 0.0
+    open_positions: int = 0
 
 
 # ----------------------------------------------------------------------
@@ -115,12 +121,17 @@ class RiskGuard:
         self._fund_used: float = 0.0
         self._unrealized_pnl: float = 0.0
         self._open_positions: int = 0
+        self._open_symbols: Set[str] = set()
+        self._pending_exposure: Dict[str, float] = {}
 
         self.state = self._load_today_state()
-        # 黑名單常態化 (轉為 set)
-        self._blacklist = {s.strip() for s in (settings.blacklist_symbols or []) if s.strip()}
+        self._fund_used = float(self.state.fund_used)
+        self._open_positions = int(self.state.open_positions)
+        from bot.ownership import effective_trading_blacklist
+
+        self._blacklist = effective_trading_blacklist(settings)
         # 同步 fund_used 上限做為虧損百分比基準
-        self._loss_base = max(1.0, float(settings.max_fund))
+        self._loss_base = max(1.0, float(settings.effective_fund_cap()))
 
     # ------------------------------------------------------------------
     # 狀態持久化
@@ -147,6 +158,8 @@ class RiskGuard:
                 last_exit_ts=data.get("last_exit_ts", {}),
                 kill_switch_engaged=bool(data.get("kill_switch_engaged", False)),
                 blocked_attempts=data.get("blocked_attempts", []),
+                fund_used=float(data.get("fund_used", 0.0)),
+                open_positions=int(data.get("open_positions", 0)),
             )
         except Exception as e:
             self.logger.warning("讀取風控狀態失敗，重設今日狀態: %s", e)
@@ -155,12 +168,58 @@ class RiskGuard:
     def _persist(self) -> None:
         p = self._state_path()
         try:
+            self.state.fund_used = self._fund_used
+            self.state.open_positions = self._open_positions
             p.write_text(
                 json.dumps(asdict(self.state), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
             self.logger.exception("寫入風控狀態失敗")
+
+    @property
+    def fund_used(self) -> float:
+        return self._fund_used
+
+    @property
+    def open_positions_count(self) -> int:
+        return self._open_positions
+
+    def set_fund_used(
+        self,
+        amount: float,
+        *,
+        open_positions: Optional[int] = None,
+        open_symbols: Optional[List[str]] = None,
+    ) -> None:
+        """同步已用資金（啟動恢復部位時與策略對齊）。"""
+        with self._lock:
+            self._fund_used = max(0.0, float(amount))
+            if open_symbols is not None:
+                self._open_symbols = {s for s in open_symbols if s}
+                self._open_positions = len(self._open_symbols)
+            elif open_positions is not None:
+                self._open_positions = max(0, int(open_positions))
+            self._persist()
+
+    def effective_fund_remaining(self) -> float:
+        """可用預算（扣除已用資金與委託暫扣）。"""
+        with self._lock:
+            pending = sum(self._pending_exposure.values())
+            return max(
+                0.0,
+                float(self.settings.effective_fund_cap()) - self._fund_used - pending,
+            )
+
+    def reserve_entry_exposure(self, symbol: str, cost: float) -> None:
+        """trade 模式送單後暫扣額度，成交或取消時釋放。"""
+        with self._lock:
+            self._pending_exposure[symbol] = max(0.0, float(cost))
+
+    def release_entry_exposure(self, symbol: str) -> None:
+        """委託取消/失敗時釋放暫扣。"""
+        with self._lock:
+            self._pending_exposure.pop(symbol, None)
 
     # ------------------------------------------------------------------
     # Kill Switch
@@ -207,6 +266,9 @@ class RiskGuard:
         *,
         unit: QtyUnit = "lot",
         pct_chg: Optional[float] = None,
+        available_balance: Optional[float] = None,
+        enforce_account_balance: bool = False,
+        entry_kind: EntryKind = "enter",
     ) -> EntryDecision:
         """檢查是否可以進場。回傳是否允許 + 原因 + 調整後數量。
 
@@ -219,6 +281,9 @@ class RiskGuard:
         if unit == "share":
             return self._check_entry_shares(
                 symbol, price, requested_lots, pct_chg=pct_chg,
+                available_balance=available_balance,
+                enforce_account_balance=enforce_account_balance,
+                entry_kind=entry_kind,
             )
 
         # 1) Kill switch 最高優先
@@ -262,16 +327,18 @@ class RiskGuard:
                 0,
             )
 
-        per_sym = self.state.today_orders_per_symbol.get(symbol, 0)
-        if (
-            self.settings.per_symbol_daily_max_orders > 0
-            and per_sym >= self.settings.per_symbol_daily_max_orders
-        ):
-            return self._reject(
-                symbol, "per_symbol_orders_exceeded",
-                f"{symbol} 今日已進場 {per_sym} 次，達單檔上限 {self.settings.per_symbol_daily_max_orders}",
-                0,
-            )
+        if entry_kind != "rebuy":
+            per_sym = self.state.today_orders_per_symbol.get(symbol, 0)
+            if (
+                self.settings.per_symbol_daily_max_orders > 0
+                and per_sym >= self.settings.per_symbol_daily_max_orders
+            ):
+                return self._reject(
+                    symbol, "per_symbol_orders_exceeded",
+                    f"{symbol} 今日已進場 {per_sym} 次，達單檔上限 "
+                    f"{self.settings.per_symbol_daily_max_orders}",
+                    0,
+                )
 
         # 7) 同檔再進場冷卻
         cooldown = float(self.settings.reentry_cooldown_seconds)
@@ -286,9 +353,10 @@ class RiskGuard:
                         0,
                     )
 
-        # 8) 同時持倉檔數
+        # 8) 同時持倉檔數（加碼既有標的不佔新檔位）
         if (
             self.settings.max_open_positions > 0
+            and symbol not in self._open_symbols
             and self._open_positions >= self.settings.max_open_positions
         ):
             return self._reject(
@@ -315,33 +383,39 @@ class RiskGuard:
                 0,
             )
 
-        # 10) 單檔最大張數 + 單筆最大成本 → 壓張數
-        cost_per_lot = price * 1000  # 1 張 = 1000 股
-        if cost_per_lot <= 0:
+        # 10) 單檔最大張數 + 單筆/預算上限（含手續費）→ 壓張數
+        if price <= 0:
             return self._reject(symbol, "invalid_price", f"price={price}", 0)
 
         adjusted = min(requested_lots, self.settings.max_lot_per_symbol)
 
         if self.settings.per_order_max_cost_twd > 0:
-            max_lots_by_per_order = int(self.settings.per_order_max_cost_twd / cost_per_lot)
-            if max_lots_by_per_order < adjusted:
-                adjusted = max_lots_by_per_order
-
-        # 11) 剩餘可用資金
-        remaining = self.settings.max_fund - self._fund_used
-        if remaining < cost_per_lot:
-            return self._reject(
-                symbol, "insufficient_fund",
-                f"剩餘資金 {remaining:,.0f} < 每張 {cost_per_lot:,.0f}",
-                0,
+            max_by_order = max_affordable_qty(
+                price, float(self.settings.per_order_max_cost_twd), "lot",
+                max_qty=adjusted, settings=self.settings,
             )
-        max_lots_by_fund = int(remaining / cost_per_lot)
-        if max_lots_by_fund < adjusted:
-            adjusted = max_lots_by_fund
+            adjusted = min(adjusted, max_by_order)
+
+        remaining = self.effective_fund_remaining()
+        adjusted = max_affordable_qty(
+            price, remaining, "lot", max_qty=adjusted, settings=self.settings,
+        )
 
         if adjusted <= 0:
-            return self._reject(symbol, "adjusted_to_zero",
-                                "經風控調整後張數為 0", 0)
+            min_cost = buy_cash_required(price, 1, "lot", settings=self.settings)
+            return self._reject(
+                symbol, "insufficient_fund",
+                f"剩餘資金 {remaining:,.0f} < 含費每張約 {min_cost:,.0f}",
+                0,
+            )
+
+        balance_decision = self._check_account_balance_gate(
+            symbol, price, adjusted, "lot",
+            available_balance=available_balance,
+            enforce_account_balance=enforce_account_balance,
+        )
+        if balance_decision is not None:
+            return balance_decision
 
         return EntryDecision(
             allowed=True,
@@ -350,6 +424,33 @@ class RiskGuard:
             unit="lot",
         )
 
+    def _check_account_balance_gate(
+        self,
+        symbol: str,
+        price: float,
+        qty: int,
+        unit: QtyUnit,
+        *,
+        available_balance: Optional[float],
+        enforce_account_balance: bool,
+    ) -> Optional[EntryDecision]:
+        if not enforce_account_balance or not self.settings.check_account_balance:
+            return None
+        if available_balance is None:
+            return self._reject(
+                symbol, "account_balance_unavailable",
+                "無法讀取券商 account_balance，拒絕進場",
+                0, unit,
+            )
+        cost = buy_cash_required(price, qty, unit, settings=self.settings)
+        if cost > available_balance + 1e-9:
+            return self._reject(
+                symbol, "insufficient_account_balance",
+                f"含費成本 {cost:,.0f} > 帳戶可用 {available_balance:,.0f}",
+                0, unit,
+            )
+        return None
+
     def _check_entry_shares(
         self,
         symbol: str,
@@ -357,6 +458,9 @@ class RiskGuard:
         requested_shares: int,
         *,
         pct_chg: Optional[float] = None,
+        available_balance: Optional[float] = None,
+        enforce_account_balance: bool = False,
+        entry_kind: EntryKind = "enter",
     ) -> EntryDecision:
         """零股進場檢查 (unit=share)。"""
         if requested_shares <= 0:
@@ -400,17 +504,18 @@ class RiskGuard:
                 0, "share",
             )
 
-        per_sym = self.state.today_orders_per_symbol.get(symbol, 0)
-        if (
-            self.settings.per_symbol_daily_max_orders > 0
-            and per_sym >= self.settings.per_symbol_daily_max_orders
-        ):
-            return self._reject(
-                symbol, "per_symbol_orders_exceeded",
-                f"{symbol} 今日已進場 {per_sym} 次，達單檔上限 "
-                f"{self.settings.per_symbol_daily_max_orders}",
-                0, "share",
-            )
+        if entry_kind != "rebuy":
+            per_sym = self.state.today_orders_per_symbol.get(symbol, 0)
+            if (
+                self.settings.per_symbol_daily_max_orders > 0
+                and per_sym >= self.settings.per_symbol_daily_max_orders
+            ):
+                return self._reject(
+                    symbol, "per_symbol_orders_exceeded",
+                    f"{symbol} 今日已進場 {per_sym} 次，達單檔上限 "
+                    f"{self.settings.per_symbol_daily_max_orders}",
+                    0, "share",
+                )
 
         cooldown = float(self.settings.reentry_cooldown_seconds)
         if cooldown > 0:
@@ -426,6 +531,7 @@ class RiskGuard:
 
         if (
             self.settings.max_open_positions > 0
+            and symbol not in self._open_symbols
             and self._open_positions >= self.settings.max_open_positions
         ):
             return self._reject(
@@ -456,23 +562,32 @@ class RiskGuard:
         max_shares = min(requested_shares, self.settings.odd_lot_max_shares)
 
         if self.settings.per_order_max_cost_twd > 0:
-            max_by_order = int(self.settings.per_order_max_cost_twd / price)
-            if max_by_order < max_shares:
-                max_shares = max_by_order
-
-        remaining = self.settings.max_fund - self._fund_used
-        if remaining < price:
-            return self._reject(
-                symbol, "insufficient_fund",
-                f"剩餘資金 {remaining:,.0f} < 每股 {price:,.0f}",
-                0, "share",
+            max_by_order = max_affordable_qty(
+                price, float(self.settings.per_order_max_cost_twd), "share",
+                max_qty=max_shares, settings=self.settings,
             )
-        max_by_fund = int(remaining / price)
-        if max_by_fund < max_shares:
-            max_shares = max_by_fund
+            max_shares = min(max_shares, max_by_order)
+
+        remaining = self.effective_fund_remaining()
+        max_shares = max_affordable_qty(
+            price, remaining, "share", max_qty=max_shares, settings=self.settings,
+        )
 
         if max_shares <= 0:
-            return self._reject(symbol, "adjusted_to_zero", "經風控調整後股數為 0", 0, "share")
+            min_cost = buy_cash_required(price, 1, "share", settings=self.settings)
+            return self._reject(
+                symbol, "insufficient_fund",
+                f"剩餘資金 {remaining:,.0f} < 含費 1 股約 {min_cost:,.2f}",
+                0, "share",
+            )
+
+        balance_decision = self._check_account_balance_gate(
+            symbol, price, max_shares, "share",
+            available_balance=available_balance,
+            enforce_account_balance=enforce_account_balance,
+        )
+        if balance_decision is not None:
+            return balance_decision
 
         return EntryDecision(
             allowed=True,
@@ -529,10 +644,12 @@ class RiskGuard:
     ) -> None:
         """成交 (買進) 後呼叫。"""
         with self._lock:
-            mult = qty_multiplier(unit)
-            cost = price * lots * mult
+            self._pending_exposure.pop(symbol, None)
+            cost = buy_cash_required(price, lots, unit, settings=self.settings)
             self._fund_used += cost
-            self._open_positions += 1
+            if symbol not in self._open_symbols:
+                self._open_symbols.add(symbol)
+            self._open_positions = len(self._open_symbols)
             self.state.today_orders += 1
             self.state.today_orders_per_symbol[symbol] = (
                 self.state.today_orders_per_symbol.get(symbol, 0) + 1
@@ -552,16 +669,24 @@ class RiskGuard:
         lots: int,
         *,
         unit: QtyUnit = "lot",
+        position_closed: bool = False,
     ) -> None:
         """成交 (賣出) 後呼叫；自動累計實現損益。"""
         with self._lock:
-            mult = qty_multiplier(unit)
-            released = exit_price * lots * mult
+            released = buy_cash_required(
+                avg_entry_price, lots, unit, settings=self.settings,
+            )
             self._fund_used = max(0.0, self._fund_used - released)
-            self._open_positions = max(0, self._open_positions - 1)
-            pnl = (exit_price - avg_entry_price) * lots * mult
+            if position_closed:
+                self._open_symbols.discard(symbol)
+            self._open_positions = len(self._open_symbols)
+            pnl = net_pnl_twd(
+                avg_entry_price, exit_price, lots, unit,
+                settings=self.settings,
+            )
             self.state.realized_pnl_twd += pnl
-            self.state.last_exit_ts[symbol] = now_tw().timestamp()
+            if position_closed:
+                self.state.last_exit_ts[symbol] = now_tw().timestamp()
             self._persist()
             self.logger.info(
                 "📉 部位平倉 %s entry=%.2f exit=%.2f x %d → PnL=%.0f (累計 %.0f)",
@@ -570,7 +695,7 @@ class RiskGuard:
             )
 
     def update_unrealized_pnl(self, total_unrealized_pnl_twd: float) -> None:
-        """策略可定期回報未實現損益，用於熔斷判斷。"""
+        """策略可定期回報未實現損益（僅供儀表板快照，不參與熔斷）。"""
         with self._lock:
             self._unrealized_pnl = total_unrealized_pnl_twd
 
@@ -588,8 +713,12 @@ class RiskGuard:
             "date": self.state.date,
             "kill_switch": self.is_kill_switch_engaged(),
             "fund_used": self._fund_used,
-            "fund_remaining": max(0.0, self.settings.max_fund - self._fund_used),
-            "fund_cap": self.settings.max_fund,
+            "fund_remaining": max(
+                0.0, self.settings.effective_fund_cap() - self._fund_used,
+            ),
+            "fund_cap": self.settings.effective_fund_cap(),
+            "daily_fund_budget": self.settings.daily_fund_budget,
+            "max_fund": self.settings.max_fund,
             "open_positions": self._open_positions,
             "max_open_positions": self.settings.max_open_positions,
             "today_orders": self.state.today_orders,
@@ -611,6 +740,7 @@ class RiskGuard:
 __all__ = [
     "RiskGuard",
     "EntryDecision",
+    "EntryKind",
     "DailyState",
     "KILL_SWITCH_FILENAME",
 ]

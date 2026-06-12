@@ -140,6 +140,29 @@ class PriceBar:
 
 
 @dataclass
+class IntradayBar:
+    """盤中分 K 或 Tick 歷史 (Shioaji kbars/ticks)。
+
+    PK = (symbol, ts, interval)。
+    ts 為台北時間 ``YYYY-MM-DD HH:MM:SS``。
+    interval: ``1m`` (分 K) 或 ``tick`` (逐筆)。
+    volume 單位為股數 (Shioaji 原始欄位)。
+    """
+
+    symbol: str
+    ts: str
+    interval: str = "1m"
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
+    volume: float = 0.0
+    amount: float = 0.0
+    source: str = "shioaji"
+    updated_at: str = ""
+
+
+@dataclass
 class SyncMeta:
     """每張 table 的同步狀態紀錄。"""
 
@@ -335,6 +358,22 @@ _SCHEMA: Dict[str, str] = {
             PRIMARY KEY (report_type, report_date, mode)
         )
     """,
+    "intraday_bars": """
+        CREATE TABLE IF NOT EXISTS intraday_bars (
+            symbol      TEXT NOT NULL,
+            ts          TEXT NOT NULL,
+            interval    TEXT NOT NULL DEFAULT '1m',
+            open        REAL NOT NULL DEFAULT 0,
+            high        REAL NOT NULL DEFAULT 0,
+            low         REAL NOT NULL DEFAULT 0,
+            close       REAL NOT NULL DEFAULT 0,
+            volume      REAL NOT NULL DEFAULT 0,
+            amount      REAL NOT NULL DEFAULT 0,
+            source      TEXT NOT NULL DEFAULT 'shioaji',
+            updated_at  TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (symbol, ts, interval)
+        )
+    """,
 }
 
 ALL_TABLES: Tuple[str, ...] = tuple(_SCHEMA.keys())
@@ -437,6 +476,10 @@ class StockDB:
         with self.transaction() as c:
             for ddl in _SCHEMA.values():
                 c.execute(ddl)
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_intraday_bars_symbol_interval_ts "
+                "ON intraday_bars(symbol, interval, ts)"
+            )
             for tbl in SYNCABLE_TABLES:
                 c.execute(
                     "INSERT OR IGNORE INTO sync_meta (table_name) VALUES (?)",
@@ -913,6 +956,158 @@ class StockDB:
         return out
 
     # =================================================================
+    # intraday_bars DAO  (分 K / Tick 歷史)
+    # =================================================================
+
+    def bulk_upsert_intraday_bars(self, bars: Iterable[IntradayBar]) -> int:
+        """批次寫入盤中 K 線或 Tick；回傳寫入筆數。"""
+        ts_default = now_tw().isoformat(timespec="seconds")
+        rows: List[Tuple[Any, ...]] = []
+        for b in bars:
+            rows.append((
+                b.symbol, b.ts, b.interval or "1m",
+                b.open, b.high, b.low, b.close, b.volume, b.amount,
+                b.source or "shioaji",
+                b.updated_at or ts_default,
+            ))
+        if not rows:
+            return 0
+        with self.transaction() as c:
+            c.executemany(
+                """
+                INSERT INTO intraday_bars
+                  (symbol, ts, interval, open, high, low, close, volume, amount,
+                   source, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(symbol, ts, interval) DO UPDATE SET
+                  open = excluded.open,
+                  high = excluded.high,
+                  low = excluded.low,
+                  close = excluded.close,
+                  volume = excluded.volume,
+                  amount = excluded.amount,
+                  source = excluded.source,
+                  updated_at = excluded.updated_at
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        *,
+        interval: str = "1m",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        limit: Optional[int] = None,
+        ascending: bool = True,
+    ) -> List[IntradayBar]:
+        """讀取盤中歷史；start/end 為 ts 字串 (含)，格式 YYYY-MM-DD 或完整時間。"""
+        sql = (
+            "SELECT * FROM intraday_bars WHERE symbol = ? AND interval = ?"
+        )
+        args: List[Any] = [symbol, interval]
+        if start:
+            sql += " AND ts >= ?"
+            args.append(start)
+        if end:
+            if len(end) == 10:
+                end = f"{end} 23:59:59"
+            sql += " AND ts <= ?"
+            args.append(end)
+        order = "ASC" if ascending else "DESC"
+        sql += f" ORDER BY ts {order}"
+        if limit:
+            sql += " LIMIT ?"
+            args.append(int(limit))
+        rows = self.conn.execute(sql, args).fetchall()
+        bars = [_row_to_dc(IntradayBar, r) for r in rows]
+        if limit and ascending and not (start or end):
+            sql2 = (
+                "SELECT * FROM intraday_bars WHERE symbol = ? AND interval = ? "
+                "ORDER BY ts DESC LIMIT ?"
+            )
+            rows = self.conn.execute(sql2, (symbol, interval, int(limit))).fetchall()
+            bars = [_row_to_dc(IntradayBar, r) for r in rows]
+            bars.reverse()
+        return bars
+
+    def latest_intraday_ts(
+        self,
+        symbol: str,
+        *,
+        interval: str = "1m",
+    ) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT MAX(ts) AS t FROM intraday_bars "
+            "WHERE symbol = ? AND interval = ?",
+            (symbol, interval),
+        ).fetchone()
+        return row["t"] if row and row["t"] else None
+
+    def list_intraday_symbols(self, *, interval: str = "1m") -> List[str]:
+        rows = self.conn.execute(
+            "SELECT symbol FROM intraday_bars WHERE interval = ? "
+            "GROUP BY symbol ORDER BY symbol",
+            (interval,),
+        ).fetchall()
+        return [r["symbol"] for r in rows]
+
+    def intraday_summary(
+        self,
+        *,
+        interval: str = "1m",
+    ) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT symbol,
+                   COUNT(*) AS rows,
+                   MIN(ts) AS first_ts,
+                   MAX(ts) AS last_ts
+            FROM intraday_bars
+            WHERE interval = ?
+            GROUP BY symbol
+            ORDER BY symbol
+            """,
+            (interval,),
+        ).fetchall()
+        return [
+            {
+                "symbol": r["symbol"],
+                "rows": int(r["rows"]),
+                "first_ts": r["first_ts"],
+                "last_ts": r["last_ts"],
+                "interval": interval,
+            }
+            for r in rows
+        ]
+
+    def count_intraday_bars(
+        self,
+        symbol: str,
+        *,
+        interval: str = "1m",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> int:
+        sql = (
+            "SELECT COUNT(*) AS n FROM intraday_bars "
+            "WHERE symbol = ? AND interval = ?"
+        )
+        args: List[Any] = [symbol, interval]
+        if start:
+            sql += " AND ts >= ?"
+            args.append(start)
+        if end:
+            if len(end) == 10:
+                end = f"{end} 23:59:59"
+            sql += " AND ts <= ?"
+            args.append(end)
+        row = self.conn.execute(sql, args).fetchone()
+        return int(row["n"]) if row else 0
+
+    # =================================================================
     # llm_analysis_history DAO
     # =================================================================
 
@@ -1174,7 +1369,7 @@ def _default_for(table: str, col: str) -> Any:
         "capital", "shares_outstanding",
         "revenue", "yoy_pct", "mom_pct", "cumulative", "cum_yoy_pct",
         "eps", "gross_margin", "op_margin", "net_margin",
-        "open", "high", "low", "close", "volume",
+        "open", "high", "low", "close", "volume", "amount",
         "last_synced_rows",
     }
     return 0 if col in numeric_cols else ""

@@ -1,7 +1,7 @@
 """prompt_registry -- 載入 / 渲染 / 儲存 prompt YAML 模板。
 
 設計：
-* 預設讀取專案根目錄的 `prompts/*.yaml`
+* 預設讀取專案根目錄的 `prompts/*.yaml`（不含 `prompts/archive/`）
 * 每份檔案對應一個 `id`，含 version / template / inputs schema
 * 不在 import 時 raise — 即使 YAML 解析失敗也只是該檔被略過
 * 不依賴 PyYAML 也能跑：若未安裝，會用簡易 YAML parser 撐住基本欄位

@@ -35,6 +35,7 @@ CATEGORY_LABELS = {
     "ex_right": "除權",
     "ex_right_dividend": "除權息",
     "exhibition": "國際展覽",
+    "global_tech": "全球科技",
 }
 
 
@@ -90,6 +91,7 @@ def build_market_calendar(
     include_conferences: bool = True,
     include_dividends: bool = True,
     include_exhibitions: bool = True,
+    include_global_tech: bool = True,
     dividend_security_scope: str = "stock",
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
@@ -109,6 +111,8 @@ def build_market_calendar(
         ))
     if include_exhibitions:
         events.extend(load_exhibition_events(start, end, root=root))
+    if include_global_tech:
+        events.extend(load_global_tech_events(start, end, root=root))
     return sort_events(unique_events(events))
 
 
@@ -275,6 +279,35 @@ def load_exhibition_events(
     return out
 
 
+def load_global_tech_events(
+    start: dt.date,
+    end: dt.date,
+    *,
+    root: Optional[Path] = None,
+) -> List[MarketCalendarEvent]:
+    from bot.global_event_calendar import load_global_events
+
+    out: List[MarketCalendarEvent] = []
+    for e in load_global_events(root=root):
+        if not e.overlaps(start, end):
+            continue
+        out.append(MarketCalendarEvent(
+            date=e.date,
+            end_date=e.effective_end_date,
+            title=e.title,
+            category="global_tech",
+            time=e.time or "",
+            market=e.location or "",
+            asset_type=e.event_type or "event",
+            note=e.note or "",
+            source=e.source or "全球科技事件",
+            source_quality=e.source_quality or "",
+            url=e.url or "",
+            tickers=e.tickers,
+        ))
+    return out
+
+
 def unique_events(events: Sequence[MarketCalendarEvent]) -> List[MarketCalendarEvent]:
     seen: set[Tuple[Any, ...]] = set()
     out: List[MarketCalendarEvent] = []
@@ -301,6 +334,7 @@ def sort_events(events: Sequence[MarketCalendarEvent]) -> List[MarketCalendarEve
         "ex_dividend": 2,
         "ex_right": 3,
         "exhibition": 4,
+        "global_tech": 5,
     }
     return sorted(events, key=lambda e: (e.date, e.time or "99:99", priority.get(e.category, 9), e.ticker, e.title))
 
@@ -673,6 +707,7 @@ __all__ = [
     "fetch_ex_dividend_events",
     "load_conference_events",
     "load_exhibition_events",
+    "load_global_tech_events",
     "parse_iso_date",
     "parse_roc_date",
     "parse_tpex_dividend_events",

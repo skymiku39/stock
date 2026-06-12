@@ -23,7 +23,7 @@ def test_scheduler_builds_both_jobs_by_default() -> None:
 
     sch = Scheduler(_settings(), dry_run=True)
     names = {j.name for j in sch.jobs}
-    assert names == {"macro", "fundamentals", "research", "company"}
+    assert names == {"macro", "fundamentals", "research", "company", "history_fetch"}
 
 
 def test_scheduler_skips_disabled_jobs() -> None:
@@ -35,6 +35,7 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_fundamentals_interval_min=0,
             scheduler_research_interval_min=0,
             scheduler_company_interval_min=0,
+            scheduler_history_fetch_interval_min=0,
         ),
         dry_run=True,
     )
@@ -55,6 +56,17 @@ def test_scheduler_fundamentals_extra_args_parsed() -> None:
     sch = Scheduler(_settings(scheduler_fundamentals_args="--limit 1 --delay-seconds 0"), dry_run=True)
     fundamentals = next(j for j in sch.jobs if j.name == "fundamentals")
     assert fundamentals.extra_args == ["--limit", "1", "--delay-seconds", "0"]
+
+
+def test_scheduler_history_fetch_extra_args_parsed() -> None:
+    from bot.scheduler import Scheduler
+
+    sch = Scheduler(
+        _settings(scheduler_history_fetch_args="--once --batch-size 1 --delay 3"),
+        dry_run=True,
+    )
+    history = next(j for j in sch.jobs if j.name == "history_fetch")
+    assert history.extra_args == ["--once", "--batch-size", "1", "--delay", "3"]
 
 
 def test_scheduler_adds_daytrade_llm_jobs_when_enabled() -> None:

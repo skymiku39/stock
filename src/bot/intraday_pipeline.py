@@ -44,6 +44,7 @@ from bot.pipeline_shared import (
     macro_summary_text as _macro_summary_text,
     parse_json_blob as _parse_json,
 )
+from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -311,6 +312,7 @@ def run_intraday(
     force_refresh_news: bool = False,
     force_refresh_technicals: bool = True,
     logger: Optional[logging.Logger] = None,
+    publisher=None,
 ) -> IntradayReport:
     log = logger or get_logger("intraday")
     root = project_root or Path.cwd()
@@ -469,6 +471,16 @@ def run_intraday(
     log.info(
         "Intraday 完成 (%.1fs, %d 題材, %d 候選, 錯誤 %d)",
         report.duration_sec, len(themes), len(rankings), len(report.errors),
+    )
+    publish_pipeline_completed(
+        publisher,
+        pipeline="intraday",
+        run_id=today.isoformat(),
+        output_dir=report.output_dir,
+        success=len(report.errors) == 0,
+        error_count=len(report.errors),
+        duration_sec=report.duration_sec,
+        extra={"themes": len(themes), "candidates": len(rankings)},
     )
     return report
 

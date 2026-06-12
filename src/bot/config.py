@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Annotated, Dict, List, Literal, Tuple
+from typing import Annotated, Dict, List, Literal, Optional, Tuple
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     )
 
     # --- 執行模式 ---
-    run_mode: Literal["trade", "watch", "report"] = "trade"
+    run_mode: Literal["trade", "watch", "report"] = "watch"
+    # 當沖實單已封存；trade 需 DAY_TRADING_UNFREEZE=true
+    day_trading_archived: bool = True
+    day_trading_unfreeze: bool = False
     broker_backend: Literal["shioaji"] = "shioaji"
     market_source: Literal["shioaji", "twse_public", ""] = ""
     report_poll_seconds: int = 5
@@ -43,13 +46,23 @@ class Settings(BaseSettings):
             return [s.strip() for s in v.split(",") if s.strip()]
         return list(v)  # type: ignore[arg-type]
 
+    # --- 監控池四源合併 (watch_symbol_pool) ---
+    symbols_auto_merge: bool = True
+    symbols_merge_top_n: int = 10          # 每個來源最多取幾檔
+    symbols_merge_max_total: int = 24      # 合併後監控上限
+    symbols_merge_refresh_min: int = 10    # 盤中刷新間隔 (分鐘)
+    symbols_merge_budget_filter: bool = True  # 依 DAILY_FUND_BUDGET 過濾買不起的標的
+
     # --- 策略時間 ---
     enter_cutoff_time: datetime.time = datetime.time(9, 30)
     exit_time: datetime.time = datetime.time(13, 15)
+    # 午盤獲利平倉窗口起點；設定後 [起點, exit_time) 內淨利 > 0 即賣出（不等移動停利 2%）
+    profit_exit_start_time: Optional[datetime.time] = None
 
     @field_validator(
         "enter_cutoff_time",
         "exit_time",
+        "profit_exit_start_time",
         "scheduler_intraday_time",
         "scheduler_intraday_end_time",
         "scheduler_nextday_draft_time",
@@ -59,7 +72,9 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _parse_time(cls, v: object) -> datetime.time:
+    def _parse_time(cls, v: object) -> Optional[datetime.time]:
+        if v in (None, ""):
+            return None
         if isinstance(v, datetime.time):
             return v
         if isinstance(v, str):
@@ -106,6 +121,7 @@ class Settings(BaseSettings):
 
     # --- 資金控管 (基本) ---
     max_fund: int = 500_000              # 總可用資金上限 (TWD)
+    daily_fund_budget: int = 0           # 每日持股預算 (0=沿用 max_fund)，例 10000
     max_lot_per_symbol: int = 2          # 單檔最大持有張數
 
     # --- 資金控管 (進階風控) ---
@@ -114,6 +130,16 @@ class Settings(BaseSettings):
     daily_max_orders: int = 0            # 當日進場單數上限 (0=不限)
     per_symbol_daily_max_orders: int = 0 # 單檔當日進場上限 (0=不限)
     reentry_cooldown_seconds: int = 0    # 平倉後同檔冷卻秒數 (0=立即可再進)
+    allow_same_day_reentry: bool = True  # 同檔當日多次進出（回落買回）
+    rebuy_target_net_pct: float = 2.0    # 回落買回目標淨利 %（含手續費+稅）
+
+    # --- 帳戶餘額檢查 (trade 模式進場前) ---
+    check_account_balance: bool = True   # 下單前讀 account_balance；讀不到則拒絕進場
+
+    # --- 交易成本 (當沖淨利計算) ---
+    broker_fee_discount: float = 0.28    # 手續費折扣倍率，例 0.28 = 28 折
+    broker_min_fee: float = 1.0          # 最低手續費（元）
+    day_trade_tax_rate: float = 0.0015   # 當沖證交稅率 0.15%
 
     # --- 進場條件 (configurable 策略) ---
     min_pct_chg_on_entry: float = 1.0    # 全域最低進場漲幅 %
@@ -125,10 +151,12 @@ class Settings(BaseSettings):
     min_price: float = 0.0               # 最低股價 (0=不限)，避免低價股
     max_price: float = 0.0               # 最高股價 (0=不限)，避免超高價股
     blacklist_symbols: Annotated[List[str], NoDecode] = []   # 強制不交易的代號
+    # 手動長期持股：永不自動監控/交易（併入風控黑名單）
+    manual_hold_symbols: Annotated[List[str], NoDecode] = []
 
     # --- 損失熔斷 ---
     daily_max_loss_twd: int = 0          # 當日實現虧損絕對值上限 (0=不限)
-    daily_max_loss_pct: float = 0.0      # 當日虧損占 max_fund 百分比 (0=不限)
+    daily_max_loss_pct: float = 0.0      # 當日虧損占 effective_fund_cap 百分比 (0=不限)
     # 兩者擇較嚴者；觸發後 RiskGuard 會自動拉起 kill switch
 
     @field_validator("buy_entry_targets", mode="before")
@@ -175,6 +203,13 @@ class Settings(BaseSettings):
             return [s.strip() for s in v.split(",") if s.strip()]
         return list(v)  # type: ignore[arg-type]
 
+    @field_validator("manual_hold_symbols", mode="before")
+    @classmethod
+    def _parse_manual_hold(cls, v: object) -> List[str]:
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return list(v)  # type: ignore[arg-type]
+
     # --- 零股 (小額資金) ---
     use_odd_lot: bool = False
     odd_lot_max_shares: int = 999
@@ -185,13 +220,65 @@ class Settings(BaseSettings):
     llm_min_day_trade_score: float = 62.0
     llm_exit_on_negative: bool = False
     llm_refresh_on_entry: bool = False
+    llm_sell_gate_enabled: bool = False
+    llm_sell_gate_bypass_stop_loss: bool = True
+    llm_sell_gate_bypass_close: bool = True
+    llm_sell_gate_bypass_afternoon: bool = True
+    llm_refresh_on_exit: bool = True
+    llm_sell_min_confidence: float = 0.5
+    # 盤中定時 + 成交事件觸發：刷新 auto_llm 並產出 intraday_live_review
+    llm_intraday_review_enabled: bool = False
+    llm_intraday_review_interval_min: int = 60
+    # 無持倉時縮短檢討間隔（分鐘）；有持倉時沿用 llm_intraday_review_interval_min
+    llm_intraday_review_interval_flat_min: int = 10
 
     # --- Telegram 通知 (留空則不啟用) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # --- 微笑曲線策略 (stock-smile-backtest / 規劃中 live) ---
+    smile_buy_tiers: str = "1:1,3:2,5:3,8:4"
+    smile_base_lot: int = 1
+    smile_regular_tax_rate: float = 0.003  # 一般證交稅（非當沖）
+    smile_reference_prices: Annotated[Dict[str, float], NoDecode] = Field(
+        default_factory=dict,
+    )
+
+    @field_validator("smile_reference_prices", mode="before")
+    @classmethod
+    def _parse_smile_reference_prices(cls, v: object) -> Dict[str, float]:
+        if v in (None, ""):
+            return {}
+        if isinstance(v, dict):
+            return {str(k).strip(): float(val) for k, val in v.items() if str(k).strip()}
+        if isinstance(v, str):
+            parsed: Dict[str, float] = {}
+            for raw_item in v.replace(";", ",").split(","):
+                item = raw_item.strip()
+                if not item:
+                    continue
+                parts = item.split(":")
+                if len(parts) != 2:
+                    raise ValueError(
+                        "SMILE_REFERENCE_PRICES must use SYMBOL:PRICE pairs, "
+                        f"got {item!r}",
+                    )
+                sym, px = (p.strip() for p in parts)
+                if not sym:
+                    raise ValueError("SMILE_REFERENCE_PRICES contains an empty symbol")
+                parsed[sym] = float(px)
+            return parsed
+        raise ValueError(f"Cannot parse smile_reference_prices from {v!r}")
+
     # --- 策略類型 ---
-    strategy_type: Literal["default", "etf_follow", "configurable"] = "default"
+    strategy_type: Literal["etf_follow", "configurable", "smile_curve"] = "configurable"
+
+    @field_validator("strategy_type", mode="before")
+    @classmethod
+    def _normalize_strategy_type(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip().lower() == "default":
+            return "configurable"
+        return v
 
     # --- 主動 ETF 跟單參數 ---
     etf_min_consensus_new: int = 2
@@ -243,6 +330,8 @@ class Settings(BaseSettings):
     # 盤中自動托管 stock-bot 監測子行程 (開盤啟動、收盤停止)
     scheduler_supervise_monitor: bool = False
     scheduler_monitor_mode: Literal["watch", "report", "trade"] = "watch"
+    # 只看不買：約 10 元熱度 + 熱門個股期貨快照 (分鐘)；<=0 停用
+    scheduler_watch_snapshot_interval_min: int = 0
 
     # --- 本地股票資料庫 (SQLite) ---
     # 留空 = 預設 data/stock.db；可指向同步資料夾，例如:
@@ -260,6 +349,16 @@ class Settings(BaseSettings):
     google_cache_dir: str = ""
     # Google Sheets 自動同步間隔 (分鐘)；<=0 停用；由 stock-scheduler 呼叫 stock-cloud-sync
     scheduler_cloud_sync_interval_min: int = 0
+    # 慢速補齊歷史日 K (TWSE/yfinance 月別)；<=0 停用；由 stock-scheduler 呼叫 stock-history-fetch
+    scheduler_history_fetch_interval_min: int = 60
+    scheduler_history_fetch_args: str = "--once --batch-size 5 --delay 5"
+    # 僅在收盤後時段執行（台股 13:30 收盤，預設 14:00~23:00 每小時一批）
+    scheduler_history_fetch_time: datetime.time = datetime.time(14, 0)
+    scheduler_history_fetch_end_time: datetime.time = datetime.time(23, 0)
+
+    # --- 事件鏈 (Pub/Sub 下游自動觸發) ---
+    # true：QuantDataFetchCompleted 後自動跑微笑曲線選股
+    event_chain_smile_screen: bool = False
 
     @field_validator("report_poll_seconds")
     @classmethod
@@ -275,6 +374,12 @@ class Settings(BaseSettings):
                 "twse_public" if self.run_mode == "report" else "shioaji"
             )
         return self
+
+    def effective_fund_cap(self) -> int:
+        """實際可用資金上限：daily_fund_budget 優先，否則 max_fund。"""
+        if self.daily_fund_budget > 0:
+            return self.daily_fund_budget
+        return self.max_fund
 
     @model_validator(mode="after")
     def _validate_mode_requirements(self) -> Settings:

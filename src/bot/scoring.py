@@ -20,6 +20,11 @@ Factor (0-100 分)
 * risk            -- 風險警示 (借券暴增、融資爆量、法說提到的 risk)
 
 每個時間框架的加權不同 (詳見 `WEIGHTS`)；缺資料的 factor 會自動扣權重 + 給中性 50 分。
+
+命名對照
+========
+* `ticker`（本模組參數名）≡ `symbol`（交易核心）
+* `pct_change`（本模組參數名）≡ `pct_chg`（`MarketTick`）
 """
 
 from __future__ import annotations
@@ -84,6 +89,12 @@ WEIGHTS: Dict[str, Dict[str, float]] = {
 }
 
 # 進場/停損/停利規則 (依時間框架，% 為相對 entry 的變動)
+# 僅供 Dashboard / 簡報參考；bot 實際執行見 STOP_LOSS_PCT、TAKE_PROFIT_PCT 等 env 設定。
+ADVISORY_RULE_NOTE = (
+    "以下停損/停利為評分建議值，非 bot 自動執行參數。"
+    "Bot 預設：停損 -3%（淨利）、移動停利 +6% 後回撤 2%。"
+)
+
 STRATEGY_RULES: Dict[str, Dict[str, Any]] = {
     "day_trade": {
         "stop_pct": -1.0,
@@ -800,6 +811,7 @@ def scorecard_to_row(s: StockScorecard) -> Dict[str, Any]:
 
 
 __all__ = [
+    "ADVISORY_RULE_NOTE",
     "FactorScore",
     "TIMEFRAMES",
     "TIMEFRAME_LABELS",

@@ -203,8 +203,25 @@ def update_calendar(
     state["last_full_refresh_at"] = now_tw().isoformat(timespec="seconds")
     state["last_summary"] = summary
     _write_state(state, root)
-    log.info("法說會行事曆已自動更新: %s", summary)
+    all_entries = load_calendar(root)
+    filled = sum(1 for e in all_entries if getattr(e, "presentation_url", ""))
+    total = len(all_entries)
+    rate = (filled / total) if total else 0.0
+    log.info(
+        "法說會行事曆已自動更新: %s | 簡報連結填充 %d/%d (%.0f%%)",
+        summary, filled, total, rate * 100,
+    )
     return summary
+
+
+def calendar_needs_url_refresh(
+    root: Optional[Path] = None,
+    *,
+    min_rate: float = 0.05,
+) -> bool:
+    """快取有資料但簡報連結填充率過低（常見於舊版抓取）。"""
+    filled, total, rate = presentation_url_fill_rate(root)
+    return total > 0 and rate < min_rate
 
 
 def ensure_calendar_fresh(
@@ -213,8 +230,15 @@ def ensure_calendar_fresh(
     max_age_hours: int = DEFAULT_AGE_HOURS,
     logger: Optional[logging.Logger] = None,
 ) -> bool:
-    """過期才重抓 (lightweight)。回傳 True=有重抓 / False=直接走快取。"""
+    """過期或簡報連結缺失時重抓。回傳 True=有重抓 / False=直接走快取。"""
     log = logger or get_logger("calendar")
+    needs_url = calendar_needs_url_refresh(root)
+    if needs_url:
+        log.info(
+            "行事曆簡報連結填充率過低，強制重抓 MOPS（舊快取可能無 presentation_url）",
+        )
+        update_calendar(root=root, logger=log)
+        return True
     state = _read_state(root)
     ts = state.get("last_full_refresh_at")
     if ts:
@@ -291,6 +315,21 @@ def last_refresh_at(root: Optional[Path] = None) -> str:
     return str(_read_state(root).get("last_full_refresh_at", ""))
 
 
+def presentation_url_fill_rate(root: Optional[Path] = None) -> Tuple[int, int, float]:
+    """回傳 (有簡報連結筆數, 總筆數, 填充率 0~1)。"""
+    items = load_calendar(root)
+    total = len(items)
+    if total == 0:
+        return 0, 0, 0.0
+    from bot.mops_scraper import is_meaningful_presentation_url
+
+    filled = sum(
+        1 for e in items
+        if is_meaningful_presentation_url(getattr(e, "presentation_url", ""))
+    )
+    return filled, total, filled / total
+
+
 def upcoming_tickers(
     days: int = 14,
     root: Optional[Path] = None,
@@ -305,10 +344,12 @@ def upcoming_tickers(
 
 __all__ = [
     "ConferenceEntry",
+    "calendar_needs_url_refresh",
     "conferences_for_ticker",
     "ensure_calendar_fresh",
     "last_refresh_at",
     "load_calendar",
+    "presentation_url_fill_rate",
     "recent_conferences",
     "update_calendar",
     "upcoming_conferences",
