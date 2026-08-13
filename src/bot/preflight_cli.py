@@ -13,12 +13,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import List, Optional
 
 from bot.config import Settings
 from bot.preflight import report_to_dict, run_preflight
 from bot.utils import get_logger
-
 
 _STATUS_ICON = {
     "ok": "✅",
@@ -37,7 +35,7 @@ _SECTION_TITLES = {
 }
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-preflight",
         description="檢查現在是否能下台股單 (含真實 Shioaji 登入測試)",

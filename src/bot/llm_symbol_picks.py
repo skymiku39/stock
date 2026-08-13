@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
 
 from bot.intraday_live import extract_llm_mentions
 from bot.intraday_pipeline import load_intraday_by_date
@@ -14,7 +15,7 @@ from bot.stock_db import StockDB, default_db_path
 from bot.utils import now_tw
 
 
-def _add_unique(order: List[str], seen: set[str], ticker: str) -> None:
+def _add_unique(order: list[str], seen: set[str], ticker: str) -> None:
     t = str(ticker or "").strip()
     if not t or not t.isdigit() or t in seen:
         return
@@ -23,19 +24,19 @@ def _add_unique(order: List[str], seen: set[str], ticker: str) -> None:
 
 
 def collect_llm_symbols(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
     lookback_days: int = 5,
     max_per_report: int = 25,
     include_intraday: bool = True,
     include_next_day: bool = True,
-    db: Optional[StockDB] = None,
-) -> List[str]:
+    db: StockDB | None = None,
+) -> list[str]:
     """合併最近幾次 LLM 報告 rankings 內的所有個股（去重、保序）。"""
     root = root or Path.cwd()
     database = db or StockDB.open(path=default_db_path(root))
     today = now_tw().date()
-    order: List[str] = []
+    order: list[str] = []
     seen: set[str] = set()
 
     for offset in range(lookback_days + 1):
@@ -73,14 +74,14 @@ def collect_llm_symbols(
 
 
 def llm_symbol_metadata(
-    root: Optional[Path] = None,
-    symbols: Optional[Sequence[str]] = None,
-) -> Dict[str, Dict[str, Any]]:
+    root: Path | None = None,
+    symbols: Sequence[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """回傳各股在最近 intraday 報告中的排名/分數（若有）。"""
     root = root or Path.cwd()
     database = StockDB.open(path=default_db_path(root))
     today = now_tw().date().isoformat()
-    meta: Dict[str, Dict[str, Any]] = {}
+    meta: dict[str, dict[str, Any]] = {}
     row = database.get_llm_daily_report("intraday", today, mode="")
     if not row or not row.payload_json:
         return meta

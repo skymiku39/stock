@@ -1,13 +1,13 @@
 """Dashboard navigation and main Streamlit app shell."""
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
 import streamlit as st
-from pathlib import Path
 
+from bot.dashboard import pages as dash_pages
+from bot.dashboard.cache_helpers import cached_env_values, cached_llm_today_stats
 from bot.dashboard.common import (
     DASHBOARD_UI_BUILD,
     PROJECT_ROOT,
@@ -16,8 +16,6 @@ from bot.dashboard.common import (
     _human_duration,
     write_dashboard_heartbeat,
 )
-from bot.dashboard import pages as dash_pages
-from bot.dashboard.cache_helpers import cached_env_values, cached_llm_today_stats
 from bot.env_io import env_path
 from bot.process_runner import get_runner, get_scheduler_runner
 from bot.prompt_registry import get_registry

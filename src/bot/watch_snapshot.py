@@ -10,7 +10,7 @@ import csv
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.hot_stock_futures import fetch_hot_stock_futures
 from bot.price_band_heat import (
@@ -23,7 +23,7 @@ from bot.utils import get_logger, now_tw
 SNAPSHOT_DIR = "watch_snapshots"
 
 
-def snapshot_dir(root: Optional[Path] = None) -> Path:
+def snapshot_dir(root: Path | None = None) -> Path:
     base = (root or Path.cwd()) / "data" / SNAPSHOT_DIR
     day = now_tw().date().isoformat()
     path = base / day
@@ -31,7 +31,7 @@ def snapshot_dir(root: Optional[Path] = None) -> Path:
     return path
 
 
-def _write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> None:
+def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -41,20 +41,20 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) ->
 
 def save_watch_snapshot(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     price_low: float = DEFAULT_PRICE_LOW,
     price_high: float = DEFAULT_PRICE_HIGH,
     band_limit: int = 40,
     futures_limit: int = 20,
-    watch_symbols: Optional[List[str]] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, Any]:
+    watch_symbols: list[str] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
     """抓取並寫入一輪觀察快照，回傳摘要。"""
     log = logger or get_logger("watch-snapshot")
     project = root or Path.cwd()
     out_dir = snapshot_dir(project)
     ts = now_tw().strftime("%H%M%S")
-    summary: Dict[str, Any] = {
+    summary: dict[str, Any] = {
         "asof": now_tw().isoformat(timespec="seconds"),
         "dir": str(out_dir),
         "files": [],

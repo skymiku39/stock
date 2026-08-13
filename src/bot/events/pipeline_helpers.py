@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 from bot.events.protocols import EventPublisher
 from bot.events.types import PipelineCompleted, PipelineStepCompleted
@@ -11,7 +10,7 @@ from bot.events.wiring import publish_if_bus
 
 
 def publish_pipeline_step(
-    publisher: Optional[EventPublisher],
+    publisher: EventPublisher | None,
     *,
     pipeline: str,
     step: str,
@@ -19,7 +18,7 @@ def publish_pipeline_step(
     total_steps: int,
     success: bool,
     message: str = "",
-    started_at: Optional[float] = None,
+    started_at: float | None = None,
 ) -> None:
     duration = time.time() - started_at if started_at is not None else 0.0
     publish_if_bus(
@@ -37,7 +36,7 @@ def publish_pipeline_step(
 
 
 def publish_pipeline_completed(
-    publisher: Optional[EventPublisher],
+    publisher: EventPublisher | None,
     *,
     pipeline: str,
     run_id: str,
@@ -45,7 +44,7 @@ def publish_pipeline_completed(
     success: bool,
     error_count: int = 0,
     duration_sec: float = 0.0,
-    extra: Optional[dict] = None,
+    extra: dict | None = None,
 ) -> None:
     publish_if_bus(
         publisher,

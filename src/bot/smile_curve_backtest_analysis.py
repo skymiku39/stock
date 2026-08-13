@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import datetime as dt
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Sequence
+from typing import Literal
 
 from bot.config import Settings
 from bot.smile_curve import SmileCurveEngine, SmileRoundTrip
-from bot.smile_curve_backtest import SmileCurveBacktester, SmileSymbolResult
 from bot.stock_db import StockDB
-from bot.trade_cost import buy_cash_required, net_pnl_pct, net_pnl_twd
+from bot.trade_cost import buy_cash_required, net_pnl_twd
 
 BacktestPriceMode = Literal["close", "ohlc"]
 
@@ -58,9 +58,9 @@ class ScenarioReport:
     open_lots: int = 0
     open_lots_cost_twd: float = 0.0
     open_lots_mtm_pnl_twd: float = 0.0
-    round_trips: List[SmileRoundTrip] = field(default_factory=list)
+    round_trips: list[SmileRoundTrip] = field(default_factory=list)
     skip_reason: str = ""
-    notes: List[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         s = self.trade_stats
@@ -123,7 +123,7 @@ def run_scenario(
     scenario: BacktestScenario,
     *,
     name: str = "",
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
 ) -> ScenarioReport:
     bars = db.get_price_history(symbol, start=scenario.start, end=scenario.end, ascending=True)
     report = ScenarioReport(
@@ -192,7 +192,7 @@ def run_scenario(
     return report
 
 
-DEFAULT_SCENARIOS: List[BacktestScenario] = [
+DEFAULT_SCENARIOS: list[BacktestScenario] = [
     BacktestScenario(
         label="長期整股標準",
         start="2020-01-01",
@@ -249,12 +249,12 @@ DEFAULT_SCENARIOS: List[BacktestScenario] = [
 def audit_symbols(
     db: StockDB,
     symbols: Sequence[str],
-    scenarios: Optional[Sequence[BacktestScenario]] = None,
+    scenarios: Sequence[BacktestScenario] | None = None,
     *,
-    names: Optional[dict[str, str]] = None,
-) -> List[ScenarioReport]:
+    names: dict[str, str] | None = None,
+) -> list[ScenarioReport]:
     names = names or {}
-    out: List[ScenarioReport] = []
+    out: list[ScenarioReport] = []
     for sym in symbols:
         for sc in scenarios or DEFAULT_SCENARIOS:
             out.append(run_scenario(db, sym, sc, name=names.get(sym, sym)))
@@ -262,9 +262,9 @@ def audit_symbols(
 
 
 __all__ = [
+    "DEFAULT_SCENARIOS",
     "BacktestScenario",
     "ScenarioReport",
-    "DEFAULT_SCENARIOS",
     "audit_symbols",
     "run_scenario",
 ]

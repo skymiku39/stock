@@ -28,7 +28,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import requests
 
@@ -38,7 +38,6 @@ from bot.cloud_file_cache import (
     restore_tree_from_cloud,
 )
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 URL_TDCC = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
 
@@ -71,7 +70,7 @@ class DistributionWeekly:
     week_date: str               # ISO 日期
     total_holders: int = 0
     total_shares: float = 0.0
-    levels: List[DistributionLevel] = field(default_factory=list)
+    levels: list[DistributionLevel] = field(default_factory=list)
 
     large_holder_pct: float = 0.0    # 大戶持股占比 %
     whale_holder_pct: float = 0.0    # 超大戶持股占比 %
@@ -87,14 +86,14 @@ class DistributionTrend:
     """個股集保歷史趨勢。"""
 
     ticker: str
-    weeks: List[DistributionWeekly] = field(default_factory=list)
+    weeks: list[DistributionWeekly] = field(default_factory=list)
 
-    def latest(self) -> Optional[DistributionWeekly]:
+    def latest(self) -> DistributionWeekly | None:
         if not self.weeks:
             return None
         return self.weeks[-1]
 
-    def large_holder_change_pct(self, lookback_weeks: int = 4) -> Optional[float]:
+    def large_holder_change_pct(self, lookback_weeks: int = 4) -> float | None:
         """近 N 週大戶比例變動 (百分點)。"""
         if len(self.weeks) < 2:
             return None
@@ -103,7 +102,7 @@ class DistributionTrend:
         anchor = self.weeks[anchor_idx]
         return round(recent.large_holder_pct - anchor.large_holder_pct, 2)
 
-    def retail_holder_change_pct(self, lookback_weeks: int = 4) -> Optional[float]:
+    def retail_holder_change_pct(self, lookback_weeks: int = 4) -> float | None:
         if len(self.weeks) < 2:
             return None
         recent = self.weeks[-1]
@@ -129,13 +128,13 @@ def _session() -> requests.Session:
     return s
 
 
-def _root_dir(root: Optional[Path] = None) -> Path:
+def _root_dir(root: Path | None = None) -> Path:
     base = (root or Path.cwd()) / "data" / "chip_distribution"
     mk_folder(str(base))
     return base
 
 
-def _ticker_dir(ticker: str, root: Optional[Path] = None) -> Path:
+def _ticker_dir(ticker: str, root: Path | None = None) -> Path:
     p = _root_dir(root) / ticker
     mk_folder(str(p))
     return p
@@ -166,12 +165,12 @@ def _to_float(x: Any) -> float:
 
 def fetch_distribution_all(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = 12 * 3600,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓 TDCC 最新一期股權分散表 (全市場)。"""
     log = logger or get_logger("chip-dist")
     sess = session or _session()
@@ -191,7 +190,7 @@ def fetch_distribution_all(
             log.warning("TDCC HTTP %d", resp.status_code)
             return []
         text = resp.content.decode("utf-8-sig", errors="ignore")
-        data: List[Dict[str, Any]]
+        data: list[dict[str, Any]]
         try:
             parsed = json.loads(text)
             if isinstance(parsed, list):
@@ -211,16 +210,16 @@ def fetch_distribution_all(
     return data
 
 
-def _parse_tdcc_csv(text: str, logger: logging.Logger) -> List[Dict[str, Any]]:
+def _parse_tdcc_csv(text: str, logger: logging.Logger) -> list[dict[str, Any]]:
     """把 TDCC CSV 轉為與舊版 JSON 對應的 list-of-dict 結構。"""
     import csv as _csv
     import io as _io
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     try:
         reader = _csv.DictReader(_io.StringIO(text))
         for row in reader:
-            cleaned: Dict[str, Any] = {}
+            cleaned: dict[str, Any] = {}
             for k, v in row.items():
                 if k is None:
                     continue
@@ -236,15 +235,15 @@ def _parse_tdcc_csv(text: str, logger: logging.Logger) -> List[Dict[str, Any]]:
 
 
 def parse_distribution_for_ticker(
-    raw: List[Dict[str, Any]],
+    raw: list[dict[str, Any]],
     ticker: str,
-) -> Optional[DistributionWeekly]:
+) -> DistributionWeekly | None:
     """從整張 TDCC 表抓出單一 ticker 的分級。"""
     rows = [r for r in raw if str(r.get("證券代號") or r.get("stock_code") or "").strip() == ticker]
     if not rows:
         return None
     week = ""
-    levels: List[DistributionLevel] = []
+    levels: list[DistributionLevel] = []
     total_holders = 0
     total_shares = 0.0
     for r in rows:
@@ -319,11 +318,11 @@ def _normalize_date(s: str) -> str:
 def build_distribution_snapshot(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     refresh: bool = True,
-) -> Optional[DistributionWeekly]:
+) -> DistributionWeekly | None:
     """抓最新一期，並 append 到該 ticker 的趨勢歷史。"""
     log = logger or get_logger("chip-dist")
     if refresh:
@@ -346,7 +345,7 @@ def build_distribution_snapshot(
     # append to history
     hist_path = _ticker_dir(ticker, root) / "history.json"
     restore_file_from_cloud(hist_path, root=root)
-    history: List[Dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
     if hist_path.exists():
         try:
             history = json.loads(hist_path.read_text(encoding="utf-8"))
@@ -385,7 +384,7 @@ def build_distribution_snapshot(
 def load_distribution_trend(
     ticker: str,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> DistributionTrend:
     hist_path = _ticker_dir(ticker, root) / "history.json"
     restore_file_from_cloud(hist_path, root=root)
@@ -395,7 +394,7 @@ def load_distribution_trend(
         history = json.loads(hist_path.read_text(encoding="utf-8"))
     except Exception:
         return DistributionTrend(ticker=ticker)
-    weeks: List[DistributionWeekly] = []
+    weeks: list[DistributionWeekly] = []
     for h in history:
         try:
             weeks.append(DistributionWeekly(
@@ -416,7 +415,7 @@ def load_distribution_trend(
     return DistributionTrend(ticker=ticker, weeks=weeks)
 
 
-def snapshot_to_dict(s: DistributionWeekly) -> Dict[str, Any]:
+def snapshot_to_dict(s: DistributionWeekly) -> dict[str, Any]:
     return {
         "ticker": s.ticker,
         "week_date": s.week_date,
@@ -434,7 +433,7 @@ def snapshot_to_dict(s: DistributionWeekly) -> Dict[str, Any]:
 
 def interpret_distribution(
     trend: DistributionTrend,
-) -> Tuple[str, str, float]:
+) -> tuple[str, str, float]:
     """把趨勢翻成「大戶吸籌 / 大戶倒貨 / 中性」 + 分數 0-100。"""
     latest = trend.latest()
     if not latest:
@@ -457,12 +456,12 @@ def interpret_distribution(
 
 
 __all__ = [
-    "DistributionLevel",
-    "DistributionTrend",
-    "DistributionWeekly",
     "LEVEL_LARGE",
     "LEVEL_RETAIL",
     "LEVEL_WHALE",
+    "DistributionLevel",
+    "DistributionTrend",
+    "DistributionWeekly",
     "build_distribution_snapshot",
     "fetch_distribution_all",
     "interpret_distribution",

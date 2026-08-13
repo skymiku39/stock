@@ -15,7 +15,6 @@ import argparse
 import datetime as dt
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
@@ -23,7 +22,7 @@ from bot.next_day_watch_pipeline import run_next_day_watch
 from bot.utils import get_logger
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-nextday",
         description="明日當沖預備清單 (題材延續 + 強勢承接 + 明日事件)",

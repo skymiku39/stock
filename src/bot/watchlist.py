@@ -13,11 +13,9 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
@@ -27,21 +25,21 @@ from bot.utils import get_logger, mk_folder, now_tw
 class WatchItem:
     ticker: str
     name: str = ""
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     note: str = ""
     added_at: str = ""
 
 
 @dataclass
 class WatchList:
-    items: List[WatchItem] = field(default_factory=list)
+    items: list[WatchItem] = field(default_factory=list)
 
 
-def _path(root: Optional[Path] = None) -> Path:
+def _path(root: Path | None = None) -> Path:
     return (root or Path.cwd()) / "data" / "watchlist.json"
 
 
-def load(root: Optional[Path] = None) -> WatchList:
+def load(root: Path | None = None) -> WatchList:
     p = _path(root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -63,7 +61,7 @@ def load(root: Optional[Path] = None) -> WatchList:
         return WatchList()
 
 
-def save(wl: WatchList, root: Optional[Path] = None) -> Path:
+def save(wl: WatchList, root: Path | None = None) -> Path:
     p = _path(root)
     mk_folder(str(p.parent))
     p.write_text(
@@ -78,7 +76,7 @@ def save(wl: WatchList, root: Optional[Path] = None) -> Path:
     return p
 
 
-def _sync_to_db(wl: WatchList, root: Optional[Path] = None) -> None:
+def _sync_to_db(wl: WatchList, root: Path | None = None) -> None:
     """JSON 寫入後同步到 SQLite (失敗不影響主流程)。"""
     try:
         from bot.stock_db import StockDB, WatchlistRow, default_db_path
@@ -107,9 +105,9 @@ def add(
     ticker: str,
     *,
     name: str = "",
-    tags: Optional[List[str]] = None,
+    tags: list[str] | None = None,
     note: str = "",
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> WatchList:
     ticker = ticker.strip()
     if not ticker:
@@ -135,7 +133,7 @@ def add(
     return wl
 
 
-def remove(ticker: str, root: Optional[Path] = None) -> WatchList:
+def remove(ticker: str, root: Path | None = None) -> WatchList:
     wl = load(root)
     wl.items = [i for i in wl.items if i.ticker != ticker]
     save(wl, root)
@@ -145,10 +143,10 @@ def remove(ticker: str, root: Optional[Path] = None) -> WatchList:
 def update(
     ticker: str,
     *,
-    name: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    note: Optional[str] = None,
-    root: Optional[Path] = None,
+    name: str | None = None,
+    tags: list[str] | None = None,
+    note: str | None = None,
+    root: Path | None = None,
 ) -> WatchList:
     wl = load(root)
     for it in wl.items:
@@ -168,7 +166,7 @@ def merge_etf_focus(
     *,
     min_consensus: int = 2,
     tag: str = "ETF共識",
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> WatchList:
     """把目前 ETF 共識焦點 (持有檔數 >= min_consensus) 全部加入 watchlist。"""
     from bot.active_etf import list_holdings_dates, load_active_etfs, load_holdings
@@ -191,10 +189,10 @@ def merge_etf_focus(
 
 
 def merge_pipeline_focus(
-    run_id: Optional[str] = None,
+    run_id: str | None = None,
     *,
     tag: str = "管線焦點",
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> WatchList:
     """把最近一次 (或指定) pipeline run 的焦點個股加進來。"""
     from bot.data_pipeline import list_pipeline_runs, load_pipeline_run

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from bot.models import QtyUnit, qty_multiplier
 
@@ -24,7 +24,7 @@ class TradeCostParams:
         return STANDARD_FEE_RATE * self.fee_discount
 
 
-def params_from_settings(settings: "Settings") -> TradeCostParams:
+def params_from_settings(settings: Settings) -> TradeCostParams:
     return TradeCostParams(
         fee_discount=float(getattr(settings, "broker_fee_discount", 0.28)),
         min_fee=float(getattr(settings, "broker_min_fee", 1.0)),
@@ -46,9 +46,9 @@ def buy_cash_required(
     entry_price: float,
     qty: int,
     unit: QtyUnit,
-    params: Optional[TradeCostParams] = None,
+    params: TradeCostParams | None = None,
     *,
-    settings: Optional["Settings"] = None,
+    settings: Settings | None = None,
 ) -> float:
     """買進實際支出（含手續費）。"""
     p = params or (params_from_settings(settings) if settings else TradeCostParams())
@@ -60,10 +60,10 @@ def sell_cash_received(
     exit_price: float,
     qty: int,
     unit: QtyUnit,
-    params: Optional[TradeCostParams] = None,
+    params: TradeCostParams | None = None,
     *,
-    settings: Optional["Settings"] = None,
-    sell_tax_rate: Optional[float] = None,
+    settings: Settings | None = None,
+    sell_tax_rate: float | None = None,
 ) -> float:
     """賣出實際入帳（扣手續費與證交稅）。"""
     p = params or (params_from_settings(settings) if settings else TradeCostParams())
@@ -78,10 +78,10 @@ def net_pnl_twd(
     exit_price: float,
     qty: int,
     unit: QtyUnit,
-    params: Optional[TradeCostParams] = None,
+    params: TradeCostParams | None = None,
     *,
-    settings: Optional["Settings"] = None,
-    sell_tax_rate: Optional[float] = None,
+    settings: Settings | None = None,
+    sell_tax_rate: float | None = None,
 ) -> float:
     """一趟買賣淨損益（元）。"""
     p = params or (params_from_settings(settings) if settings else TradeCostParams())
@@ -97,10 +97,10 @@ def net_pnl_pct(
     exit_price: float,
     qty: int,
     unit: QtyUnit,
-    params: Optional[TradeCostParams] = None,
+    params: TradeCostParams | None = None,
     *,
-    settings: Optional["Settings"] = None,
-    sell_tax_rate: Optional[float] = None,
+    settings: Settings | None = None,
+    sell_tax_rate: float | None = None,
 ) -> float:
     """一趟買賣淨報酬率 %（相對於買進總成本）。"""
     p = params or (params_from_settings(settings) if settings else TradeCostParams())
@@ -120,7 +120,7 @@ def position_net_pnl_pct(
     qty: int,
     unit: QtyUnit,
     *,
-    settings: Optional["Settings"] = None,
+    settings: Settings | None = None,
 ) -> float:
     """持倉若於 current_price 賣出的預估淨利 %。"""
     if avg_entry <= 0 or current_price <= 0 or qty <= 0:
@@ -134,8 +134,8 @@ def max_affordable_qty(
     unit: QtyUnit,
     *,
     max_qty: int,
-    settings: Optional["Settings"] = None,
-    params: Optional[TradeCostParams] = None,
+    settings: Settings | None = None,
+    params: TradeCostParams | None = None,
 ) -> int:
     """在 budget 內可買的最大數量（含手續費），從 max_qty 往下試。"""
     if price <= 0 or budget <= 0 or max_qty <= 0:
@@ -153,7 +153,7 @@ def rebuy_opportunity(
     qty: int,
     unit: QtyUnit,
     *,
-    settings: "Settings",
+    settings: Settings,
 ) -> bool:
     """回落買回：現價低於上次賣出價，且買回後以賣出價平倉可達目標淨利 %。"""
     if not getattr(settings, "allow_same_day_reentry", True):

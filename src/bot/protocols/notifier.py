@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -16,7 +16,7 @@ class NotifierProtocol(Protocol):
 
     def notify_start(
         self,
-        symbols: List[str],
+        symbols: list[str],
         simulation: bool,
         run_mode: str = "trade",
     ) -> None: ...

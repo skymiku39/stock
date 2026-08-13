@@ -18,7 +18,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import requests
 
@@ -55,15 +54,15 @@ except Exception:
 class FetchResult:
     etf: ActiveEtf
     success: bool = False
-    snapshot_date: Optional[dt.date] = None
+    snapshot_date: dt.date | None = None
     holdings_count: int = 0
-    saved_path: Optional[Path] = None
-    raw_text_path: Optional[Path] = None
+    saved_path: Path | None = None
+    raw_text_path: Path | None = None
     error: str = ""
     prompt_id: str = ""
     prompt_version: str = ""
     elapsed_ms: int = 0
-    llm_metadata: Dict = field(default_factory=dict)
+    llm_metadata: dict = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------
@@ -103,7 +102,7 @@ def _pdf_to_text(content: bytes, tmp_path: Path) -> str:
     try:
         tmp_path.write_bytes(content)
         reader = PdfReader(str(tmp_path))
-        parts: List[str] = []
+        parts: list[str] = []
         for p in reader.pages[:60]:
             try:
                 parts.append(p.extract_text() or "")
@@ -150,10 +149,10 @@ def fetch_and_save_holdings(
     etf: ActiveEtf,
     client: GeminiClient,
     *,
-    snapshot_date: Optional[dt.date] = None,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    snapshot_date: dt.date | None = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> FetchResult:
     """自動抓 + LLM 解析 + 存檔 一條龍。"""
     log = logger or get_logger("etf-fetcher")
@@ -238,7 +237,7 @@ def fetch_and_save_holdings(
         return result
 
     data = extract_json(raw_json)
-    holdings: List[Holding] = []
+    holdings: list[Holding] = []
     if isinstance(data, list):
         for item in data:
             if not isinstance(item, dict):
@@ -291,11 +290,11 @@ def fetch_and_save_holdings(
 def fetch_all_active_etfs(
     client: GeminiClient,
     *,
-    snapshot_date: Optional[dt.date] = None,
-    root: Optional[Path] = None,
-    only_symbols: Optional[List[str]] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[FetchResult]:
+    snapshot_date: dt.date | None = None,
+    root: Path | None = None,
+    only_symbols: list[str] | None = None,
+    logger: logging.Logger | None = None,
+) -> list[FetchResult]:
     """跑一輪：抓所有有 holdings_url 的主動式 ETF。"""
     log = logger or get_logger("etf-fetcher")
     sess = _new_session()
@@ -303,7 +302,7 @@ def fetch_all_active_etfs(
     if only_symbols:
         wanted = set(only_symbols)
         etfs = [e for e in etfs if e.symbol in wanted]
-    results: List[FetchResult] = []
+    results: list[FetchResult] = []
     for e in etfs:
         if not e.holdings_url:
             log.debug("[%s] 略過 (無 holdings_url)", e.symbol)

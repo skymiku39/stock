@@ -16,9 +16,10 @@ import dataclasses
 import datetime as dt
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bot.cloud_file_cache import (
     mirror_file_to_cloud,
@@ -45,7 +46,7 @@ _ETFINFO_HOLDINGS = "https://www.etfinfo.tw/etf/{symbol}/holdings"
 # 同時支援台股 (4 位數代號) 與海外持股 (公司名)。
 _MONEYDJ_HOLDINGS = "https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw"
 
-DEFAULT_ACTIVE_ETFS: List[Dict[str, str]] = [
+DEFAULT_ACTIVE_ETFS: list[dict[str, str]] = [
     {"symbol": "00980A", "name": "主動野村臺灣優選", "issuer": "野村投信", "region": "台灣", "freq": "季配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00980A")},
     {"symbol": "00981A", "name": "主動統一台股增長", "issuer": "統一投信", "region": "台灣", "freq": "季配",
@@ -132,9 +133,9 @@ class HoldingsSnapshot:
 
     symbol: str
     date: dt.date
-    holdings: List[Holding] = field(default_factory=list)
+    holdings: list[Holding] = field(default_factory=list)
 
-    def by_ticker(self) -> Dict[str, Holding]:
+    def by_ticker(self) -> dict[str, Holding]:
         return {h.ticker: h for h in self.holdings}
 
     def total_weight(self) -> float:
@@ -148,12 +149,12 @@ class EtfQuote:
     symbol: str
     ts: dt.datetime
     market_price: float
-    nav: Optional[float] = None
+    nav: float | None = None
     pct_chg: float = 0.0
     volume: int = 0
 
     @property
-    def premium_pct(self) -> Optional[float]:
+    def premium_pct(self) -> float | None:
         if self.nav and self.nav > 0:
             return 100.0 * (self.market_price - self.nav) / self.nav
         return None
@@ -164,12 +165,12 @@ class EtfQuote:
 # ----------------------------------------------------------------------
 
 
-def list_path(root: Optional[Path] = None) -> Path:
+def list_path(root: Path | None = None) -> Path:
     base = root or Path.cwd()
     return base / "data" / "active_etfs.json"
 
 
-def load_active_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
+def load_active_etfs(root: Path | None = None) -> list[ActiveEtf]:
     """優先讀 data/active_etfs.json，找不到時用內建預設值。
 
     對舊版 JSON (沒有 holdings_url 欄位) 也能相容。
@@ -179,7 +180,7 @@ def load_active_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
     if p.exists():
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
-            out: List[ActiveEtf] = []
+            out: list[ActiveEtf] = []
             valid_fields = {f.name for f in dataclasses.fields(ActiveEtf)}
             for r in raw:
                 clean = {k: v for k, v in r.items() if k in valid_fields}
@@ -190,7 +191,7 @@ def load_active_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
     return [ActiveEtf(**r) for r in DEFAULT_ACTIVE_ETFS]
 
 
-def save_active_etfs(etfs: Iterable[ActiveEtf], root: Optional[Path] = None) -> Path:
+def save_active_etfs(etfs: Iterable[ActiveEtf], root: Path | None = None) -> Path:
     p = list_path(root)
     mk_folder(str(p.parent))
     data = [dataclasses.asdict(e) for e in etfs]
@@ -204,21 +205,21 @@ def save_active_etfs(etfs: Iterable[ActiveEtf], root: Optional[Path] = None) -> 
 # ----------------------------------------------------------------------
 
 
-def holdings_dir(symbol: str, root: Optional[Path] = None) -> Path:
+def holdings_dir(symbol: str, root: Path | None = None) -> Path:
     base = root or Path.cwd()
     return base / "data" / "etf_holdings" / symbol
 
 
-def holdings_path(symbol: str, date: dt.date, root: Optional[Path] = None) -> Path:
+def holdings_path(symbol: str, date: dt.date, root: Path | None = None) -> Path:
     return holdings_dir(symbol, root) / f"{date.isoformat()}.csv"
 
 
-def list_holdings_dates(symbol: str, root: Optional[Path] = None) -> List[dt.date]:
+def list_holdings_dates(symbol: str, root: Path | None = None) -> list[dt.date]:
     d = holdings_dir(symbol, root)
     restore_tree_from_cloud(d, root=root)
     if not d.exists():
         return []
-    dates: List[dt.date] = []
+    dates: list[dt.date] = []
     for f in d.glob("*.csv"):
         try:
             dates.append(dt.date.fromisoformat(f.stem))
@@ -229,9 +230,9 @@ def list_holdings_dates(symbol: str, root: Optional[Path] = None) -> List[dt.dat
 
 def load_holdings(
     symbol: str,
-    date: Optional[dt.date] = None,
-    root: Optional[Path] = None,
-) -> Optional[HoldingsSnapshot]:
+    date: dt.date | None = None,
+    root: Path | None = None,
+) -> HoldingsSnapshot | None:
     """讀指定日的持股，未指定日則讀最新一筆。"""
     if date is None:
         dates = list_holdings_dates(symbol, root)
@@ -242,7 +243,7 @@ def load_holdings(
     restore_file_from_cloud(p, root=root)
     if not p.exists():
         return None
-    holdings: List[Holding] = []
+    holdings: list[Holding] = []
     with p.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -259,7 +260,7 @@ def load_holdings(
     return HoldingsSnapshot(symbol=symbol, date=date, holdings=holdings)
 
 
-def save_holdings(snap: HoldingsSnapshot, root: Optional[Path] = None) -> Path:
+def save_holdings(snap: HoldingsSnapshot, root: Path | None = None) -> Path:
     p = holdings_path(snap.symbol, snap.date, root)
     mk_folder(str(p.parent))
     with p.open("w", encoding="utf-8-sig", newline="") as f:
@@ -279,16 +280,16 @@ def save_holdings(snap: HoldingsSnapshot, root: Optional[Path] = None) -> Path:
 
 
 def fetch_etf_quotes_via_shioaji(
-    broker: "SjBroker",
-    etfs: List[ActiveEtf],
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, EtfQuote]:
+    broker: SjBroker,
+    etfs: list[ActiveEtf],
+    logger: logging.Logger | None = None,
+) -> dict[str, EtfQuote]:
     """以 Shioaji snapshots API 取得 ETF 即時報價 + 前日收盤。
 
     Shioaji 公開 API 不直接給 NAV，因此 nav 留空，留待後續從投信網頁/PCF 補。
     """
     log = logger or get_logger("active-etf")
-    quotes: Dict[str, EtfQuote] = {}
+    quotes: dict[str, EtfQuote] = {}
     if not etfs:
         return quotes
     try:
@@ -325,11 +326,11 @@ def fetch_etf_quotes_via_shioaji(
 
 
 def snapshots_to_records(
-    snapshots: Dict[str, HoldingsSnapshot],
-    etf_meta: Dict[str, ActiveEtf],
-) -> List[Dict[str, Any]]:
+    snapshots: dict[str, HoldingsSnapshot],
+    etf_meta: dict[str, ActiveEtf],
+) -> list[dict[str, Any]]:
     """攤平多檔 ETF 持股為記錄列，方便交叉分析。"""
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for sym, snap in snapshots.items():
         meta = etf_meta.get(sym)
         for h in snap.holdings:
@@ -348,8 +349,8 @@ def snapshots_to_records(
 
 
 __all__ = [
-    "ActiveEtf",
     "DEFAULT_ACTIVE_ETFS",
+    "ActiveEtf",
     "EtfQuote",
     "Holding",
     "HoldingsSnapshot",

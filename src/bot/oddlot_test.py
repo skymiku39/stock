@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from typing import Optional
 
 from bot.config import Settings
 from bot.utils import get_logger
@@ -34,7 +33,7 @@ def _safe_stdout() -> None:
         pass
 
 
-def _resolve_price(broker, symbol: str, logger) -> Optional[float]:
+def _resolve_price(broker, symbol: str, logger) -> float | None:
     """取得一個合理的限價：優先用快照成交價，其次前日收盤 (reference)。"""
     contract = broker.get_contract(symbol)
     if contract is None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from bot.events.types import QuantDataFetchCompleted
 from bot.stock_db import StockDB, default_db_path
@@ -17,12 +16,12 @@ class SmileScreenOnDataReadyHandler:
     def __init__(
         self,
         *,
-        project_root: Optional[Path] = None,
+        project_root: Path | None = None,
         total_fund: float = 300_000,
         top_n: int = 5,
         lookback_years: int = 3,
         publisher=None,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._root = project_root or Path.cwd()
         self._total_fund = total_fund

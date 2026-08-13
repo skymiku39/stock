@@ -6,8 +6,9 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING
 
 from bot.utils import get_logger, now_tw
 
@@ -25,12 +26,12 @@ class IntradayLlmAdvisor:
 
     def __init__(
         self,
-        settings: "Settings",
+        settings: Settings,
         *,
-        project_root: Optional[Path] = None,
-        risk: Optional["RiskGuard"] = None,
-        llm_gate: Optional["LlmGate"] = None,
-        logger: Optional[logging.Logger] = None,
+        project_root: Path | None = None,
+        risk: RiskGuard | None = None,
+        llm_gate: LlmGate | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.settings = settings
         self.project_root = project_root or Path.cwd()

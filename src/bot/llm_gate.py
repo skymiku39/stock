@@ -7,7 +7,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 from bot.models import PositionInfo
 from bot.scoring import compute_scorecard
@@ -80,9 +80,9 @@ class LlmGate:
     def __init__(
         self,
         settings: Settings,
-        risk: Optional[RiskGuard] = None,
-        project_root: Optional[Path] = None,
-        logger: Optional[logging.Logger] = None,
+        risk: RiskGuard | None = None,
+        project_root: Path | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.settings = settings
         self.risk = risk
@@ -94,7 +94,7 @@ class LlmGate:
     def _llm_path(self, symbol: str) -> Path:
         return self.project_root / AUTO_LLM_DIR / f"{symbol}.json"
 
-    def load_llm_cache(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def load_llm_cache(self, symbol: str) -> dict[str, Any] | None:
         path = self._llm_path(symbol)
         if not path.exists():
             return None
@@ -109,7 +109,7 @@ class LlmGate:
         symbol: str,
         price: float,
         pct_chg: float,
-        llm_data: Optional[Dict[str, Any]],
+        llm_data: dict[str, Any] | None,
     ) -> float:
         try:
             card = compute_scorecard(
@@ -126,7 +126,7 @@ class LlmGate:
             self.logger.exception("[%s] compute_scorecard 失敗", symbol)
             return 0.0
 
-    def _cache_stale(self, llm_data: Optional[Dict[str, Any]]) -> bool:
+    def _cache_stale(self, llm_data: dict[str, Any] | None) -> bool:
         if not llm_data:
             return True
         fetched = llm_data.get("fetched_at", "")
@@ -204,7 +204,7 @@ class LlmGate:
             return False
         return bool(llm_data.get("limit_up_potential", False))
 
-    def should_exit(self, symbol: str, position: PositionInfo) -> Optional[str]:
+    def should_exit(self, symbol: str, position: PositionInfo) -> str | None:
         """持倉中若 LLM 轉負向，回傳出場原因字串。"""
         if not getattr(self.settings, "llm_exit_on_negative", False):
             return None
@@ -281,7 +281,7 @@ class LlmGate:
         pnl_pct: float,
         pct_chg: float,
         trigger_reason: str,
-        llm_data: Optional[Dict[str, Any]],
+        llm_data: dict[str, Any] | None,
         *,
         record_block: bool,
     ) -> ExitVerdict:
@@ -356,7 +356,7 @@ class LlmGate:
         symbol: str,
         price: float,
         pct_chg: float,
-        llm_data: Optional[Dict[str, Any]],
+        llm_data: dict[str, Any] | None,
         *,
         record_block: bool,
     ) -> EntryVerdict:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot.config import Settings
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 ARCHIVE_DOC = "docs/archive/day-trading.md"
 
 
-def day_trading_trade_blocked(settings: "Settings") -> bool:
+def day_trading_trade_blocked(settings: Settings) -> bool:
     """trade 模式是否因封存而被阻擋。"""
     if settings.run_mode != "trade":
         return False
@@ -19,7 +19,7 @@ def day_trading_trade_blocked(settings: "Settings") -> bool:
     return not getattr(settings, "day_trading_unfreeze", False)
 
 
-def trade_block_message(settings: Optional["Settings"] = None) -> str:
+def trade_block_message(settings: Settings | None = None) -> str:
     """回傳 trade 模式被阻擋時的說明文字。"""
     lines = [
         "當沖自動交易 (RUN_MODE=trade) 已封存，不再作為預設開發方向。",

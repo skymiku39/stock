@@ -13,9 +13,9 @@ import signal
 import sys
 from pathlib import Path
 
+from bot.app_bootstrap import bootstrap_event_bus
 from bot.archive_status import day_trading_trade_blocked, trade_block_message
 from bot.config import Settings
-from bot.app_bootstrap import bootstrap_event_bus
 from bot.events import BotShutdownRequested
 from bot.events.wiring import publish_if_bus
 from bot.utils import get_logger

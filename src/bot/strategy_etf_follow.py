@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from bot.active_etf import (
     HoldingsSnapshot,
@@ -27,8 +27,8 @@ from bot.etf_consensus import (
     consensus_new_builds,
 )
 from bot.models import MarketTick
-from bot.trade_cost import max_affordable_qty
 from bot.strategy import BaseStrategy
+from bot.trade_cost import max_affordable_qty
 from bot.utils import get_logger, now_tw_time
 
 if TYPE_CHECKING:
@@ -42,17 +42,17 @@ class EtfFollowStrategy(BaseStrategy):
 
     def __init__(
         self,
-        broker: Optional["SjBroker"],
-        settings: "Settings",
-        market_source: Optional["TwsePublicMarketSource"] = None,
-        logger: Optional[logging.Logger] = None,
+        broker: SjBroker | None,
+        settings: Settings,
+        market_source: TwsePublicMarketSource | None = None,
+        logger: logging.Logger | None = None,
         publisher=None,
         *,
         wire_handlers: bool = True,
         min_consensus_new: int = 2,
         min_consensus_add: int = 3,
         max_pct_chg_on_entry: float = 4.0,
-        project_root: Optional[Path] = None,
+        project_root: Path | None = None,
     ):
         super().__init__(
             broker, settings, market_source, logger,
@@ -63,7 +63,7 @@ class EtfFollowStrategy(BaseStrategy):
         self.min_consensus_add = min_consensus_add
         self.max_pct_chg_on_entry = max_pct_chg_on_entry
         self._project_root = project_root or Path.cwd()
-        self._signals: Dict[str, FollowSignal] = {}
+        self._signals: dict[str, FollowSignal] = {}
         self._prepare_signals()
 
     # ------------------------------------------------------------------
@@ -77,8 +77,8 @@ class EtfFollowStrategy(BaseStrategy):
             return
 
         # 收集最近兩日的快照 (跨所有 ETF)
-        snapshots_latest: Dict[str, HoldingsSnapshot] = {}
-        snapshots_prev: Dict[str, HoldingsSnapshot] = {}
+        snapshots_latest: dict[str, HoldingsSnapshot] = {}
+        snapshots_prev: dict[str, HoldingsSnapshot] = {}
         for e in etfs:
             dates = list_holdings_dates(e.symbol, self._project_root)
             if len(dates) < 1:
@@ -111,7 +111,7 @@ class EtfFollowStrategy(BaseStrategy):
             all_changes, min_etfs=self.min_consensus_add,
         )
 
-        signals_by_ticker: Dict[str, FollowSignal] = {}
+        signals_by_ticker: dict[str, FollowSignal] = {}
         for s in new_signals + add_signals:
             existing = signals_by_ticker.get(s.ticker)
             if existing is None or s.etf_count > existing.etf_count:
@@ -124,7 +124,7 @@ class EtfFollowStrategy(BaseStrategy):
 
         # 將共識個股加入監控
         original = set(self.settings.symbols)
-        added: List[str] = []
+        added: list[str] = []
         for ticker in self._signals.keys():
             if ticker not in original:
                 self.settings.symbols.append(ticker)
@@ -139,7 +139,7 @@ class EtfFollowStrategy(BaseStrategy):
         )
 
     @property
-    def follow_signals(self) -> Dict[str, FollowSignal]:
+    def follow_signals(self) -> dict[str, FollowSignal]:
         """供 UI / 報表查詢的跟單訊號表。"""
         return dict(self._signals)
 
@@ -202,9 +202,7 @@ class EtfFollowStrategy(BaseStrategy):
             return 0
         base = self.settings.max_lot_per_symbol
         boost = 1
-        if signal.signal_type == "consensus_new" and signal.etf_count >= 3:
-            boost = 2
-        elif signal.signal_type == "consensus_add" and signal.etf_count >= 5:
+        if signal.signal_type == "consensus_new" and signal.etf_count >= 3 or signal.signal_type == "consensus_add" and signal.etf_count >= 5:
             boost = 2
 
         target_lots = base * boost

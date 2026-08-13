@@ -29,17 +29,16 @@ SQLite 預設使用 WAL 模式，多 reader + 單 writer 可並行；模組層�
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any
 
 from bot.utils import get_logger, now_tw
-
 
 # ----------------------------------------------------------------------
 # 資料模型 (Dataclass，與 SQLite 欄位 1:1 對應)
@@ -228,7 +227,7 @@ class LlmDailyReportRow:
 # ----------------------------------------------------------------------
 
 
-_SCHEMA: Dict[str, str] = {
+_SCHEMA: dict[str, str] = {
     "stock_info": """
         CREATE TABLE IF NOT EXISTS stock_info (
             symbol              TEXT PRIMARY KEY,
@@ -376,10 +375,10 @@ _SCHEMA: Dict[str, str] = {
     """,
 }
 
-ALL_TABLES: Tuple[str, ...] = tuple(_SCHEMA.keys())
+ALL_TABLES: tuple[str, ...] = tuple(_SCHEMA.keys())
 
 # 預設 sync 範圍：使用者通常想同步的表 (sync_meta 不需要)
-SYNCABLE_TABLES: Tuple[str, ...] = (
+SYNCABLE_TABLES: tuple[str, ...] = (
     "stock_info",
     "etf_meta",
     "monthly_revenue",
@@ -399,7 +398,7 @@ SYNCABLE_TABLES: Tuple[str, ...] = (
 _DEFAULT_DB_REL = "data/stock.db"
 
 
-def default_db_path(root: Optional[Path] = None) -> Path:
+def default_db_path(root: Path | None = None) -> Path:
     """DB 預設位置 (專案根/data/stock.db)。可由 .env 覆寫。"""
     return (root or Path.cwd()) / _DEFAULT_DB_REL
 
@@ -415,7 +414,7 @@ class StockDB:
     >>> all_watch = db.list_watchlist()
     """
 
-    def __init__(self, path: Path, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(self, path: Path, logger: logging.Logger | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._log = logger or get_logger("stock_db")
@@ -425,9 +424,9 @@ class StockDB:
     @classmethod
     def open(
         cls,
-        path: Optional[Path] = None,
-        root: Optional[Path] = None,
-    ) -> "StockDB":
+        path: Path | None = None,
+        root: Path | None = None,
+    ) -> StockDB:
         return cls(path or default_db_path(root))
 
     # ----- 連線 (per-thread) -----
@@ -492,10 +491,10 @@ class StockDB:
         cur = self.conn.execute(f"SELECT COUNT(*) AS n FROM {table}")
         return int(cur.fetchone()["n"])
 
-    def table_counts(self) -> Dict[str, int]:
+    def table_counts(self) -> dict[str, int]:
         return {t: self._row_count(t) for t in ALL_TABLES}
 
-    def fetch_all_rows(self, table: str) -> List[Dict[str, Any]]:
+    def fetch_all_rows(self, table: str) -> list[dict[str, Any]]:
         """同步用：把整張 table 拉成 list[dict]。"""
         cur = self.conn.execute(f"SELECT * FROM {table}")
         return [dict(r) for r in cur.fetchall()]
@@ -503,7 +502,7 @@ class StockDB:
     def replace_table_rows(
         self,
         table: str,
-        rows: Iterable[Dict[str, Any]],
+        rows: Iterable[dict[str, Any]],
     ) -> int:
         """同步用：用雲端的整批資料覆蓋本地。回傳寫入筆數。"""
         rows = list(rows)
@@ -524,7 +523,7 @@ class StockDB:
     def upsert_rows(
         self,
         table: str,
-        rows: Iterable[Dict[str, Any]],
+        rows: Iterable[dict[str, Any]],
     ) -> int:
         """同步用：增量合併 (不刪除本地獨有)。回傳寫入筆數。"""
         rows = list(rows)
@@ -540,7 +539,7 @@ class StockDB:
                 c.execute(sql, values)
         return len(rows)
 
-    def _table_columns(self, table: str) -> List[str]:
+    def _table_columns(self, table: str) -> list[str]:
         cur = self.conn.execute(f"PRAGMA table_info({table})")
         return [r["name"] for r in cur.fetchall()]
 
@@ -548,7 +547,7 @@ class StockDB:
     # stock_info DAO
     # =================================================================
 
-    def get_stock_info(self, symbol: str) -> Optional[StockInfo]:
+    def get_stock_info(self, symbol: str) -> StockInfo | None:
         row = self.conn.execute(
             "SELECT * FROM stock_info WHERE symbol = ?", (symbol,)
         ).fetchone()
@@ -557,11 +556,11 @@ class StockDB:
     def list_stock_info(
         self,
         *,
-        industry: Optional[str] = None,
-        symbols: Optional[Iterable[str]] = None,
-    ) -> List[StockInfo]:
+        industry: str | None = None,
+        symbols: Iterable[str] | None = None,
+    ) -> list[StockInfo]:
         sql = "SELECT * FROM stock_info WHERE 1=1"
-        args: List[Any] = []
+        args: list[Any] = []
         if industry:
             sql += " AND industry = ?"
             args.append(industry)
@@ -610,10 +609,10 @@ class StockDB:
     def get_or_fetch_stock_info(
         self,
         symbol: str,
-        fetcher: Callable[[str], Optional[StockInfo]],
+        fetcher: Callable[[str], StockInfo | None],
         *,
-        max_age_days: Optional[int] = None,
-    ) -> Optional[StockInfo]:
+        max_age_days: int | None = None,
+    ) -> StockInfo | None:
         """Cache-Aside 模式。
 
         1. 找 DB；命中且未過期就回傳
@@ -631,13 +630,13 @@ class StockDB:
     # etf_meta DAO
     # =================================================================
 
-    def get_etf_meta(self, symbol: str) -> Optional[EtfMeta]:
+    def get_etf_meta(self, symbol: str) -> EtfMeta | None:
         row = self.conn.execute(
             "SELECT * FROM etf_meta WHERE symbol = ?", (symbol,)
         ).fetchone()
         return _row_to_dc(EtfMeta, row) if row else None
 
-    def list_etf_meta(self) -> List[EtfMeta]:
+    def list_etf_meta(self) -> list[EtfMeta]:
         rows = self.conn.execute("SELECT * FROM etf_meta ORDER BY symbol").fetchall()
         return [_row_to_dc(EtfMeta, r) for r in rows]
 
@@ -672,8 +671,8 @@ class StockDB:
     def get_monthly_revenue(
         self,
         symbol: str,
-        year_month: Optional[str] = None,
-    ) -> List[MonthlyRevenue]:
+        year_month: str | None = None,
+    ) -> list[MonthlyRevenue]:
         if year_month:
             row = self.conn.execute(
                 "SELECT * FROM monthly_revenue WHERE symbol = ? AND year_month = ?",
@@ -720,8 +719,8 @@ class StockDB:
     def get_quarterly_report(
         self,
         symbol: str,
-        period: Optional[str] = None,
-    ) -> List[QuarterlyReport]:
+        period: str | None = None,
+    ) -> list[QuarterlyReport]:
         if period:
             row = self.conn.execute(
                 "SELECT * FROM quarterly_report WHERE symbol = ? AND period = ?",
@@ -764,13 +763,13 @@ class StockDB:
     # watchlist DAO (取代 watchlist.json，向後相容)
     # =================================================================
 
-    def get_watch(self, symbol: str) -> Optional[WatchlistRow]:
+    def get_watch(self, symbol: str) -> WatchlistRow | None:
         row = self.conn.execute(
             "SELECT * FROM watchlist WHERE symbol = ?", (symbol,)
         ).fetchone()
         return _row_to_dc(WatchlistRow, row) if row else None
 
-    def list_watchlist(self) -> List[WatchlistRow]:
+    def list_watchlist(self) -> list[WatchlistRow]:
         rows = self.conn.execute(
             "SELECT * FROM watchlist ORDER BY added_at DESC, symbol"
         ).fetchall()
@@ -838,7 +837,7 @@ class StockDB:
     def bulk_upsert_price_bars(self, bars: Iterable[PriceBar]) -> int:
         """批次寫入 K 線；同一 transaction 內執行以加速。回傳寫入筆數。"""
         ts_default = now_tw().isoformat(timespec="seconds")
-        rows: List[Tuple[Any, ...]] = []
+        rows: list[tuple[Any, ...]] = []
         for b in bars:
             rows.append((
                 b.symbol, b.date, b.open, b.high, b.low, b.close, b.volume,
@@ -872,11 +871,11 @@ class StockDB:
         self,
         symbol: str,
         *,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        limit: Optional[int] = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int | None = None,
         ascending: bool = True,
-    ) -> List[PriceBar]:
+    ) -> list[PriceBar]:
         """讀取某檔的 K 線 (依日期區間)。
 
         - `start` / `end`：ISO 字串 (含)，留空則不限制。
@@ -884,7 +883,7 @@ class StockDB:
         - `ascending=True`：依日期由舊至新；繪圖時較直觀。
         """
         sql = "SELECT * FROM price_history WHERE symbol = ?"
-        args: List[Any] = [symbol]
+        args: list[Any] = [symbol]
         if start:
             sql += " AND date >= ?"
             args.append(start)
@@ -910,7 +909,7 @@ class StockDB:
             bars.reverse()
         return bars
 
-    def latest_price_date(self, symbol: str) -> Optional[str]:
+    def latest_price_date(self, symbol: str) -> str | None:
         """回傳該檔 DB 中最新的日期 (ISO 字串)；查無回傳 None。"""
         row = self.conn.execute(
             "SELECT MAX(date) AS d FROM price_history WHERE symbol = ?",
@@ -918,7 +917,7 @@ class StockDB:
         ).fetchone()
         return (row["d"] if row and row["d"] else None)
 
-    def list_price_symbols(self) -> List[str]:
+    def list_price_symbols(self) -> list[str]:
         """列出所有有 K 線資料的 symbol。"""
         rows = self.conn.execute(
             "SELECT symbol, COUNT(*) AS n FROM price_history "
@@ -926,7 +925,7 @@ class StockDB:
         ).fetchall()
         return [r["symbol"] for r in rows]
 
-    def price_history_summary(self) -> List[Dict[str, Any]]:
+    def price_history_summary(self) -> list[dict[str, Any]]:
         """每檔 symbol 的 K 線筆數 + 最新日期 + 最新收盤。"""
         sql = """
             SELECT symbol,
@@ -938,7 +937,7 @@ class StockDB:
             ORDER BY symbol
         """
         rows = self.conn.execute(sql).fetchall()
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for r in rows:
             sym = r["symbol"]
             last_row = self.conn.execute(
@@ -962,7 +961,7 @@ class StockDB:
     def bulk_upsert_intraday_bars(self, bars: Iterable[IntradayBar]) -> int:
         """批次寫入盤中 K 線或 Tick；回傳寫入筆數。"""
         ts_default = now_tw().isoformat(timespec="seconds")
-        rows: List[Tuple[Any, ...]] = []
+        rows: list[tuple[Any, ...]] = []
         for b in bars:
             rows.append((
                 b.symbol, b.ts, b.interval or "1m",
@@ -998,16 +997,16 @@ class StockDB:
         symbol: str,
         *,
         interval: str = "1m",
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        limit: Optional[int] = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int | None = None,
         ascending: bool = True,
-    ) -> List[IntradayBar]:
+    ) -> list[IntradayBar]:
         """讀取盤中歷史；start/end 為 ts 字串 (含)，格式 YYYY-MM-DD 或完整時間。"""
         sql = (
             "SELECT * FROM intraday_bars WHERE symbol = ? AND interval = ?"
         )
-        args: List[Any] = [symbol, interval]
+        args: list[Any] = [symbol, interval]
         if start:
             sql += " AND ts >= ?"
             args.append(start)
@@ -1038,7 +1037,7 @@ class StockDB:
         symbol: str,
         *,
         interval: str = "1m",
-    ) -> Optional[str]:
+    ) -> str | None:
         row = self.conn.execute(
             "SELECT MAX(ts) AS t FROM intraday_bars "
             "WHERE symbol = ? AND interval = ?",
@@ -1046,7 +1045,7 @@ class StockDB:
         ).fetchone()
         return row["t"] if row and row["t"] else None
 
-    def list_intraday_symbols(self, *, interval: str = "1m") -> List[str]:
+    def list_intraday_symbols(self, *, interval: str = "1m") -> list[str]:
         rows = self.conn.execute(
             "SELECT symbol FROM intraday_bars WHERE interval = ? "
             "GROUP BY symbol ORDER BY symbol",
@@ -1058,7 +1057,7 @@ class StockDB:
         self,
         *,
         interval: str = "1m",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
             SELECT symbol,
@@ -1088,14 +1087,14 @@ class StockDB:
         symbol: str,
         *,
         interval: str = "1m",
-        start: Optional[str] = None,
-        end: Optional[str] = None,
+        start: str | None = None,
+        end: str | None = None,
     ) -> int:
         sql = (
             "SELECT COUNT(*) AS n FROM intraday_bars "
             "WHERE symbol = ? AND interval = ?"
         )
-        args: List[Any] = [symbol, interval]
+        args: list[Any] = [symbol, interval]
         if start:
             sql += " AND ts >= ?"
             args.append(start)
@@ -1159,12 +1158,12 @@ class StockDB:
     def list_llm_analysis(
         self,
         *,
-        ticker: Optional[str] = None,
-        prompt_id: Optional[str] = None,
+        ticker: str | None = None,
+        prompt_id: str | None = None,
         limit: int = 200,
-    ) -> List[LlmAnalysisRow]:
+    ) -> list[LlmAnalysisRow]:
         sql = "SELECT * FROM llm_analysis_history WHERE 1=1"
-        args: List[Any] = []
+        args: list[Any] = []
         if ticker:
             sql += " AND ticker = ?"
             args.append(ticker)
@@ -1219,7 +1218,7 @@ class StockDB:
         report_date: str,
         *,
         mode: str = "",
-    ) -> Optional[LlmDailyReportRow]:
+    ) -> LlmDailyReportRow | None:
         row = self.conn.execute(
             """
             SELECT * FROM llm_daily_reports
@@ -1233,10 +1232,10 @@ class StockDB:
         self,
         report_type: str,
         *,
-        mode: Optional[str] = None,
-    ) -> Optional[LlmDailyReportRow]:
+        mode: str | None = None,
+    ) -> LlmDailyReportRow | None:
         sql = "SELECT * FROM llm_daily_reports WHERE report_type = ?"
-        args: List[Any] = [report_type]
+        args: list[Any] = [report_type]
         if mode is not None:
             sql += " AND mode = ?"
             args.append(mode)
@@ -1247,12 +1246,12 @@ class StockDB:
     def list_llm_daily_reports(
         self,
         *,
-        report_type: Optional[str] = None,
-        mode: Optional[str] = None,
+        report_type: str | None = None,
+        mode: str | None = None,
         limit: int = 200,
-    ) -> List[LlmDailyReportRow]:
+    ) -> list[LlmDailyReportRow]:
         sql = "SELECT * FROM llm_daily_reports WHERE 1=1"
-        args: List[Any] = []
+        args: list[Any] = []
         if report_type:
             sql += " AND report_type = ?"
             args.append(report_type)
@@ -1276,7 +1275,7 @@ class StockDB:
             return SyncMeta(table_name=table)
         return _row_to_dc(SyncMeta, row)
 
-    def list_sync_meta(self) -> List[SyncMeta]:
+    def list_sync_meta(self) -> list[SyncMeta]:
         rows = self.conn.execute("SELECT * FROM sync_meta ORDER BY table_name").fetchall()
         return [_row_to_dc(SyncMeta, r) for r in rows]
 
@@ -1329,10 +1328,10 @@ class StockDB:
 
 
 _singleton_lock = threading.Lock()
-_singleton: Optional[StockDB] = None
+_singleton: StockDB | None = None
 
 
-def get_db(path: Optional[Path] = None, root: Optional[Path] = None) -> StockDB:
+def get_db(path: Path | None = None, root: Path | None = None) -> StockDB:
     """模組層單例 (給 dashboard / cli 共用)。"""
     global _singleton
     with _singleton_lock:
@@ -1375,7 +1374,7 @@ def _default_for(table: str, col: str) -> Any:
     return 0 if col in numeric_cols else ""
 
 
-def _is_stale(updated_at: str, max_age_days: Optional[int]) -> bool:
+def _is_stale(updated_at: str, max_age_days: int | None) -> bool:
     if max_age_days is None:
         return False
     if not updated_at:

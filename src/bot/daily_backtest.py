@@ -5,17 +5,15 @@
 
 from __future__ import annotations
 
-import datetime as dt
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 from bot.config import Settings
-from bot.entry_rules import in_entry_range, resolve_entry_range
+from bot.entry_rules import resolve_entry_range
 from bot.intraday_backtest import BacktestSummary, BacktestTrade, SymbolBacktestResult
 from bot.models import QtyUnit
 from bot.stock_db import PriceBar, StockDB, default_db_path
 from bot.trade_cost import (
-    buy_cash_required,
     max_affordable_qty,
     net_pnl_twd,
     position_net_pnl_pct,
@@ -33,10 +31,10 @@ class _DaySim:
 class DailyBacktester:
     """日 K 近似回測（適合 2020~迄今長區間）。"""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
 
-    def _calc_quantity(self, price: float, fund_remaining: float) -> Tuple[int, QtyUnit]:
+    def _calc_quantity(self, price: float, fund_remaining: float) -> tuple[int, QtyUnit]:
         if price <= 0 or fund_remaining <= 0:
             return 0, "lot"
         qty = max_affordable_qty(
@@ -64,7 +62,7 @@ class DailyBacktester:
         symbol: str,
         prev_close: float,
         bar: PriceBar,
-    ) -> Optional[float]:
+    ) -> float | None:
         if prev_close <= 0:
             return None
         lo, hi = resolve_entry_range(symbol, self.settings)
@@ -89,7 +87,7 @@ class DailyBacktester:
         trade_date: str,
         prev_close: float,
         bar: PriceBar,
-    ) -> Optional[BacktestTrade]:
+    ) -> BacktestTrade | None:
         entry = self._resolve_entry_price(symbol, prev_close, bar)
         if entry is None or entry <= 0:
             return None
@@ -107,8 +105,7 @@ class DailyBacktester:
             pnl = position_net_pnl_pct(
                 entry, px, qty, unit, settings=self.settings,
             )
-            if pnl > st.peak_pnl:
-                st.peak_pnl = pnl
+            st.peak_pnl = max(st.peak_pnl, pnl)
 
         pnl_low = position_net_pnl_pct(
             entry, float(bar.low), qty, unit, settings=self.settings,
@@ -160,8 +157,8 @@ class DailyBacktester:
         db: StockDB,
         symbol: str,
         *,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
+        start: str | None = None,
+        end: str | None = None,
     ) -> SymbolBacktestResult:
         bars = db.get_price_history(symbol, start=start, end=end, ascending=True)
         result = SymbolBacktestResult(symbol=symbol, bar_count=len(bars))
@@ -186,9 +183,9 @@ class DailyBacktester:
         symbols: Sequence[str],
         *,
         root=None,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        db: Optional[StockDB] = None,
+        start: str | None = None,
+        end: str | None = None,
+        db: StockDB | None = None,
     ) -> BacktestSummary:
         from pathlib import Path
         database = db or StockDB.open(path=default_db_path(Path(root or ".")))

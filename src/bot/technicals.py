@@ -11,19 +11,18 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 # ----------------------------------------------------------------------
 # 抓取
@@ -55,7 +54,7 @@ def _session() -> requests.Session:
     return s
 
 
-def _cache_dir(ticker: str, root: Optional[Path] = None) -> Path:
+def _cache_dir(ticker: str, root: Path | None = None) -> Path:
     base = (root or Path.cwd()) / "data" / "technicals" / ticker
     mk_folder(str(base))
     return base
@@ -63,9 +62,9 @@ def _cache_dir(ticker: str, root: Optional[Path] = None) -> Path:
 
 def _resolve_market(
     ticker: str,
-    root: Optional[Path],
+    root: Path | None,
     *,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> str:
     """判斷個股市場別；未知一律當上市 (維持既有行為)。"""
     try:
@@ -75,7 +74,7 @@ def _resolve_market(
         return "twse"
 
 
-def _roc_to_iso(roc: str) -> Optional[dt.date]:
+def _roc_to_iso(roc: str) -> dt.date | None:
     """民國日期 (e.g. 114/11/03) 轉為 ISO date。"""
     try:
         parts = roc.split("/")
@@ -107,7 +106,7 @@ def _to_float(x: Any) -> float:
 class MonthlyKlineResult:
     """單月日 K 抓取結果（含 HTTP 狀態，供慢速排程判斷限流）。"""
 
-    rows: List[Dict[str, Any]]
+    rows: list[dict[str, Any]]
     http_status: int = 0
     error: str = ""
 
@@ -118,8 +117,8 @@ def fetch_monthly_kline_with_meta(
     month: int,
     *,
     market: str = "twse",
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> MonthlyKlineResult:
     """抓單月日 K 並回傳 HTTP 狀態。"""
     if market == "tpex":
@@ -165,7 +164,7 @@ def fetch_monthly_kline_with_meta(
     i_high = idx("最高價", "最高")
     i_low = idx("最低價", "最低")
     i_close = idx("收盤價", "收盤")
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for r in raw_rows:
         if i_date < 0 or i_date >= len(r):
             continue
@@ -189,9 +188,9 @@ def fetch_monthly_kline(
     month: int,
     *,
     market: str = "twse",
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓單月個股日K。
 
     Args:
@@ -212,8 +211,8 @@ def fetch_monthly_kline_yfinance(
     month: int,
     *,
     market: str = "twse",
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """以 yfinance 補單月日 K（TWSE 403 時的備援來源）。"""
     log = logger or get_logger("technicals")
     try:
@@ -243,7 +242,7 @@ def fetch_monthly_kline_yfinance(
             continue
         if hist is None or hist.empty:
             continue
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for idx, row in hist.iterrows():
             try:
                 d = idx.date() if hasattr(idx, "date") else dt.date.fromisoformat(str(idx)[:10])
@@ -269,9 +268,9 @@ def _fetch_tpex_monthly_kline(
     year: int,
     month: int,
     *,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓 TPEx 上櫃單月個股日K。
 
     TPEx 回傳格式：{tables:[{fields:[日期,成交張數,成交仟元,開盤,最高,最低,收盤,漲跌,筆數], data:[...]}]}
@@ -314,7 +313,7 @@ def _fetch_tpex_monthly_kline(
     i_high = idx("最高")
     i_low = idx("最低")
     i_close = idx("收盤")
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for r in rows:
         if i_date < 0 or i_date >= len(r):
             continue
@@ -337,10 +336,10 @@ def fetch_recent_kline(
     ticker: str,
     *,
     months: int = 6,
-    end_date: Optional[dt.date] = None,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    end_date: dt.date | None = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     incremental: bool = True,
     save_to_db: bool = True,
 ) -> pd.DataFrame:
@@ -361,14 +360,14 @@ def fetch_recent_kline(
     cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
     restore_file_from_cloud(cache_path, root=root)
 
-    existing: Optional[pd.DataFrame] = None
+    existing: pd.DataFrame | None = None
     if incremental and cache_path.exists():
         try:
             existing = pd.read_csv(cache_path, dtype={"date": str})
         except Exception:
             existing = None
 
-    months_back: List[tuple[int, int]] = []
+    months_back: list[tuple[int, int]] = []
     cur = end.replace(day=1)
     for _ in range(months):
         months_back.append((cur.year, cur.month))
@@ -388,7 +387,7 @@ def fetch_recent_kline(
         except Exception:
             pass
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for (y, m) in months_back:
         rows.extend(fetch_monthly_kline(
             ticker, y, m, market=market, session=sess, logger=log,
@@ -429,8 +428,8 @@ def _save_df_to_db(
     ticker: str,
     df: pd.DataFrame,
     *,
-    root: Optional[Path] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    logger: logging.Logger | None = None,
 ) -> int:
     """把 K 線 DataFrame 批次寫入 SQLite price_history。失敗時記錄並回 0。"""
     log = logger or get_logger("technicals")
@@ -471,9 +470,9 @@ def _save_df_to_db(
 # ----------------------------------------------------------------------
 
 
-def _enumerate_months(start: dt.date, end: dt.date) -> List[Tuple[int, int]]:
+def _enumerate_months(start: dt.date, end: dt.date) -> list[tuple[int, int]]:
     """[start, end] 之間（含）所有月份 (year, month)，由舊到新。"""
-    out: List[Tuple[int, int]] = []
+    out: list[tuple[int, int]] = []
     cur = start.replace(day=1)
     last = end.replace(day=1)
     while cur <= last:
@@ -489,8 +488,8 @@ def _enumerate_months(start: dt.date, end: dt.date) -> List[Tuple[int, int]]:
 def get_kline_coverage(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-) -> Optional[Dict[str, Any]]:
+    root: Path | None = None,
+) -> dict[str, Any] | None:
     """回傳目前 K 線快取範圍 (earliest, latest, rows)。優先讀 DB，否則讀 CSV。
 
     若無資料回 None。
@@ -512,7 +511,7 @@ def get_kline_coverage(
     return {
         "earliest": earliest,
         "latest": latest,
-        "rows": int(len(df)),
+        "rows": len(df),
     }
 
 
@@ -520,13 +519,13 @@ def fetch_kline_range(
     ticker: str,
     *,
     start_date: dt.date,
-    end_date: Optional[dt.date] = None,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    end_date: dt.date | None = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     save_to_db: bool = True,
     skip_existing_months: bool = True,
-    on_progress: Optional[Callable[[int, int, str, int], None]] = None,
+    on_progress: Callable[[int, int, str, int], None] | None = None,
     request_delay_sec: float = 0.4,
     direction: str = "backward",  # "backward" (新→舊) 或 "forward" (舊→新)
 ) -> pd.DataFrame:
@@ -549,7 +548,7 @@ def fetch_kline_range(
 
     cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
     restore_file_from_cloud(cache_path, root=root)
-    existing: Optional[pd.DataFrame] = None
+    existing: pd.DataFrame | None = None
     if cache_path.exists():
         try:
             existing = pd.read_csv(cache_path, dtype={"date": str})
@@ -557,7 +556,7 @@ def fetch_kline_range(
         except Exception:
             existing = None
 
-    existing_months: set[Tuple[int, int]] = set()
+    existing_months: set[tuple[int, int]] = set()
     if existing is not None and not existing.empty and skip_existing_months:
         for d in existing["date"].tolist():
             try:
@@ -571,7 +570,7 @@ def fetch_kline_range(
         months.reverse()
 
     total = len(months)
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     fetched_months = 0
     for idx, (y, m) in enumerate(months, start=1):
         # 邊界月：cache 中可能只有部分日期 → 不跳過邊界月
@@ -637,11 +636,11 @@ def extend_kline_backward(
     ticker: str,
     *,
     years_back: int = 5,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     save_to_db: bool = True,
-    on_progress: Optional[Callable[[int, int, str, int], None]] = None,
+    on_progress: Callable[[int, int, str, int], None] | None = None,
     request_delay_sec: float = 0.4,
 ) -> pd.DataFrame:
     """從目前 cache 中「最早日期」再往前回補 N 年（若無 cache 則以今天為起點）。
@@ -688,10 +687,10 @@ def extend_kline_backward(
 def load_kline_from_db(
     ticker: str,
     *,
-    months: Optional[int] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    root: Optional[Path] = None,
+    months: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    root: Path | None = None,
 ) -> pd.DataFrame:
     """從 SQLite 讀回 K 線 DataFrame；找不到資料回空 DataFrame。
 
@@ -740,7 +739,7 @@ def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_moving_averages(
     df: pd.DataFrame,
-    periods: List[int] = (5, 10, 20, 60, 120),
+    periods: list[int] = (5, 10, 20, 60, 120),
 ) -> pd.DataFrame:
     out = df.copy()
     for p in periods:
@@ -785,8 +784,8 @@ def add_kd(df: pd.DataFrame, period: int = 9) -> pd.DataFrame:
     high_max = out["high"].rolling(period, min_periods=1).max()
     rsv = 100 * (out["close"] - low_min) / (high_max - low_min).replace(0, pd.NA)
     rsv = rsv.fillna(50.0)
-    k_list: List[float] = []
-    d_list: List[float] = []
+    k_list: list[float] = []
+    d_list: list[float] = []
     k_prev = 50.0
     d_prev = 50.0
     for r in rsv.tolist():
@@ -815,7 +814,7 @@ def add_bollinger(
 def compute_indicators(
     df: pd.DataFrame,
     *,
-    ma_periods: List[int] = (5, 10, 20, 60, 120),
+    ma_periods: list[int] = (5, 10, 20, 60, 120),
     rsi_period: int = 14,
     macd: tuple = (12, 26, 9),
     kd_period: int = 9,
@@ -843,17 +842,17 @@ class TechnicalSignal:
     """單一技術訊號 (bullish / bearish / neutral)。"""
 
     label: str
-    bullish: Optional[bool]
+    bullish: bool | None
     detail: str
 
 
-def derive_signals(df_with_indicators: pd.DataFrame) -> List[TechnicalSignal]:
+def derive_signals(df_with_indicators: pd.DataFrame) -> list[TechnicalSignal]:
     """依最新一根 K 線判讀常見訊號。"""
     if df_with_indicators is None or df_with_indicators.empty:
         return []
     last = df_with_indicators.iloc[-1]
     prev = df_with_indicators.iloc[-2] if len(df_with_indicators) >= 2 else last
-    signals: List[TechnicalSignal] = []
+    signals: list[TechnicalSignal] = []
 
     close = float(last["close"])
     ma20 = float(last.get("ma20", close))
@@ -962,28 +961,28 @@ class TechnicalSnapshot:
     pct_change_5d: float = 0.0
     pct_change_20d: float = 0.0
     pct_change_60d: float = 0.0
-    rsi14: Optional[float] = None
-    macd: Optional[float] = None
-    macd_signal: Optional[float] = None
-    macd_hist: Optional[float] = None
-    k: Optional[float] = None
-    d: Optional[float] = None
-    ma5: Optional[float] = None
-    ma20: Optional[float] = None
-    ma60: Optional[float] = None
-    ma120: Optional[float] = None
-    volume_last: Optional[float] = None
-    vol_ma20: Optional[float] = None
-    boll_upper: Optional[float] = None
-    boll_lower: Optional[float] = None
-    signals: List[Dict[str, Any]] = field(default_factory=list)
+    rsi14: float | None = None
+    macd: float | None = None
+    macd_signal: float | None = None
+    macd_hist: float | None = None
+    k: float | None = None
+    d: float | None = None
+    ma5: float | None = None
+    ma20: float | None = None
+    ma60: float | None = None
+    ma120: float | None = None
+    volume_last: float | None = None
+    vol_ma20: float | None = None
+    boll_upper: float | None = None
+    boll_lower: float | None = None
+    signals: list[dict[str, Any]] = field(default_factory=list)
     rows: int = 0
     technical_score: float = 50.0   # 0-100 (給 scoring.py 用)
     # K 線型態 (最新一根 K 棒)
     candle_pattern_id: str = ""
     candle_pattern: str = ""        # 中文型態名
     candle_category: str = ""       # 實體 / 上影線 / 下影線 / 上下影線 / 十字線
-    candle_bias: Optional[bool] = None
+    candle_bias: bool | None = None
     candle_meaning: str = ""
 
     @property
@@ -995,9 +994,9 @@ def build_technical_snapshot(
     ticker: str,
     *,
     months: int = 6,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     refresh: bool = True,
 ) -> tuple[TechnicalSnapshot, pd.DataFrame]:
     """組合單一個股的技術面 snapshot + 完整 DataFrame（含指標）。
@@ -1056,7 +1055,7 @@ def build_technical_snapshot(
         vol_ma20=_safe_float(last.get("vol_ma20")),
         boll_upper=_safe_float(last.get("boll_upper")),
         boll_lower=_safe_float(last.get("boll_lower")),
-        rows=int(len(df_ind)),
+        rows=len(df_ind),
     )
     sigs = derive_signals(df_ind)
     snap.signals = [asdict(s) for s in sigs]
@@ -1088,7 +1087,7 @@ def _pct_change(df: pd.DataFrame, n: int) -> float:
     return round(100.0 * (last_close - prev_close) / prev_close, 2)
 
 
-def _safe_float(x: Any) -> Optional[float]:
+def _safe_float(x: Any) -> float | None:
     if x is None:
         return None
     try:
@@ -1103,7 +1102,7 @@ def _safe_float(x: Any) -> Optional[float]:
 
 
 def _score_from_signals(
-    signals: List[TechnicalSignal],
+    signals: list[TechnicalSignal],
     snap: TechnicalSnapshot,
 ) -> float:
     """把訊號 + 漲跌幅換算為 0-100 的技術面分數。"""
@@ -1123,16 +1122,13 @@ def _score_from_signals(
     return max(0.0, min(100.0, base))
 
 
-def snapshot_to_dict(s: TechnicalSnapshot) -> Dict[str, Any]:
+def snapshot_to_dict(s: TechnicalSnapshot) -> dict[str, Any]:
     return asdict(s)
 
 
 __all__ = [
     "TechnicalSignal",
     "TechnicalSnapshot",
-    "extend_kline_backward",
-    "fetch_kline_range",
-    "get_kline_coverage",
     "add_bollinger",
     "add_kd",
     "add_macd",
@@ -1141,8 +1137,11 @@ __all__ = [
     "build_technical_snapshot",
     "compute_indicators",
     "derive_signals",
+    "extend_kline_backward",
+    "fetch_kline_range",
     "fetch_monthly_kline",
     "fetch_recent_kline",
+    "get_kline_coverage",
     "load_kline_from_db",
     "snapshot_to_dict",
 ]

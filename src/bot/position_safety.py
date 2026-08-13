@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 from bot.ownership import effective_trading_blacklist
 from bot.portfolio import (
@@ -43,13 +43,13 @@ class ReconcileIssue:
 @dataclass
 class StartupSafetyReport:
     ok: bool
-    overlap_issues: List[OverlapIssue] = field(default_factory=list)
-    reconcile_issues: List[ReconcileIssue] = field(default_factory=list)
+    overlap_issues: list[OverlapIssue] = field(default_factory=list)
+    reconcile_issues: list[ReconcileIssue] = field(default_factory=list)
     broker_fetch_error: str = ""
     summary: str = ""
 
     @property
-    def blocking_messages(self) -> List[str]:
+    def blocking_messages(self) -> list[str]:
         msgs = [i.message for i in self.overlap_issues] + [
             i.message for i in self.reconcile_issues
         ]
@@ -59,14 +59,14 @@ class StartupSafetyReport:
 
 
 def audit_manual_overlap(
-    settings: "Settings",
-    project_root: Optional[Path] = None,
+    settings: Settings,
+    project_root: Path | None = None,
     *,
-    broker_snapshot: Optional[Any] = None,
-) -> List[OverlapIssue]:
+    broker_snapshot: Any | None = None,
+) -> list[OverlapIssue]:
     """檢查監控標的是否與券商「非本工具」庫存重疊。"""
     root = project_root or Path.cwd()
-    issues: List[OverlapIssue] = []
+    issues: list[OverlapIssue] = []
 
     _, bot_positions = load_bot_portfolio(root)
     monitored = set(settings.symbols or [])
@@ -80,7 +80,7 @@ def audit_manual_overlap(
         logger.warning("無法讀取券商庫存做重疊檢查: %s", broker_snapshot.error)
         return issues
 
-    broker_map: Dict[str, float] = {
+    broker_map: dict[str, float] = {
         p.symbol: float(p.qty) for p in broker_snapshot.positions if p.symbol
     }
 
@@ -107,14 +107,14 @@ def audit_manual_overlap(
 
 
 def reconcile_broker_vs_bot_records(
-    settings: "Settings",
-    project_root: Optional[Path] = None,
+    settings: Settings,
+    project_root: Path | None = None,
     *,
-    broker_snapshot: Optional[Any] = None,
-) -> List[ReconcileIssue]:
+    broker_snapshot: Any | None = None,
+) -> list[ReconcileIssue]:
     """比對券商庫存與本地 AI 成交紀錄（僅監控清單內標的）。"""
     root = project_root or Path.cwd()
-    issues: List[ReconcileIssue] = []
+    issues: list[ReconcileIssue] = []
 
     _, bot_positions = load_bot_portfolio(root)
     monitored = set(settings.symbols or [])
@@ -125,7 +125,7 @@ def reconcile_broker_vs_bot_records(
     if getattr(broker_snapshot, "error", ""):
         return issues
 
-    broker_map: Dict[str, float] = {
+    broker_map: dict[str, float] = {
         p.symbol: float(p.qty) for p in broker_snapshot.positions if p.symbol
     }
 
@@ -148,24 +148,24 @@ def reconcile_broker_vs_bot_records(
     return issues
 
 
-def _broker_snapshot_usable(snapshot: Optional[Any]) -> bool:
+def _broker_snapshot_usable(snapshot: Any | None) -> bool:
     return snapshot is not None and not getattr(snapshot, "error", "")
 
 
 def run_startup_safety_checks(
-    settings: "Settings",
-    project_root: Optional[Path] = None,
+    settings: Settings,
+    project_root: Path | None = None,
     *,
-    broker: Optional["SjBroker"] = None,
-    broker_snapshot: Optional[Any] = None,
+    broker: SjBroker | None = None,
+    broker_snapshot: Any | None = None,
     engage_kill_switch: bool = True,
-    risk: Optional["RiskGuard"] = None,
+    risk: RiskGuard | None = None,
     require_broker_snapshot: bool = True,
 ) -> StartupSafetyReport:
     """trade 模式啟動前執行：重疊稽核 + 對帳。有阻擋項則拉 Kill Switch。"""
     root = project_root or Path.cwd()
     broker_fetch_error = ""
-    fetch_exc: Optional[str] = None
+    fetch_exc: str | None = None
 
     if broker_snapshot is None and broker is not None and broker.api is not None:
         try:
@@ -175,7 +175,10 @@ def run_startup_safety_checks(
             if account is None:
                 fetch_exc = "登入成功但沒有 stock_account"
             else:
-                from bot.portfolio import BrokerPositionsSnapshot, broker_position_from_shioaji
+                from bot.portfolio import (
+                    BrokerPositionsSnapshot,
+                    broker_position_from_shioaji,
+                )
 
                 positions = broker.api.list_positions(account, unit=Unit.Common)
                 rows = [
@@ -204,8 +207,8 @@ def run_startup_safety_checks(
             f"{f': {fetch_exc}' if fetch_exc else ''}"
         )
 
-    overlap: List[OverlapIssue] = []
-    reconcile: List[ReconcileIssue] = []
+    overlap: list[OverlapIssue] = []
+    reconcile: list[ReconcileIssue] = []
     if _broker_snapshot_usable(broker_snapshot):
         overlap = audit_manual_overlap(
             settings, root, broker_snapshot=broker_snapshot,
@@ -219,7 +222,7 @@ def run_startup_safety_checks(
     reconcile = [r for r in reconcile if r.symbol not in blocked_symbols]
 
     ok = not overlap and not reconcile and not broker_fetch_error
-    summary_parts: List[str] = []
+    summary_parts: list[str] = []
     if broker_fetch_error:
         summary_parts.append("券商庫存讀取失敗")
     if overlap:
@@ -248,7 +251,7 @@ def run_startup_safety_checks(
     )
 
 
-def symbols_to_exclude_for_trading(settings: "Settings") -> List[str]:
+def symbols_to_exclude_for_trading(settings: Settings) -> list[str]:
     """回傳應從自動交易排除的代號（手動持股 + 黑名單）。"""
     return sorted(effective_trading_blacklist(settings))
 

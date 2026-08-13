@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from bot.config import Settings
 from bot.entry_rules import in_entry_range, resolve_entry_range
 from bot.intraday_history import intraday_ts_to_datetime
 from bot.models import QtyUnit
-from bot.stock_db import IntradayBar, StockDB, PriceBar, default_db_path
+from bot.stock_db import IntradayBar, PriceBar, StockDB, default_db_path
 from bot.trade_cost import (
     buy_cash_required,
     max_affordable_qty,
-    net_pnl_pct,
     net_pnl_twd,
     position_net_pnl_pct,
     rebuy_opportunity,
@@ -41,7 +40,7 @@ class BacktestTrade:
 @dataclass
 class SymbolBacktestResult:
     symbol: str
-    trades: List[BacktestTrade] = field(default_factory=list)
+    trades: list[BacktestTrade] = field(default_factory=list)
     bar_days: int = 0
     bar_count: int = 0
     skip_reason: str = ""
@@ -57,12 +56,12 @@ class SymbolBacktestResult:
 
 @dataclass
 class BacktestSummary:
-    results: List[SymbolBacktestResult]
+    results: list[SymbolBacktestResult]
     settings_note: str = ""
 
     @property
-    def all_trades(self) -> List[BacktestTrade]:
-        out: List[BacktestTrade] = []
+    def all_trades(self) -> list[BacktestTrade]:
+        out: list[BacktestTrade] = []
         for r in self.results:
             out.extend(r.trades)
         return out
@@ -83,8 +82,8 @@ def _parse_time(ts_str: str) -> dt.time:
     return intraday_ts_to_datetime(ts_str).time()
 
 
-def _session_filter(bars: Sequence[IntradayBar]) -> List[IntradayBar]:
-    out: List[IntradayBar] = []
+def _session_filter(bars: Sequence[IntradayBar]) -> list[IntradayBar]:
+    out: list[IntradayBar] = []
     for b in bars:
         t = _parse_time(b.ts)
         if dt.time(9, 0) <= t <= dt.time(13, 30):
@@ -92,8 +91,8 @@ def _session_filter(bars: Sequence[IntradayBar]) -> List[IntradayBar]:
     return out
 
 
-def _group_by_date(bars: Sequence[IntradayBar]) -> Dict[str, List[IntradayBar]]:
-    groups: Dict[str, List[IntradayBar]] = {}
+def _group_by_date(bars: Sequence[IntradayBar]) -> dict[str, list[IntradayBar]]:
+    groups: dict[str, list[IntradayBar]] = {}
     for b in bars:
         d = intraday_ts_to_datetime(b.ts).date().isoformat()
         groups.setdefault(d, []).append(b)
@@ -107,8 +106,8 @@ def _prev_close_for_day(
     symbol: str,
     trade_date: str,
     day_bars: Sequence[IntradayBar],
-    daily_cache: Dict[str, List[PriceBar]],
-) -> Optional[float]:
+    daily_cache: dict[str, list[PriceBar]],
+) -> float | None:
     if symbol not in daily_cache:
         daily_cache[symbol] = db.get_price_history(symbol, ascending=True)
     d = dt.date.fromisoformat(trade_date)
@@ -131,7 +130,7 @@ def _prev_close_for_day(
 
 @dataclass
 class _DayState:
-    position: Optional[Tuple[float, int, QtyUnit, str]] = None
+    position: tuple[float, int, QtyUnit, str] | None = None
     peak_net_pnl: float = 0.0
     had_exit: bool = False
     last_exit_price: float = 0.0
@@ -142,10 +141,10 @@ class _DayState:
 class IntradayBacktester:
     """以分 K close 價重播 ConfigurableStrategy 核心規則。"""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
 
-    def _calc_quantity(self, price: float, fund_remaining: float) -> Tuple[int, QtyUnit]:
+    def _calc_quantity(self, price: float, fund_remaining: float) -> tuple[int, QtyUnit]:
         if price <= 0 or fund_remaining <= 0:
             return 0, "lot"
         qty = max_affordable_qty(
@@ -168,7 +167,7 @@ class IntradayBacktester:
     def _fund_cap(self) -> float:
         return float(self.settings.effective_fund_cap())
 
-    def _sell_target(self, symbol: str) -> Optional[float]:
+    def _sell_target(self, symbol: str) -> float | None:
         targets = self.settings.sell_profit_targets or {}
         if symbol in targets:
             return float(targets[symbol])
@@ -187,15 +186,14 @@ class IntradayBacktester:
         ts_str: str,
         cur: dt.time,
         st: _DayState,
-    ) -> Optional[BacktestTrade]:
+    ) -> BacktestTrade | None:
         if st.position is None:
             return None
         entry_price, qty, unit, entry_ts = st.position
         pnl_pct = position_net_pnl_pct(
             entry_price, price, qty, unit, settings=self.settings,
         )
-        if pnl_pct > st.peak_net_pnl:
-            st.peak_net_pnl = pnl_pct
+        st.peak_net_pnl = max(st.peak_net_pnl, pnl_pct)
 
         target = self._sell_target(symbol)
         reason = ""
@@ -280,9 +278,9 @@ class IntradayBacktester:
         db: StockDB,
         symbol: str,
         *,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        daily_cache: Optional[Dict[str, List[PriceBar]]] = None,
+        start: str | None = None,
+        end: str | None = None,
+        daily_cache: dict[str, list[PriceBar]] | None = None,
     ) -> SymbolBacktestResult:
         daily_cache = daily_cache if daily_cache is not None else {}
         raw = db.get_intraday_bars(symbol, interval="1m", start=start, end=end)
@@ -321,8 +319,7 @@ class IntradayBacktester:
             if st.position is not None:
                 last = day_bars[-1]
                 cur = _parse_time(last.ts)
-                if cur < self.settings.exit_time:
-                    cur = self.settings.exit_time
+                cur = max(cur, self.settings.exit_time)
                 trade = self._try_exit(symbol, float(last.close), last.ts, cur, st)
                 if trade:
                     trade.entry_pct_chg = entry_pct
@@ -336,13 +333,13 @@ class IntradayBacktester:
         symbols: Sequence[str],
         *,
         root=None,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        db: Optional[StockDB] = None,
+        start: str | None = None,
+        end: str | None = None,
+        db: StockDB | None = None,
     ) -> BacktestSummary:
         from pathlib import Path
         database = db or StockDB.open(path=default_db_path(Path(root or ".")))
-        daily_cache: Dict[str, List[PriceBar]] = {}
+        daily_cache: dict[str, list[PriceBar]] = {}
         results = [
             self.run_symbol(
                 database, sym, start=start, end=end, daily_cache=daily_cache,

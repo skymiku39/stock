@@ -38,9 +38,8 @@ p = classify_latest(df)
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
-
+from dataclasses import asdict, dataclass
+from typing import Any
 
 # ----------------------------------------------------------------------
 # 參數 (可微調)
@@ -76,7 +75,7 @@ class CandlePattern:
     name: str                       # 中文型態名
     category: str                   # 實體 / 上影線 / 下影線 / 上下影線 / 十字線
     color: str                      # red / black / doji
-    bias: Optional[bool]            # True=偏多, False=偏空, None=中性/取決於位置
+    bias: bool | None            # True=偏多, False=偏空, None=中性/取決於位置
     reversal: bool                  # 是否屬潛在反轉型態
     strength: str                   # strong / medium / weak
     meaning: str                    # 市場訊號 (中文一句話)
@@ -94,7 +93,7 @@ class CandlePattern:
 
 
 # 型態靜態屬性表：pattern_id -> (name, category, color, bias, reversal, strength, meaning)
-_META: Dict[str, tuple] = {
+_META: dict[str, tuple] = {
     # ---- 實體 K 線 ----
     "big_red": ("大紅K", "實體", "red", True, False, "strong",
                 "多頭強勢、大量買方進駐，後市看漲。"),
@@ -157,7 +156,7 @@ def _build(pattern_id: str, *, body_pct: float, upper_pct: float, lower_pct: flo
     )
 
 
-def _entity_size(body: float, close: float, avg_body: Optional[float]) -> str:
+def _entity_size(body: float, close: float, avg_body: float | None) -> str:
     """判定實體大小 → 'big' / 'mid' / 'small'。"""
     if avg_body and avg_body > 0:
         ratio = body / avg_body
@@ -181,7 +180,7 @@ def classify_candle(
     high: float,
     low: float,
     close: float,
-    avg_body: Optional[float] = None,
+    avg_body: float | None = None,
 ) -> CandlePattern:
     """把單根 K 棒分類為 16 種型態之一。
 
@@ -248,7 +247,7 @@ def classify_candle(
 # ----------------------------------------------------------------------
 
 
-def _avg_body_from_rows(rows: List[Dict[str, float]], window: int = 20) -> Optional[float]:
+def _avg_body_from_rows(rows: list[dict[str, float]], window: int = 20) -> float | None:
     bodies = [abs(float(r["close"]) - float(r["open"])) for r in rows[-window:]]
     bodies = [b for b in bodies if b > 0]
     if not bodies:
@@ -256,7 +255,7 @@ def _avg_body_from_rows(rows: List[Dict[str, float]], window: int = 20) -> Optio
     return sum(bodies) / len(bodies)
 
 
-def classify_latest(df, *, window: int = 20) -> Optional[CandlePattern]:
+def classify_latest(df, *, window: int = 20) -> CandlePattern | None:
     """對含 open/high/low/close 欄位的 DataFrame，分類最新一根 K 棒。
 
     以最近 ``window`` 根的平均實體做大/中/小判斷。
@@ -278,7 +277,7 @@ def classify_latest(df, *, window: int = 20) -> Optional[CandlePattern]:
     )
 
 
-def classify_recent(df, *, n: int = 5, window: int = 20) -> List[Dict[str, Any]]:
+def classify_recent(df, *, n: int = 5, window: int = 20) -> list[dict[str, Any]]:
     """回傳最近 ``n`` 根 K 棒的型態 (含日期)，由新到舊。"""
     if df is None or len(df) == 0:
         return None or []
@@ -287,7 +286,7 @@ def classify_recent(df, *, n: int = 5, window: int = 20) -> List[Dict[str, Any]]
         return []
     has_date = "date" in df.columns
     all_rows = df[["open", "high", "low", "close"] + (["date"] if has_date else [])].to_dict("records")
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     total = len(all_rows)
     for i in range(total - 1, max(-1, total - 1 - n), -1):
         win = all_rows[max(0, i - window + 1): i + 1]
@@ -304,7 +303,7 @@ def classify_recent(df, *, n: int = 5, window: int = 20) -> List[Dict[str, Any]]
     return out
 
 
-def pattern_to_dict(p: Optional[CandlePattern]) -> Dict[str, Any]:
+def pattern_to_dict(p: CandlePattern | None) -> dict[str, Any]:
     if p is None:
         return {}
     return asdict(p)

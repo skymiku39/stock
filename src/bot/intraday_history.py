@@ -16,8 +16,9 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Iterable, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -46,7 +47,7 @@ def intraday_ts_to_datetime(ts_str: str) -> dt.datetime:
     return d
 
 
-def kbars_to_bars(symbol: str, kbars: Any) -> List[IntradayBar]:
+def kbars_to_bars(symbol: str, kbars: Any) -> list[IntradayBar]:
     """把 Shioaji Kbars 物件轉成 IntradayBar list。"""
     if kbars is None:
         return []
@@ -61,7 +62,7 @@ def kbars_to_bars(symbol: str, kbars: Any) -> List[IntradayBar]:
     closes = data.get("Close") or [0.0] * n
     volumes = data.get("Volume") or [0] * n
     amounts = data.get("Amount") or [0.0] * n
-    out: List[IntradayBar] = []
+    out: list[IntradayBar] = []
     for i in range(n):
         out.append(IntradayBar(
             symbol=symbol,
@@ -78,7 +79,7 @@ def kbars_to_bars(symbol: str, kbars: Any) -> List[IntradayBar]:
     return out
 
 
-def ticks_to_bars(symbol: str, ticks: Any) -> List[IntradayBar]:
+def ticks_to_bars(symbol: str, ticks: Any) -> list[IntradayBar]:
     """把 Shioaji Ticks 物件轉成 IntradayBar list (interval=tick)。"""
     if ticks is None:
         return []
@@ -88,7 +89,7 @@ def ticks_to_bars(symbol: str, ticks: Any) -> List[IntradayBar]:
         return []
     closes = data.get("close") or []
     volumes = data.get("volume") or []
-    out: List[IntradayBar] = []
+    out: list[IntradayBar] = []
     for i, ts_ns in enumerate(ts_list):
         px = float(closes[i]) if i < len(closes) else 0.0
         vol = float(volumes[i]) if i < len(volumes) else 0.0
@@ -107,9 +108,9 @@ def ticks_to_bars(symbol: str, ticks: Any) -> List[IntradayBar]:
     return out
 
 
-def iter_trading_days(start: dt.date, end: dt.date) -> List[dt.date]:
+def iter_trading_days(start: dt.date, end: dt.date) -> list[dt.date]:
     """簡易交易日列舉 (週一至週五)；不含國定假日。"""
-    days: List[dt.date] = []
+    days: list[dt.date] = []
     cur = start
     while cur <= end:
         if cur.weekday() < 5:
@@ -122,7 +123,7 @@ def _cache_path(
     symbol: str,
     interval: IntervalKind,
     day: dt.date,
-    root: Optional[Path],
+    root: Path | None,
 ) -> Path:
     base = (root or Path.cwd()) / "data" / "intraday" / symbol
     mk_folder(str(base))
@@ -158,8 +159,8 @@ def fetch_intraday_chunk(
     *,
     interval: IntervalKind = "1m",
     timeout_ms: int = 60_000,
-    logger: Optional[logging.Logger] = None,
-) -> List[IntradayBar]:
+    logger: logging.Logger | None = None,
+) -> list[IntradayBar]:
     """抓取單段日期區間 (建議 ≤ 5 個交易日)。"""
     log = logger or get_logger("intraday-history")
     start_s = start.isoformat()
@@ -187,12 +188,12 @@ def fetch_and_store_intraday(
     chunk_days: int = 1,
     skip_existing_days: bool = True,
     save_csv: bool = True,
-    root: Optional[Path] = None,
-    db: Optional[StockDB] = None,
+    root: Path | None = None,
+    db: StockDB | None = None,
     request_delay_sec: float = 0.5,
     timeout_ms: int = 60_000,
-    logger: Optional[logging.Logger] = None,
-) -> Tuple[int, int]:
+    logger: logging.Logger | None = None,
+) -> tuple[int, int]:
     """分批抓取並寫入 DB；回傳 (寫入筆數, 跳過天數)。"""
     log = logger or get_logger("intraday-history")
     database = db or StockDB.open(path=default_db_path(root))

@@ -30,15 +30,15 @@ Factor (0-100 分)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # ----------------------------------------------------------------------
 # 常數
 # ----------------------------------------------------------------------
 
-TIMEFRAMES: List[str] = ["day_trade", "short_term", "mid_term", "long_term"]
+TIMEFRAMES: list[str] = ["day_trade", "short_term", "mid_term", "long_term"]
 
-TIMEFRAME_LABELS: Dict[str, str] = {
+TIMEFRAME_LABELS: dict[str, str] = {
     "day_trade": "當沖 (Intraday)",
     "short_term": "短期 (1-2 週)",
     "mid_term": "中期 (1-3 月)",
@@ -46,7 +46,7 @@ TIMEFRAME_LABELS: Dict[str, str] = {
 }
 
 # 各時間框架的 factor 權重 (總和接近 1.0)
-WEIGHTS: Dict[str, Dict[str, float]] = {
+WEIGHTS: dict[str, dict[str, float]] = {
     # 當沖最看重「美股夜盤＋費半」對當日開盤的影響
     "day_trade": {
         "technical": 0.42,
@@ -95,7 +95,7 @@ ADVISORY_RULE_NOTE = (
     "Bot 預設：停損 -3%（淨利）、移動停利 +6% 後回撤 2%。"
 )
 
-STRATEGY_RULES: Dict[str, Dict[str, Any]] = {
+STRATEGY_RULES: dict[str, dict[str, Any]] = {
     "day_trade": {
         "stop_pct": -1.0,
         "target_pct": 2.0,
@@ -142,7 +142,7 @@ class FactorScore:
     weight: float = 0.0    # 當前時間框架的權重
     detail: str = ""
     available: bool = True
-    sub_scores: Dict[str, float] = field(default_factory=dict)
+    sub_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -154,9 +154,9 @@ class TimeframeScore:
     action_label: str
     color: str            # for UI badge
     confidence: float     # 0-1，依 factor 可用比例 + LLM confidence
-    factors: List[FactorScore] = field(default_factory=list)
-    strategy: Dict[str, Any] = field(default_factory=dict)
-    notes: List[str] = field(default_factory=list)
+    factors: list[FactorScore] = field(default_factory=list)
+    strategy: dict[str, Any] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -166,8 +166,8 @@ class StockScorecard:
     price: float = 0.0
     pct_change: float = 0.0
     volume: float = 0.0
-    timeframes: Dict[str, TimeframeScore] = field(default_factory=dict)
-    summary_notes: List[str] = field(default_factory=list)
+    timeframes: dict[str, TimeframeScore] = field(default_factory=dict)
+    summary_notes: list[str] = field(default_factory=list)
     fetched_at: str = ""
 
     def best_action(self) -> str:
@@ -189,7 +189,7 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
-def factor_llm_sentiment(analysis: Optional[Dict[str, Any]]) -> FactorScore:
+def factor_llm_sentiment(analysis: dict[str, Any] | None) -> FactorScore:
     if not analysis:
         return FactorScore(
             "llm_sentiment", "法說語意", 50.0,
@@ -207,7 +207,7 @@ def factor_llm_sentiment(analysis: Optional[Dict[str, Any]]) -> FactorScore:
     )
 
 
-def factor_logic(logic: Optional[Dict[str, Any]]) -> FactorScore:
+def factor_logic(logic: dict[str, Any] | None) -> FactorScore:
     if not logic:
         return FactorScore(
             "logic", "言行一致性", 50.0,
@@ -233,9 +233,9 @@ def factor_logic(logic: Optional[Dict[str, Any]]) -> FactorScore:
 
 
 def factor_etf_consensus(
-    consensus: Optional[Dict[str, Any]],
-    new_build: Optional[Dict[str, Any]],
-    add: Optional[Dict[str, Any]],
+    consensus: dict[str, Any] | None,
+    new_build: dict[str, Any] | None,
+    add: dict[str, Any] | None,
 ) -> FactorScore:
     etf_count = 0
     total_weight = 0.0
@@ -272,7 +272,7 @@ def factor_etf_consensus(
     )
 
 
-def factor_chips(chips: Optional[Dict[str, Any]]) -> FactorScore:
+def factor_chips(chips: dict[str, Any] | None) -> FactorScore:
     """chips 是 chips_fetcher.summary_to_dict() 的輸出。"""
     if not chips:
         return FactorScore(
@@ -320,7 +320,7 @@ def factor_technical(
     price: float,
     pct_change: float,
     volume: float = 0,
-    technical_snapshot: Optional[Dict[str, Any]] = None,
+    technical_snapshot: dict[str, Any] | None = None,
 ) -> FactorScore:
     """技術面 factor — 優先用 TechnicalSnapshot 算出的指標分數。"""
     if technical_snapshot and technical_snapshot.get("rows", 0) > 0:
@@ -375,7 +375,7 @@ def factor_technical(
     )
 
 
-def factor_fundamental(fundamental: Optional[Dict[str, Any]]) -> FactorScore:
+def factor_fundamental(fundamental: dict[str, Any] | None) -> FactorScore:
     """基本面 factor — 看月營收連續性、PER、ROE/三率 (有資料才加分)。"""
     if not fundamental:
         return FactorScore(
@@ -388,8 +388,8 @@ def factor_fundamental(fundamental: Optional[Dict[str, Any]]) -> FactorScore:
     derived = fundamental.get("derived") or {}
 
     score = 50.0
-    bits: List[str] = []
-    score_sub: Dict[str, float] = {}
+    bits: list[str] = []
+    score_sub: dict[str, float] = {}
 
     # 1) 月營收 YoY 連續性
     yoy_streak = int(derived.get("revenue_yoy_streak") or 0)
@@ -494,9 +494,9 @@ def factor_distribution(
 
 
 def factor_us_market(
-    macro: Optional[Dict[str, Any]] = None,
-    related_us: Optional[List[Dict[str, Any]]] = None,
-    adr_premium: Optional[Dict[str, Any]] = None,
+    macro: dict[str, Any] | None = None,
+    related_us: list[dict[str, Any]] | None = None,
+    adr_premium: dict[str, Any] | None = None,
 ) -> FactorScore:
     """美股連動 factor。
 
@@ -515,13 +515,13 @@ def factor_us_market(
     stocks = macro.get("stocks") or {}
 
     base = 50.0
-    detail_bits: List[str] = []
-    sub: Dict[str, float] = {}
+    detail_bits: list[str] = []
+    sub: dict[str, float] = {}
 
     # 1) 供應鏈夥伴 (含 ADR 母股自身)
     weighted_sum = 0.0
     weight_total = 0.0
-    related_quotes: List[str] = []
+    related_quotes: list[str] = []
     for r in (related_us or []):
         us_sym = r.get("us_ticker") or r.get("us_symbol")
         if not us_sym:
@@ -594,11 +594,11 @@ def factor_us_market(
 
 
 def factor_risk(
-    chips: Optional[Dict[str, Any]],
-    analysis: Optional[Dict[str, Any]],
+    chips: dict[str, Any] | None,
+    analysis: dict[str, Any] | None,
 ) -> FactorScore:
     score = 70.0
-    notes: List[str] = []
+    notes: list[str] = []
     if chips:
         borrow_pct = float(chips.get("short_borrow_change_pct", 0) or 0)
         margin_pct = float(chips.get("margin_buy_change_pct", 0) or 0)
@@ -650,7 +650,7 @@ def _action_from_score(score: float) -> tuple[str, str, str]:
     return "SELL", "賣出", "red"
 
 
-def _build_strategy(timeframe: str, action: str, price: float) -> Dict[str, Any]:
+def _build_strategy(timeframe: str, action: str, price: float) -> dict[str, Any]:
     rules = STRATEGY_RULES.get(timeframe, {})
     if price <= 0:
         return {"applicable": False, "note": "缺現價，無法計算進出場價"}
@@ -677,25 +677,25 @@ def compute_scorecard(
     price: float = 0.0,
     pct_change: float = 0.0,
     volume: float = 0.0,
-    llm_analysis: Optional[Dict[str, Any]] = None,
-    logic_result: Optional[Dict[str, Any]] = None,
-    consensus: Optional[Dict[str, Any]] = None,
-    new_build_signal: Optional[Dict[str, Any]] = None,
-    add_signal: Optional[Dict[str, Any]] = None,
-    chip_summary: Optional[Dict[str, Any]] = None,
-    fundamental: Optional[Dict[str, Any]] = None,
-    technical_snapshot: Optional[Dict[str, Any]] = None,
+    llm_analysis: dict[str, Any] | None = None,
+    logic_result: dict[str, Any] | None = None,
+    consensus: dict[str, Any] | None = None,
+    new_build_signal: dict[str, Any] | None = None,
+    add_signal: dict[str, Any] | None = None,
+    chip_summary: dict[str, Any] | None = None,
+    fundamental: dict[str, Any] | None = None,
+    technical_snapshot: dict[str, Any] | None = None,
     distribution_label: str = "",
     distribution_detail: str = "",
     distribution_score: float = 50.0,
     has_distribution: bool = False,
-    macro_snapshot: Optional[Dict[str, Any]] = None,
-    related_us_stocks: Optional[List[Dict[str, Any]]] = None,
-    adr_premium: Optional[Dict[str, Any]] = None,
+    macro_snapshot: dict[str, Any] | None = None,
+    related_us_stocks: list[dict[str, Any]] | None = None,
+    adr_premium: dict[str, Any] | None = None,
     fetched_at: str = "",
 ) -> StockScorecard:
     """根據各種資料計算四個時間框架的綜合分數與建議。"""
-    factor_funcs: Dict[str, FactorScore] = {
+    factor_funcs: dict[str, FactorScore] = {
         "llm_sentiment": factor_llm_sentiment(llm_analysis),
         "logic": factor_logic(logic_result),
         "etf_consensus": factor_etf_consensus(consensus, new_build_signal, add_signal),
@@ -716,10 +716,10 @@ def compute_scorecard(
         "risk": factor_risk(chip_summary, llm_analysis),
     }
 
-    timeframes: Dict[str, TimeframeScore] = {}
+    timeframes: dict[str, TimeframeScore] = {}
     for tf, weights in WEIGHTS.items():
         # 拷貝一份帶上 weight 的 factor 清單
-        used_factors: List[FactorScore] = []
+        used_factors: list[FactorScore] = []
         weight_sum = 0.0
         available_sum = 0.0
         available_score_sum = 0.0
@@ -744,7 +744,7 @@ def compute_scorecard(
 
         action, action_label, color = _action_from_score(total)
         confidence = available_sum / weight_sum if weight_sum else 0.0
-        notes: List[str] = []
+        notes: list[str] = []
         if confidence < 0.5:
             notes.append("⚠ 資料覆蓋率不足 50%，分數僅基於少數可用因子，請補齊資料再參考")
         elif confidence < 0.8:
@@ -766,7 +766,7 @@ def compute_scorecard(
             notes=notes,
         )
 
-    summary_notes: List[str] = []
+    summary_notes: list[str] = []
     if all(not f.available for f in factor_funcs.values()):
         summary_notes.append("此股票尚無任何資料；請先跑一次自動化管線")
     elif factor_funcs["llm_sentiment"].available is False:
@@ -789,9 +789,9 @@ def compute_scorecard(
 # ----------------------------------------------------------------------
 
 
-def scorecard_to_row(s: StockScorecard) -> Dict[str, Any]:
+def scorecard_to_row(s: StockScorecard) -> dict[str, Any]:
     """壓平成一列，方便放進 dataframe。"""
-    row: Dict[str, Any] = {
+    row: dict[str, Any] = {
         "代號": s.ticker,
         "名稱": s.name,
         "現價": s.price,
@@ -812,11 +812,11 @@ def scorecard_to_row(s: StockScorecard) -> Dict[str, Any]:
 
 __all__ = [
     "ADVISORY_RULE_NOTE",
-    "FactorScore",
+    "STRATEGY_RULES",
     "TIMEFRAMES",
     "TIMEFRAME_LABELS",
     "WEIGHTS",
-    "STRATEGY_RULES",
+    "FactorScore",
     "StockScorecard",
     "TimeframeScore",
     "compute_scorecard",

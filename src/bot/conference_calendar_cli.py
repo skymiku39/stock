@@ -18,11 +18,10 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.conference_calendar import (
-    update_calendar,
     upcoming_conferences,
+    update_calendar,
 )
 from bot.global_event_calendar import (
     upcoming_global_events,
@@ -31,7 +30,7 @@ from bot.global_event_calendar import (
 from bot.utils import get_logger
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-calendar-update",
         description="自動抓 MOPS 法說會行事曆與全球科技事件 (寫到 data/calendar/)",

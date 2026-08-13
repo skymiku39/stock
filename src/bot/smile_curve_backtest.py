@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence
 
 from bot.config import Settings
 from bot.smile_curve import SmileCurveEngine, SmileRoundTrip
@@ -14,7 +14,7 @@ from bot.stock_db import StockDB, default_db_path
 @dataclass
 class SmileSymbolResult:
     symbol: str
-    round_trips: List[SmileRoundTrip] = field(default_factory=list)
+    round_trips: list[SmileRoundTrip] = field(default_factory=list)
     bar_count: int = 0
     cycle_count: int = 0
     open_lots: int = 0
@@ -41,14 +41,14 @@ class SmileSymbolResult:
 
 @dataclass
 class SmileBacktestSummary:
-    results: List[SmileSymbolResult]
+    results: list[SmileSymbolResult]
     settings_note: str = ""
     start: str = ""
     end: str = ""
 
     @property
-    def all_round_trips(self) -> List[SmileRoundTrip]:
-        out: List[SmileRoundTrip] = []
+    def all_round_trips(self) -> list[SmileRoundTrip]:
+        out: list[SmileRoundTrip] = []
         for r in self.results:
             out.extend(r.round_trips)
         return out
@@ -68,7 +68,7 @@ class SmileBacktestSummary:
 class SmileCurveBacktester:
     """日 K 微笑曲線回測。"""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
 
     def run_symbol(
@@ -76,8 +76,8 @@ class SmileCurveBacktester:
         db: StockDB,
         symbol: str,
         *,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
+        start: str | None = None,
+        end: str | None = None,
     ) -> SmileSymbolResult:
         bars = db.get_price_history(symbol, start=start, end=end, ascending=True)
         result = SmileSymbolResult(symbol=symbol, bar_count=len(bars))
@@ -99,10 +99,10 @@ class SmileCurveBacktester:
         self,
         symbols: Sequence[str],
         *,
-        root: Optional[Path] = None,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        db: Optional[StockDB] = None,
+        root: Path | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        db: StockDB | None = None,
     ) -> SmileBacktestSummary:
         database = db or StockDB.open(path=default_db_path(root or Path.cwd()))
         results = [

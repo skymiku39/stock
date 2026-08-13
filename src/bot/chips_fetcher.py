@@ -18,13 +18,12 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 # ----------------------------------------------------------------------
 # Endpoint 集中表
@@ -100,7 +99,7 @@ class ChipSummary:
     short_borrow_change_pct: float = 0.0   # 借券賣出餘額變動率 %
     short_sell_change_pct: float = 0.0     # 融券餘額變動率 %
     block_trade_net: float = 0.0
-    rows: List[ChipDailyRow] = field(default_factory=list)
+    rows: list[ChipDailyRow] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------
@@ -108,7 +107,7 @@ class ChipSummary:
 # ----------------------------------------------------------------------
 
 
-def _cache_path(name: str, date: dt.date, root: Optional[Path] = None) -> Path:
+def _cache_path(name: str, date: dt.date, root: Path | None = None) -> Path:
     base = root or Path.cwd()
     return base / "data" / "chips" / date.isoformat() / f"{name}.json"
 
@@ -132,11 +131,11 @@ def _fetch_endpoint(
     name: str,
     date: dt.date,
     *,
-    session: Optional[requests.Session] = None,
-    root: Optional[Path] = None,
+    session: requests.Session | None = None,
+    root: Path | None = None,
     use_cache: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any] | None:
     log = logger or get_logger("chips")
     sess = session or _new_session()
     path = _cache_path(name, date, root)
@@ -172,8 +171,8 @@ def _fetch_endpoint(
 # ----------------------------------------------------------------------
 
 
-def _parse_t86(data: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
-    out: Dict[str, ChipDailyRow] = {}
+def _parse_t86(data: dict[str, Any]) -> dict[str, ChipDailyRow]:
+    out: dict[str, ChipDailyRow] = {}
     fields = data.get("fields") or []
     rows = data.get("data") or []
     if not fields or not rows:
@@ -214,9 +213,9 @@ def _parse_t86(data: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
     return out
 
 
-def _parse_margin(data: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
+def _parse_margin(data: dict[str, Any]) -> dict[str, tuple[float, float]]:
     """回傳 {ticker: (margin_balance, short_balance)} (張)。"""
-    out: Dict[str, tuple[float, float]] = {}
+    out: dict[str, tuple[float, float]] = {}
     fields = data.get("fields") or []
     rows = data.get("data") or []
     if not fields or not rows:
@@ -256,9 +255,9 @@ def _parse_margin(data: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
     return out
 
 
-def _parse_borrow(data: Dict[str, Any]) -> Dict[str, float]:
+def _parse_borrow(data: dict[str, Any]) -> dict[str, float]:
     """回傳 {ticker: 借券賣出餘額(張)}。"""
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     fields = data.get("fields") or []
     rows = data.get("data") or []
     if not fields or not rows:
@@ -285,9 +284,9 @@ def _parse_borrow(data: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
-def _parse_block(data: Dict[str, Any]) -> Dict[str, float]:
+def _parse_block(data: dict[str, Any]) -> dict[str, float]:
     """回傳 {ticker: 鉅額交易淨額(張)}。TWSE 沒有明確的買賣方向，先用成交量做累計。"""
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     rows = data.get("data") or []
     fields = data.get("fields") or []
     if not rows or not fields:
@@ -324,11 +323,11 @@ def _fetch_tpex_chip(
     name: str,
     date: dt.date,
     *,
-    session: Optional[requests.Session] = None,
-    root: Optional[Path] = None,
+    session: requests.Session | None = None,
+    root: Path | None = None,
     use_cache: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any] | None:
     """抓上櫃 TPEx 籌碼端點 (name in ENDPOINTS_TPEX)，回傳 tables[0]。"""
     log = logger or get_logger("chips")
     sess = session or _new_session()
@@ -364,9 +363,9 @@ def _fetch_tpex_chip(
         return None
 
 
-def _parse_tpex_insti(table: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
+def _parse_tpex_insti(table: dict[str, Any]) -> dict[str, ChipDailyRow]:
     """上櫃三大法人 (24 欄)：外資合計超=idx10、投信超=idx13、自營商合計超=idx22 (單位：股)。"""
-    out: Dict[str, ChipDailyRow] = {}
+    out: dict[str, ChipDailyRow] = {}
     rows = table.get("data") or []
     for row in rows:
         if len(row) < 23:
@@ -384,9 +383,9 @@ def _parse_tpex_insti(table: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
     return out
 
 
-def _parse_tpex_margin(table: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
+def _parse_tpex_margin(table: dict[str, Any]) -> dict[str, tuple[float, float]]:
     """上櫃融資融券：資餘額=idx6、券餘額=idx14 (單位：張)。回傳 {ticker:(margin,short)}。"""
-    out: Dict[str, tuple[float, float]] = {}
+    out: dict[str, tuple[float, float]] = {}
     rows = table.get("data") or []
     for row in rows:
         if len(row) < 15:
@@ -406,11 +405,11 @@ def _parse_tpex_margin(table: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
 def fetch_daily_chips(
     date: dt.date,
     *,
-    session: Optional[requests.Session] = None,
-    root: Optional[Path] = None,
+    session: requests.Session | None = None,
+    root: Path | None = None,
     use_cache: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, ChipDailyRow]:
+    logger: logging.Logger | None = None,
+) -> dict[str, ChipDailyRow]:
     """抓某一日全市場個股的籌碼匯總。"""
     log = logger or get_logger("chips")
     sess = session or _new_session()
@@ -450,9 +449,9 @@ def fetch_daily_chips(
     return rows
 
 
-def _recent_trading_days(end_date: dt.date, days: int) -> List[dt.date]:
+def _recent_trading_days(end_date: dt.date, days: int) -> list[dt.date]:
     """回傳含 end_date 在內的最近 N 個「非週末」日期 (不檢驗國定假日，TWSE 缺檔時 fetch 會自動跳過)。"""
-    out: List[dt.date] = []
+    out: list[dt.date] = []
     cur = end_date
     while len(out) < days:
         if cur.weekday() < 5:  # 一~五
@@ -464,29 +463,29 @@ def _recent_trading_days(end_date: dt.date, days: int) -> List[dt.date]:
 def build_chip_summary(
     ticker: str,
     *,
-    end_date: Optional[dt.date] = None,
+    end_date: dt.date | None = None,
     days: int = 5,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> ChipSummary:
     """個股近 N 日籌碼摘要。"""
     end = end_date or now_tw().date()
     dates = _recent_trading_days(end, days)
     sess = session or _new_session()
 
-    rows: List[ChipDailyRow] = []
+    rows: list[ChipDailyRow] = []
     foreign_total = 0.0
     trust_total = 0.0
     dealer_total = 0.0
     block_total = 0.0
 
-    first_margin: Optional[float] = None
-    last_margin: Optional[float] = None
-    first_borrow: Optional[float] = None
-    last_borrow: Optional[float] = None
-    first_short: Optional[float] = None
-    last_short: Optional[float] = None
+    first_margin: float | None = None
+    last_margin: float | None = None
+    first_borrow: float | None = None
+    last_borrow: float | None = None
+    first_short: float | None = None
+    last_short: float | None = None
 
     for d in reversed(dates):
         daily = fetch_daily_chips(
@@ -510,7 +509,7 @@ def build_chip_summary(
             bmap = _parse_block(block)
             block_total += bmap.get(ticker, 0.0)
 
-    def _pct_change(first: Optional[float], last: Optional[float]) -> float:
+    def _pct_change(first: float | None, last: float | None) -> float:
         if first and first > 0 and last is not None:
             return 100.0 * (last - first) / first
         return 0.0
@@ -543,7 +542,7 @@ def summary_to_chips_context(s: ChipSummary):
     )
 
 
-def summary_to_dict(s: ChipSummary) -> Dict[str, Any]:
+def summary_to_dict(s: ChipSummary) -> dict[str, Any]:
     return {
         "ticker": s.ticker,
         "days": s.days,

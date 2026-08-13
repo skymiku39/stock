@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.fundamentals_fetcher import MonthlyRevenue, QuarterlyFinancials
-
 
 # ----------------------------------------------------------------------
 # 季度截止/公佈日 (台股實務)
@@ -91,7 +90,7 @@ class QuarterlyRevenue:
 
     year: int
     quarter: int
-    months: List[int] = field(default_factory=list)
+    months: list[int] = field(default_factory=list)
     revenue: float = 0.0
     revenue_last_year: float = 0.0
     yoy: float = 0.0
@@ -115,11 +114,11 @@ class RollingEpsPoint:
 # ----------------------------------------------------------------------
 
 
-def revenue_quarterly_aggregate(revs: List[MonthlyRevenue]) -> List[QuarterlyRevenue]:
+def revenue_quarterly_aggregate(revs: list[MonthlyRevenue]) -> list[QuarterlyRevenue]:
     """把月營收聚合為季度營收 (Q1=1-3, Q2=4-6, Q3=7-9, Q4=10-12)。"""
     if not revs:
         return []
-    bucket: Dict[tuple, QuarterlyRevenue] = {}
+    bucket: dict[tuple, QuarterlyRevenue] = {}
     for r in revs:
         if not r.month or not r.year:
             continue
@@ -136,15 +135,15 @@ def revenue_quarterly_aggregate(revs: List[MonthlyRevenue]) -> List[QuarterlyRev
     return sorted(bucket.values(), key=lambda x: (x.year, x.quarter))
 
 
-def rolling_eps_series(quarterlies: List[QuarterlyFinancials]) -> List[RollingEpsPoint]:
+def rolling_eps_series(quarterlies: list[QuarterlyFinancials]) -> list[RollingEpsPoint]:
     """產出每一年度的 Q1/H1/9M/FY 累計 EPS，並與往年同期對比。"""
     if not quarterlies:
         return []
-    by_year: Dict[int, Dict[int, QuarterlyFinancials]] = {}
+    by_year: dict[int, dict[int, QuarterlyFinancials]] = {}
     for q in quarterlies:
         by_year.setdefault(q.year, {})[q.quarter] = q
 
-    out: List[RollingEpsPoint] = []
+    out: list[RollingEpsPoint] = []
     years = sorted(by_year.keys())
     for y in years:
         items = by_year[y]
@@ -173,7 +172,7 @@ def rolling_eps_series(quarterlies: List[QuarterlyFinancials]) -> List[RollingEp
     return out
 
 
-def quarter_focus(year: int, quarter: int) -> Dict[str, Any]:
+def quarter_focus(year: int, quarter: int) -> dict[str, Any]:
     """回傳特定年度/季度的市場焦點框架。"""
     base = QUARTER_FOCUS.get(quarter, {}).copy()
     deadline_label, deadline_str = QUARTER_DEADLINES.get(quarter, ("", ""))
@@ -184,7 +183,7 @@ def quarter_focus(year: int, quarter: int) -> Dict[str, Any]:
     return base
 
 
-def current_quarter_focus(today: Optional[dt.date] = None) -> Dict[str, Any]:
+def current_quarter_focus(today: dt.date | None = None) -> dict[str, Any]:
     """依今天日期推估目前市場最關注的季度焦點。"""
     today = today or dt.date.today()
     year = today.year
@@ -200,10 +199,10 @@ def current_quarter_focus(today: Optional[dt.date] = None) -> Dict[str, Any]:
 
 
 def summarize_quarterly(
-    quarterlies: List[QuarterlyFinancials],
-    revenues: List[MonthlyRevenue],
-    today: Optional[dt.date] = None,
-) -> Dict[str, Any]:
+    quarterlies: list[QuarterlyFinancials],
+    revenues: list[MonthlyRevenue],
+    today: dt.date | None = None,
+) -> dict[str, Any]:
     """整合所有季度視角，回傳給 UI/scoring 用的 dict。"""
     return {
         "rolling_eps": [_eps_point_to_dict(p) for p in rolling_eps_series(quarterlies)],
@@ -214,7 +213,7 @@ def summarize_quarterly(
     }
 
 
-def _eps_point_to_dict(p: RollingEpsPoint) -> Dict[str, Any]:
+def _eps_point_to_dict(p: RollingEpsPoint) -> dict[str, Any]:
     return {
         "label": p.label,
         "year": p.year,
@@ -226,7 +225,7 @@ def _eps_point_to_dict(p: RollingEpsPoint) -> Dict[str, Any]:
     }
 
 
-def _qrev_to_dict(qr: QuarterlyRevenue) -> Dict[str, Any]:
+def _qrev_to_dict(qr: QuarterlyRevenue) -> dict[str, Any]:
     return {
         "year": qr.year,
         "quarter": qr.quarter,

@@ -28,15 +28,13 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.archive_status import day_trading_trade_blocked
 from bot.config import Settings
 from bot.utils import get_logger, now_tw
-
 
 # ----------------------------------------------------------------------
 # 模型
@@ -49,7 +47,7 @@ class CheckResult:
     status: str           # ok | warn | fail | info
     detail: str = ""
     suggestion: str = ""
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -57,16 +55,16 @@ class PreflightReport:
     fetched_at: str
     can_trade_now: bool = False    # 「現在馬上能不能下真實單」最終結論
     can_simulate: bool = False     # 能否跑模擬單
-    section_env: List[CheckResult] = field(default_factory=list)
-    section_ca: List[CheckResult] = field(default_factory=list)
-    section_login: List[CheckResult] = field(default_factory=list)
-    section_account: List[CheckResult] = field(default_factory=list)
-    section_risk: List[CheckResult] = field(default_factory=list)
-    section_time: List[CheckResult] = field(default_factory=list)
-    section_safety: List[CheckResult] = field(default_factory=list)
+    section_env: list[CheckResult] = field(default_factory=list)
+    section_ca: list[CheckResult] = field(default_factory=list)
+    section_login: list[CheckResult] = field(default_factory=list)
+    section_account: list[CheckResult] = field(default_factory=list)
+    section_risk: list[CheckResult] = field(default_factory=list)
+    section_time: list[CheckResult] = field(default_factory=list)
+    section_safety: list[CheckResult] = field(default_factory=list)
     summary: str = ""
 
-    def all_checks(self) -> List[CheckResult]:
+    def all_checks(self) -> list[CheckResult]:
         return (
             self.section_env + self.section_ca + self.section_login
             + self.section_account + self.section_risk + self.section_time
@@ -86,10 +84,10 @@ class PreflightReport:
 
 
 def _format_watch_pool_detail(
-    symbols: List[str],
+    symbols: list[str],
     *,
     auto_merge: bool,
-    source_counts: Optional[Dict[str, int]] = None,
+    source_counts: dict[str, int] | None = None,
 ) -> str:
     preview = ",".join(symbols[:8])
     if len(symbols) > 8:
@@ -110,9 +108,9 @@ def _format_watch_pool_detail(
 def _check_env(
     settings: Settings,
     *,
-    watch_pool_source_counts: Optional[Dict[str, int]] = None,
-) -> List[CheckResult]:
-    out: List[CheckResult] = []
+    watch_pool_source_counts: dict[str, int] | None = None,
+) -> list[CheckResult]:
+    out: list[CheckResult] = []
 
     # API Key / Secret Key
     if settings.api_key and settings.secret_key:
@@ -234,9 +232,9 @@ def _should_test_ca_activation(
     return bool(test_ca_activate and not settings.simulation)
 
 
-def _check_ca(settings: Settings) -> List[CheckResult]:
+def _check_ca(settings: Settings) -> list[CheckResult]:
     """電子憑證只在 trade + simulation=false 時必要。其餘只算 info/warn。"""
-    out: List[CheckResult] = []
+    out: list[CheckResult] = []
     need_ca = settings.run_mode == "trade" and not settings.simulation
 
     # CA 檔
@@ -318,7 +316,7 @@ def _check_ca(settings: Settings) -> List[CheckResult]:
     return out
 
 
-def _read_pfx_expiry(path: Path, password: str) -> Optional[dt.date]:
+def _read_pfx_expiry(path: Path, password: str) -> dt.date | None:
     """嘗試讀 PFX 內憑證的過期日 (失敗時回 None)。"""
     try:
         from cryptography.hazmat.primitives.serialization import pkcs12
@@ -343,9 +341,9 @@ def _check_login(
     *,
     do_real_login: bool,
     logger: logging.Logger,
-) -> tuple[List[CheckResult], Optional[Any], Optional[Any]]:
+) -> tuple[list[CheckResult], Any | None, Any | None]:
     """嘗試實際登入 Shioaji。回傳 (results, api_obj, stock_account)。"""
-    out: List[CheckResult] = []
+    out: list[CheckResult] = []
     if not settings.api_key or not settings.secret_key:
         out.append(CheckResult(
             "Shioaji 登入", "fail",
@@ -449,8 +447,8 @@ def _check_account(
     *,
     logger: logging.Logger,
     test_ca_activate: bool = False,
-) -> List[CheckResult]:
-    out: List[CheckResult] = []
+) -> list[CheckResult]:
+    out: list[CheckResult] = []
     if api is None or stock_account is None:
         return out
 
@@ -513,7 +511,7 @@ def _check_account(
         ))
 
     # 餘額
-    bal_amount: Optional[float] = None
+    bal_amount: float | None = None
     try:
         balance = api.account_balance()
         if balance:
@@ -574,8 +572,8 @@ def _check_account(
     return out
 
 
-def _check_risk(settings: Settings) -> List[CheckResult]:
-    out: List[CheckResult] = []
+def _check_risk(settings: Settings) -> list[CheckResult]:
+    out: list[CheckResult] = []
 
     # 停損
     if not (-20 < settings.stop_loss_pct < 0):
@@ -636,9 +634,9 @@ def _check_risk(settings: Settings) -> List[CheckResult]:
     return out
 
 
-def _check_time(settings: Settings) -> List[CheckResult]:
+def _check_time(settings: Settings) -> list[CheckResult]:
     """檢查現在是否在台股交易時間。"""
-    out: List[CheckResult] = []
+    out: list[CheckResult] = []
     now = now_tw()
     weekday = now.weekday()  # 0=Mon
     is_weekend = weekday >= 5
@@ -706,14 +704,14 @@ def _check_position_safety(
     settings: Settings,
     *,
     do_real_login: bool = True,
-) -> List[CheckResult]:
+) -> list[CheckResult]:
     """監控標的 vs 手動持股重疊、本工具紀錄對帳。"""
     from bot.position_safety import (
         run_startup_safety_checks,
         symbols_to_exclude_for_trading,
     )
 
-    out: List[CheckResult] = []
+    out: list[CheckResult] = []
     excluded = symbols_to_exclude_for_trading(settings)
     if excluded:
         out.append(CheckResult(
@@ -792,11 +790,11 @@ def _check_position_safety(
 
 
 def run_preflight(
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
     *,
     do_real_login: bool = True,
     test_ca_activate: bool = False,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> PreflightReport:
     """跑全部檢查，回傳結構化報告。
 
@@ -805,7 +803,7 @@ def run_preflight(
     log = logger or get_logger("preflight")
     settings = settings or Settings()
 
-    watch_pool_source_counts: Optional[Dict[str, int]] = None
+    watch_pool_source_counts: dict[str, int] | None = None
     if getattr(settings, "symbols_auto_merge", True):
         from pathlib import Path
 
@@ -858,7 +856,7 @@ def run_preflight(
     )
 
     # 文字摘要
-    bits: List[str] = []
+    bits: list[str] = []
     if report.has_fail():
         fails = [c.name for c in report.all_checks() if c.status == "fail"]
         bits.append(f"❌ 阻擋項: {', '.join(fails[:5])}")
@@ -893,7 +891,7 @@ def run_preflight(
     return report
 
 
-def report_to_dict(r: PreflightReport) -> Dict[str, Any]:
+def report_to_dict(r: PreflightReport) -> dict[str, Any]:
     return {
         "fetched_at": r.fetched_at,
         "can_trade_now": r.can_trade_now,
@@ -914,6 +912,6 @@ def report_to_dict(r: PreflightReport) -> Dict[str, Any]:
 __all__ = [
     "CheckResult",
     "PreflightReport",
-    "run_preflight",
     "report_to_dict",
+    "run_preflight",
 ]

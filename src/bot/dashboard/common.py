@@ -5,7 +5,7 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -27,7 +27,7 @@ def _project_path(*parts: str) -> Path:
     return PROJECT_ROOT.joinpath(*parts)
 
 
-def _safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
+def _safe_read_csv(path: Path) -> pd.DataFrame | None:
     try:
         return pd.read_csv(path, encoding="utf-8-sig")
     except Exception:
@@ -38,7 +38,7 @@ def _safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
             return None
 
 
-def _list_files(folder: Path, pattern: str) -> List[Path]:
+def _list_files(folder: Path, pattern: str) -> list[Path]:
     if not folder.exists():
         return []
     return sorted(folder.glob(pattern), reverse=True)
@@ -75,7 +75,7 @@ def _local_file_label(path: Path) -> str:
 
 def _ticker_local_data_summary(ticker: str) -> str:
     """Return a compact local-cache summary without fetching external sources."""
-    parts: List[str] = []
+    parts: list[str] = []
     try:
         from bot.technicals import get_kline_coverage
 
@@ -321,7 +321,7 @@ def _debug_log_candlestick(location: str, data: dict) -> None:
     _debug_log_session("H12", location, "candlestick svg render", data)
 
 
-def write_dashboard_heartbeat(page: str, extra: Optional[dict] = None) -> None:
+def write_dashboard_heartbeat(page: str, extra: dict | None = None) -> None:
     """寫入執行心跳（供確認瀏覽器是否跑此專案程式）。"""
     # #region agent log
     try:
@@ -349,7 +349,7 @@ def write_dashboard_heartbeat(page: str, extra: Optional[dict] = None) -> None:
 
 
 def _display_close_line_chart(
-    bars: List[dict],
+    bars: list[dict],
     *,
     height: int = 90,
     log_key: str = "",
@@ -376,7 +376,7 @@ def _display_ohlc_line_chart(
     *,
     height: int = 200,
     log_key: str = "",
-    ma_periods: Tuple[int, ...] = (5, 20, 60),
+    ma_periods: tuple[int, ...] = (5, 20, 60),
 ) -> None:
     """K 線工作台用：收盤 + 均線原生折線（保證可見）。"""
     if df is None or df.empty or "close" not in df.columns:
@@ -402,7 +402,7 @@ def _display_ohlc_line_chart(
 
 
 def _build_candlestick_svg(
-    bars: List[dict],
+    bars: list[dict],
     *,
     width: int = 320,
     height: int = 110,
@@ -450,7 +450,7 @@ def _build_candlestick_svg(
 
 
 def _build_candlestick_image(
-    bars: List[dict],
+    bars: list[dict],
     *,
     width: int = 320,
     height: int = 110,
@@ -503,14 +503,14 @@ def _chart_cache_path(log_key: str, width: int, height: int) -> Path:
 
 
 def _display_candlestick_chart(
-    bars: List[dict],
-    df: Optional[pd.DataFrame] = None,
+    bars: list[dict],
+    df: pd.DataFrame | None = None,
     *,
     width: int = 320,
     height: int = 110,
     log_key: str = "",
     show_ma: bool = False,
-    ma_periods: Tuple[int, ...] = (5, 20, 60),
+    ma_periods: tuple[int, ...] = (5, 20, 60),
     include_volume: bool = False,
     show_bar_count: bool = False,
 ) -> None:
@@ -606,7 +606,7 @@ def _display_candlestick_chart(
 
 
 def _display_candlestick_svg(
-    bars: List[dict],
+    bars: list[dict],
     *,
     width: int = 320,
     height: int = 110,
@@ -620,11 +620,11 @@ def _display_candlestick_svg(
     )
 
 
-def _ohlc_bars_from_df(df: pd.DataFrame) -> List[dict]:
+def _ohlc_bars_from_df(df: pd.DataFrame) -> list[dict]:
     plot = df.copy()
     if "date" not in plot.columns and plot.index.name == "date":
         plot = plot.reset_index()
-    out: List[dict] = []
+    out: list[dict] = []
     for _, row in plot.iterrows():
         close = float(row["close"])
         item = {
@@ -639,7 +639,7 @@ def _ohlc_bars_from_df(df: pd.DataFrame) -> List[dict]:
     return out
 
 
-def _fallback_is_ohlc(df: Optional[pd.DataFrame]) -> bool:
+def _fallback_is_ohlc(df: pd.DataFrame | None) -> bool:
     """K 線 fallback 資料（含收盤價與日期）。"""
     if df is None or df.empty:
         return False
@@ -695,9 +695,9 @@ def _display_rsi_native(df: pd.DataFrame, *, height: int = 160) -> None:
 def _display_altair(
     chart: Any,
     *,
-    width: Optional[int] = None,
-    fallback_df: Optional[pd.DataFrame] = None,
-    chart_key: Optional[str] = None,
+    width: int | None = None,
+    fallback_df: pd.DataFrame | None = None,
+    chart_key: str | None = None,
     use_ohlc_native: bool = False,
     include_volume: bool = False,
     chart_height: int = 300,

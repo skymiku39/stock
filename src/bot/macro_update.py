@@ -12,7 +12,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.cloud_file_cache import mirror_file_to_cloud
 from bot.config import Settings
@@ -24,7 +23,7 @@ from bot.market_macro import (
 from bot.utils import get_logger
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-macro-update",
         description="抓美股 / 加權指 / ADR 溢價 (可選 LLM 跨市場簡報)",

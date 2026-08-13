@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import List, Optional
 
 from bot.cloud_sync import (
     CloudSyncDependencyError,
@@ -24,7 +23,7 @@ from bot.stock_db import SYNCABLE_TABLES, StockDB, default_db_path
 from bot.utils import get_logger
 
 
-def _parse_tables(raw: str) -> List[str]:
+def _parse_tables(raw: str) -> list[str]:
     names = [t.strip() for t in raw.split(",") if t.strip()]
     unknown = [t for t in names if t not in SYNCABLE_TABLES]
     if unknown:
@@ -40,8 +39,8 @@ def _run_sync(
     *,
     push: bool,
     pull: bool,
-    tables: List[str],
-) -> List[TableSyncResult]:
+    tables: list[str],
+) -> list[TableSyncResult]:
     if push and pull:
         raise ValueError("不可同時指定 --push 與 --pull")
     if push:
@@ -51,7 +50,7 @@ def _run_sync(
     return sync.sync_all(tables)
 
 
-def _print_results(results: List[TableSyncResult]) -> None:
+def _print_results(results: list[TableSyncResult]) -> None:
     ok = sum(1 for r in results if r.ok and not r.skipped)
     fail = sum(1 for r in results if not r.ok)
     print(f"\n完成：{ok} 成功 / {fail} 失敗 / {len(results)} 表\n")
@@ -64,7 +63,7 @@ def _print_results(results: List[TableSyncResult]) -> None:
         print(f"  [{status}] {r.table}: {r.direction}, rows={r.rows}{suffix}")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-cloud-sync",
         description="同步本地 stock.db 與 Google Sheets (含 LLM 分析表)",

@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import html
 import json
 import logging
@@ -31,7 +30,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import quote_plus, urlparse
 
 import requests
@@ -88,14 +87,14 @@ class WebMaterial:
 
     ticker: str
     name: str = ""
-    queries: List[str] = field(default_factory=list)
-    search_results: List[SearchResult] = field(default_factory=list)
-    pages: List[PageContent] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    search_results: list[SearchResult] = field(default_factory=list)
+    pages: list[PageContent] = field(default_factory=list)
     fetched_at: str = ""
 
     def compact_text(self, max_chars: int = 10000) -> str:
         """壓成緊湊文字餵 LLM。"""
-        parts: List[str] = []
+        parts: list[str] = []
         if self.search_results:
             parts.append("【網頁搜尋摘要】")
             for r in self.search_results[:25]:
@@ -142,7 +141,7 @@ def _clean_text(s: str) -> str:
 def _site_from_url(url: str) -> str:
     try:
         netloc = urlparse(url).netloc
-        return netloc[4:] if netloc.startswith("www.") else netloc
+        return netloc.removeprefix("www.")
     except Exception:
         return ""
 
@@ -159,16 +158,16 @@ def search_web(
     *,
     max_results: int = 10,
     timeout: int = 12,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[SearchResult]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[SearchResult]:
     """走 DuckDuckGo HTML 端點抓搜尋結果。
 
     DDG 不需 API key、不限頻率；遇到失敗會回 []。
     """
     log = logger or get_logger("web-search")
     sess = session or _new_session()
-    results: List[SearchResult] = []
+    results: list[SearchResult] = []
     try:
         resp = sess.post(
             _DDG_HTML_URL,
@@ -205,7 +204,7 @@ def search_web(
         for m in re.finditer(
             r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
             r'.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-            html_text, re.S,
+            html_text, re.DOTALL,
         ):
             href, title_html, snippet_html = m.group(1), m.group(2), m.group(3)
             title = _clean_text(title_html)
@@ -237,9 +236,9 @@ def search_news(
     *,
     max_results: int = 15,
     timeout: int = 12,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[SearchResult]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[SearchResult]:
     """走 Google News RSS 抓相關新聞。免 API key。"""
     log = logger or get_logger("web-search")
     sess = session or _new_session()
@@ -254,8 +253,8 @@ def search_news(
         log.exception("Google News 抓取失敗 q=%r", query)
         return []
 
-    results: List[SearchResult] = []
-    items = re.findall(r"<item>(.*?)</item>", xml_text, re.S)
+    results: list[SearchResult] = []
+    items = re.findall(r"<item>(.*?)</item>", xml_text, re.DOTALL)
     for raw in items[: max_results * 2]:
         title = _extract_xml_tag(raw, "title")
         link = _extract_xml_tag(raw, "link")
@@ -288,11 +287,11 @@ def search_news(
 
 
 def _extract_xml_tag(s: str, tag: str) -> str:
-    m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", s, re.S | re.I)
+    m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", s, re.DOTALL | re.IGNORECASE)
     if not m:
         return ""
     val = m.group(1).strip()
-    val = re.sub(r"^<!\[CDATA\[(.*)\]\]>$", r"\1", val, flags=re.S)
+    val = re.sub(r"^<!\[CDATA\[(.*)\]\]>$", r"\1", val, flags=re.DOTALL)
     return val
 
 
@@ -306,8 +305,8 @@ def fetch_page_text(
     *,
     max_chars: int = 4000,
     timeout: int = 12,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> PageContent:
     """抓網頁的主要文字 (僅取 <article>/<main>/<body> 中明顯段落)。"""
     log = logger or get_logger("web-search")
@@ -334,7 +333,7 @@ def fetch_page_text(
         candidates = soup.find_all(["article", "main"])
         if not candidates:
             candidates = [soup.body or soup]
-        chunks: List[str] = []
+        chunks: list[str] = []
         for c in candidates:
             for p in c.find_all(["p", "li", "h1", "h2", "h3"]):
                 text = p.get_text(" ", strip=True)
@@ -347,11 +346,11 @@ def fetch_page_text(
         full = "\n".join(chunks)[:max_chars]
         content.text = full
     else:
-        title_m = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
+        title_m = re.search(r"<title[^>]*>(.*?)</title>", body, re.DOTALL | re.IGNORECASE)
         if title_m:
             content.title = _clean_text(title_m.group(1))
-        text = re.sub(r"<script.*?</script>", "", body, flags=re.S | re.I)
-        text = re.sub(r"<style.*?</style>", "", text, flags=re.S | re.I)
+        text = re.sub(r"<script.*?</script>", "", body, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = _clean_text(text)
         content.text = text[:max_chars]
     return content
@@ -362,7 +361,7 @@ def fetch_page_text(
 # ----------------------------------------------------------------------
 
 
-def _build_queries(ticker: str, name: str) -> List[str]:
+def _build_queries(ticker: str, name: str) -> list[str]:
     """組合多個搜尋 query：法說/重訊/籌碼/產業/題材。"""
     base = name or ticker
     return [
@@ -375,12 +374,12 @@ def _build_queries(ticker: str, name: str) -> List[str]:
     ]
 
 
-def _cache_path(key: str, root: Optional[Path]) -> Path:
+def _cache_path(key: str, root: Path | None) -> Path:
     today = now_tw().date().isoformat()
     return (root or Path.cwd()) / CACHE_DIR_REL / f"{key}_{today}.json"
 
 
-def _load_cache(key: str, root: Optional[Path], max_age_hours: int) -> Optional[Dict[str, Any]]:
+def _load_cache(key: str, root: Path | None, max_age_hours: int) -> dict[str, Any] | None:
     p = _cache_path(key, root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -401,7 +400,7 @@ def _load_cache(key: str, root: Optional[Path], max_age_hours: int) -> Optional[
     return data
 
 
-def _save_cache(key: str, root: Optional[Path], data: Dict[str, Any]) -> Path:
+def _save_cache(key: str, root: Path | None, data: dict[str, Any]) -> Path:
     p = _cache_path(key, root)
     mk_folder(str(p.parent))
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -413,12 +412,12 @@ def research_ticker(
     ticker: str,
     *,
     name: str = "",
-    root: Optional[Path] = None,
+    root: Path | None = None,
     max_pages: int = 5,
     max_results_per_query: int = 6,
     force_refresh: bool = False,
     max_age_hours: int = DEFAULT_AGE_HOURS,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> WebMaterial:
     """對 ``ticker`` 自動跑「DDG + Google News + 抓網頁原文」研究流程。
 
@@ -447,7 +446,7 @@ def research_ticker(
 
     sess = _new_session()
     queries = _build_queries(ticker, name)
-    all_results: List[SearchResult] = []
+    all_results: list[SearchResult] = []
     seen_urls: set[str] = set()
 
     for q in queries:
@@ -464,7 +463,7 @@ def research_ticker(
             all_results.append(r)
         time.sleep(0.6)
 
-    pages: List[PageContent] = []
+    pages: list[PageContent] = []
     for r in all_results:
         if r.source != "ddg":
             continue

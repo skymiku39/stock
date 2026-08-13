@@ -28,7 +28,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
 from bot.config import Settings
 from bot.events import SchedulerJobCompleted, SchedulerStarted
@@ -52,12 +51,12 @@ def _in_window(t: dt.time, start: dt.time, end: dt.time) -> bool:
     return start <= t <= end
 
 
-def _base_command() -> List[str]:
+def _base_command() -> list[str]:
     """優先用 uv run，否則 fallback 到當前 Python -m。"""
     return [sys.executable, "-m"]
 
 
-def _resolve_cmd(console_script: str, module: str, extra: List[str]) -> List[str]:
+def _resolve_cmd(console_script: str, module: str, extra: list[str]) -> list[str]:
     base = _base_command()
     if base[-1] == "run":  # uv run <console-script>
         return base + [console_script] + extra
@@ -71,10 +70,10 @@ class Job:
     module: str
     interval_min: int
     market_hours_only: bool
-    extra_args: List[str] = field(default_factory=list)
+    extra_args: list[str] = field(default_factory=list)
     run_once_per_day: bool = False
-    window_start: Optional[dt.time] = None
-    window_end: Optional[dt.time] = None
+    window_start: dt.time | None = None
+    window_end: dt.time | None = None
     report_kind: str = ""
     report_mode: str = ""
     target_date_mode: str = ""
@@ -95,9 +94,9 @@ class Scheduler:
         self,
         settings: Settings,
         *,
-        project_root: Optional[Path] = None,
+        project_root: Path | None = None,
         dry_run: bool = False,
-        publisher: Optional[EventPublisher] = None,
+        publisher: EventPublisher | None = None,
     ):
         self.settings = settings
         self.project_root = project_root or Path.cwd()
@@ -107,12 +106,12 @@ class Scheduler:
         self.log_dir = self.project_root / "log"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._stop = threading.Event()
-        self.jobs: List[Job] = self._build_jobs()
+        self.jobs: list[Job] = self._build_jobs()
         self._monitor_runner = None  # 延遲建立，避免無謂 import
 
-    def _build_jobs(self) -> List[Job]:
+    def _build_jobs(self) -> list[Job]:
         s = self.settings
-        jobs: List[Job] = []
+        jobs: list[Job] = []
         if s.scheduler_macro_interval_min > 0:
             jobs.append(Job(
                 name="macro",
@@ -226,7 +225,7 @@ class Scheduler:
     # 任務執行
     # ------------------------------------------------------------------
 
-    def _job_target_date(self, job: Job, now: dt.datetime) -> Optional[dt.date]:
+    def _job_target_date(self, job: Job, now: dt.datetime) -> dt.date | None:
         if job.target_date_mode == "today":
             return now.date()
         if job.target_date_mode == "next_trading_day":
@@ -234,7 +233,7 @@ class Scheduler:
             return next_trading_day(now.date())
         return None
 
-    def _job_extra_args(self, job: Job, now: dt.datetime) -> List[str]:
+    def _job_extra_args(self, job: Job, now: dt.datetime) -> list[str]:
         extra = list(job.extra_args)
         target_date = self._job_target_date(job, now)
         if target_date is not None:
@@ -277,7 +276,7 @@ class Scheduler:
             self.logger.debug("daily report existence check failed: %s", job.name, exc_info=True)
         return False
 
-    def _run_job(self, job: Job, now: Optional[dt.datetime] = None) -> None:
+    def _run_job(self, job: Job, now: dt.datetime | None = None) -> None:
         scheduled_at = now or now_tw()
         cmd = _resolve_cmd(job.console_script, job.module, self._job_extra_args(job, scheduled_at))
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -476,7 +475,7 @@ def _is_data_window(now: dt.datetime) -> bool:
     )
 
 
-def _child_env(project_root: Optional[Path] = None) -> dict:
+def _child_env(project_root: Path | None = None) -> dict:
     import os
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -490,7 +489,7 @@ def _child_env(project_root: Optional[Path] = None) -> dict:
     return env
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:

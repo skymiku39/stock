@@ -3,22 +3,21 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from bot.dashboard.common import PROJECT_ROOT
 from bot.env_io import load_env
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def cached_env_values() -> Dict[str, str]:
+def cached_env_values() -> dict[str, str]:
     return load_env()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def cached_llm_today_stats(_project_root: str) -> Tuple[int, int, int]:
+def cached_llm_today_stats(_project_root: str) -> tuple[int, int, int]:
     """今日 LLM 呼叫筆數與 token 統計 (上限 500 筆，避免每次換頁掃 1 萬行)。"""
     try:
         from bot.llm_log import get_call_logger
@@ -55,7 +54,7 @@ def cached_price_band_heat(
     limit: int,
     exclude_dr: bool,
     _project_root: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     from bot.env_io import load_env
     from bot.price_band_heat import DEFAULT_WATCH_SYMBOLS, fetch_price_band_heat
 
@@ -78,7 +77,7 @@ def cached_hot_stock_futures(
     limit: int,
     direction: str,
     _project_root: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     from bot.hot_stock_futures import fetch_hot_stock_futures
 
     result = fetch_hot_stock_futures(
@@ -94,7 +93,7 @@ def cached_market_movers(
     direction: str,
     exclude_etf: bool,
     _project_root: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     from bot.market_movers import fetch_market_movers
 
     result = fetch_market_movers(
@@ -114,7 +113,7 @@ def cached_intraday_tracking(
     refresh_technicals: bool,
     refresh_chips: bool,
     _project_root: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """當沖即時追蹤表 (短 TTL，避免每 30s 整頁重打 MIS)。"""
     from bot.intraday_live import build_live_tracking_rows
     from bot.intraday_pipeline import load_intraday_by_date

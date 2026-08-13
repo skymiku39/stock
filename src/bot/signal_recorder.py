@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -19,12 +19,12 @@ class SignalRecorder:
     def __init__(
         self,
         output_dir: str = "data/reports",
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ):
         self.output_dir = output_dir
         self.logger = logger or get_logger("signal-recorder")
-        self._signals: List[SignalEvent] = []
-        self._price_stats: Dict[str, Dict[str, float]] = {}
+        self._signals: list[SignalEvent] = []
+        self._price_stats: dict[str, dict[str, float]] = {}
 
     # ------------------------------------------------------------------
     # 記錄
@@ -60,7 +60,7 @@ class SignalRecorder:
     # 匯出
     # ------------------------------------------------------------------
 
-    def export_signals_csv(self) -> Optional[str]:
+    def export_signals_csv(self) -> str | None:
         """匯出 signals_YYYY-MM-DD.csv。"""
         if not self._signals:
             self.logger.info("無訊號紀錄，跳過匯出")
@@ -70,14 +70,14 @@ class SignalRecorder:
         date_str = now_tw().strftime("%Y-%m-%d")
         filepath = os.path.join(self.output_dir, f"signals_{date_str}.csv")
 
-        rows: List[Dict[str, Any]] = [dataclasses.asdict(s) for s in self._signals]
+        rows: list[dict[str, Any]] = [dataclasses.asdict(s) for s in self._signals]
         df = pd.DataFrame(rows)
         df["ts"] = df["ts"].astype(str)
         df.to_csv(filepath, index=False, encoding="utf-8-sig")
         self.logger.info("訊號紀錄已匯出: %s (%d 筆)", filepath, len(df))
         return filepath
 
-    def export_report(self) -> Optional[str]:
+    def export_report(self) -> str | None:
         """匯出 report_YYYY-MM-DD.csv，含每檔觸發次數、進出場價、分析損益。"""
         if not self._signals:
             return None
@@ -86,13 +86,13 @@ class SignalRecorder:
         date_str = now_tw().strftime("%Y-%m-%d")
         filepath = os.path.join(self.output_dir, f"report_{date_str}.csv")
 
-        rows: List[Dict[str, Any]] = [dataclasses.asdict(s) for s in self._signals]
+        rows: list[dict[str, Any]] = [dataclasses.asdict(s) for s in self._signals]
         df = pd.DataFrame(rows)
 
         buys = df[df["action"] == "would-buy"]
         sells = df[df["action"] == "would-sell"]
 
-        report_rows: List[Dict[str, Any]] = []
+        report_rows: list[dict[str, Any]] = []
         symbols = df["symbol"].unique()
         for sym in symbols:
             sym_buys = buys[buys["symbol"] == sym]
