@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -23,7 +22,7 @@ class EnvField:
     kind: str  # "str" | "int" | "float" | "bool" | "time" | "select" | "password" | "symbols"
     default: Any = ""
     help: str = ""
-    options: List[str] = field(default_factory=list)
+    options: list[str] = field(default_factory=list)
     secret: bool = False
 
 
@@ -31,7 +30,7 @@ class EnvField:
 # 欄位定義 (對齊 src/bot/config.py 的 Settings)
 # ----------------------------------------------------------------------
 
-ENV_FIELDS: List[EnvField] = [
+ENV_FIELDS: list[EnvField] = [
     # 執行模式
     EnvField(
         "RUN_MODE", "執行模式", "執行模式", "select",
@@ -372,9 +371,25 @@ ENV_FIELDS: List[EnvField] = [
 
     # Gemini LLM
     EnvField(
+        "LLM_PROVIDER", "LLM 提供者", "LLM 分析", "select",
+        default="chain",
+        options=["chain", "gemini_gateway", "cursor", "gemini"],
+        help="chain=Gemini閘道→Cursor閘道→SDK 全自動容錯（推薦）",
+    ),
+    EnvField(
+        "GEMINI_GATEWAY_BASE_URL", "Gemini 閘道 URL", "LLM 分析", "str",
+        default="http://127.0.0.1:8816",
+        help="蹭google的geminiAI 閘道 URL",
+    ),
+    EnvField(
+        "CURSOR_LLM_BASE_URL", "Cursor 閘道 URL", "LLM 分析", "str",
+        default="http://127.0.0.1:8815",
+        help="蹭cursor的AI 閘道 URL",
+    ),
+    EnvField(
         "GEMINI_API_KEY", "Google Gemini API Key", "LLM 分析", "password",
         secret=True,
-        help="Google AI Studio 免費 API Key，用於法說會語意解析",
+        help="SDK 備援用。chain 模式中閘道都失敗時才用。",
     ),
     EnvField(
         "GEMINI_MODEL", "Gemini 模型", "LLM 分析", "select",
@@ -449,15 +464,97 @@ ENV_FIELDS: List[EnvField] = [
         help="Optional Google Drive Desktop/shared folder. Cached JSON/CSV/PDF files "
              "under data/ are mirrored here and restored before refetch.",
     ),
+
+    # 排程器
+    EnvField(
+        "SCHEDULER_ENABLED", "排程器啟用", "排程器", "bool",
+        default="true", help="全域排程器開關",
+    ),
+    EnvField(
+        "SCHEDULER_MACRO_INTERVAL_MIN", "總經刷新間隔(分)", "排程器", "int",
+        default="30", help="<=0 停用；不消耗 LLM",
+    ),
+    EnvField(
+        "SCHEDULER_RESEARCH_INTERVAL_MIN", "研究管線間隔(分)", "排程器", "int",
+        default="240", help="含 ETF/籌碼/法說 + LLM；<=0 停用",
+    ),
+    EnvField(
+        "SCHEDULER_RESEARCH_ARGS", "研究管線額外參數", "排程器", "str",
+        default="", help="傳給 stock-auto-research，例如 --no-brief",
+    ),
+    EnvField(
+        "SCHEDULER_FUNDAMENTALS_INTERVAL_MIN", "基本面刷新間隔(分)", "排程器", "int",
+        default="360", help="<=0 停用",
+    ),
+    EnvField(
+        "SCHEDULER_INTRADAY_ENABLED", "盤中戰情自動產出", "排程器", "bool",
+        default="true", help="每日 08:30-14:30 自動產出戰情報告",
+    ),
+    EnvField(
+        "SCHEDULER_INTRADAY_TIME", "盤中戰情開始", "排程器", "time",
+        default="08:30",
+    ),
+    EnvField(
+        "SCHEDULER_INTRADAY_END_TIME", "盤中戰情結束", "排程器", "time",
+        default="14:30",
+    ),
+    EnvField(
+        "SCHEDULER_NEXTDAY_DRAFT_ENABLED", "隔日預備(草稿)自動產出", "排程器", "bool",
+        default="true", help="盤後 14:00-18:00 產出初版",
+    ),
+    EnvField(
+        "SCHEDULER_NEXTDAY_DRAFT_TIME", "隔日預備草稿開始", "排程器", "time",
+        default="14:00",
+    ),
+    EnvField(
+        "SCHEDULER_NEXTDAY_DRAFT_END_TIME", "隔日預備草稿結束", "排程器", "time",
+        default="18:00",
+    ),
+    EnvField(
+        "SCHEDULER_NEXTDAY_UPDATE_ENABLED", "隔日預備(更新)自動產出", "排程器", "bool",
+        default="true", help="凌晨 02:00-06:00 刷美股盤後更新",
+    ),
+    EnvField(
+        "SCHEDULER_NEXTDAY_UPDATE_TIME", "隔日預備更新開始", "排程器", "time",
+        default="02:00",
+    ),
+    EnvField(
+        "SCHEDULER_NEXTDAY_UPDATE_END_TIME", "隔日預備更新結束", "排程器", "time",
+        default="06:00",
+    ),
+    EnvField(
+        "SCHEDULER_COMPANY_INTERVAL_MIN", "公司資料補齊間隔(分)", "排程器", "int",
+        default="1440", help="靜態資料，預設一天一次",
+    ),
+    EnvField(
+        "SCHEDULER_HISTORY_FETCH_INTERVAL_MIN", "歷史日K補齊間隔(分)", "排程器", "int",
+        default="60", help="收盤後慢速補齊",
+    ),
+    EnvField(
+        "SCHEDULER_WATCH_SNAPSHOT_INTERVAL_MIN", "熱度快照間隔(分)", "排程器", "int",
+        default="30", help="約10元熱度+期貨快照；<=0 停用",
+    ),
+    EnvField(
+        "SCHEDULER_MARKET_HOURS_ONLY", "僅交易時段執行", "排程器", "bool",
+        default="true", help="macro/research/fundamentals 只在平日 08:30-14:30",
+    ),
+    EnvField(
+        "SCHEDULER_RUN_ON_START", "啟動時先跑一輪", "排程器", "bool",
+        default="true",
+    ),
+    EnvField(
+        "SCHEDULER_SUPERVISE_MONITOR", "托管 stock-bot 子行程", "排程器", "bool",
+        default="false", help="盤中自動啟動 stock-bot（watch/report 模式）",
+    ),
 ]
 
 
-def field_map() -> Dict[str, EnvField]:
+def field_map() -> dict[str, EnvField]:
     return {f.key: f for f in ENV_FIELDS}
 
 
-def grouped_fields() -> Dict[str, List[EnvField]]:
-    groups: Dict[str, List[EnvField]] = {}
+def grouped_fields() -> dict[str, list[EnvField]]:
+    groups: dict[str, list[EnvField]] = {}
     for f in ENV_FIELDS:
         groups.setdefault(f.section, []).append(f)
     return groups
@@ -468,17 +565,17 @@ def grouped_fields() -> Dict[str, List[EnvField]]:
 # ----------------------------------------------------------------------
 
 
-def env_path(root: Optional[Path] = None) -> Path:
+def env_path(root: Path | None = None) -> Path:
     base = root or Path.cwd()
     return base / ".env"
 
 
-def load_env(path: Optional[Path] = None) -> Dict[str, str]:
+def load_env(path: Path | None = None) -> dict[str, str]:
     """簡易 .env parser，支援 KEY=VALUE 與註解。"""
     p = path or env_path()
     if not p.exists():
         return {}
-    data: Dict[str, str] = {}
+    data: dict[str, str] = {}
     for line in p.read_text(encoding="utf-8").splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
@@ -490,13 +587,13 @@ def load_env(path: Optional[Path] = None) -> Dict[str, str]:
     return data
 
 
-def save_env(values: Dict[str, str], path: Optional[Path] = None) -> Path:
+def save_env(values: dict[str, str], path: Path | None = None) -> Path:
     """覆寫 .env (依 ENV_FIELDS 的順序)，自動備份原檔到 .env.bak。"""
     p = path or env_path()
     if p.exists():
         shutil.copy2(p, p.with_suffix(p.suffix + ".bak"))
 
-    lines: List[str] = []
+    lines: list[str] = []
     groups = grouped_fields()
     for section, fields_in_section in groups.items():
         lines.append(f"# === {section} ===")
@@ -523,9 +620,9 @@ def save_env(values: Dict[str, str], path: Optional[Path] = None) -> Path:
 # ----------------------------------------------------------------------
 
 
-def validate(values: Dict[str, str]) -> List[str]:
+def validate(values: dict[str, str]) -> list[str]:
     """回傳錯誤訊息列表 (空 list 表示通過)。"""
-    errors: List[str] = []
+    errors: list[str] = []
     fmap = field_map()
 
     for key, v in values.items():
@@ -578,10 +675,10 @@ def validate(values: Dict[str, str]) -> List[str]:
     return errors
 
 
-def masked(values: Dict[str, str]) -> Dict[str, str]:
+def masked(values: dict[str, str]) -> dict[str, str]:
     """回傳遮罩過後的版本 (供顯示)。"""
     fmap = field_map()
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for k, v in values.items():
         f = fmap.get(k)
         if f and f.secret and v:
