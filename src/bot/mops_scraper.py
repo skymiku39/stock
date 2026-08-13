@@ -18,7 +18,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict
 from urllib.parse import urljoin
 
 import requests
@@ -134,9 +134,9 @@ MOPS_FILE_DOWNLOAD_DIR = "/home/html/nas/STR/"
 def fetch_conference_schedule(
     year_roc: int,
     month: int,
-    logger: Optional[logging.Logger] = None,
-    session: Optional[requests.Session] = None,
-) -> List[ConferenceEntry]:
+    logger: logging.Logger | None = None,
+    session: requests.Session | None = None,
+) -> list[ConferenceEntry]:
     """抓 MOPS 法說會行事曆 (民國年 + 月)。
 
     Args:
@@ -176,7 +176,7 @@ def _extract_calendar_pdf_filename(text: str) -> str:
     m = re.search(
         r"fm_fileDownload\.fileName\.value\s*=\s*[\"']([^\"']+)[\"']",
         text,
-        re.I,
+        re.IGNORECASE,
     )
     return m.group(1).strip() if m else ""
 
@@ -212,7 +212,7 @@ def _best_pdf_from_row_html(row_html: str) -> str:
     candidates = re.findall(
         r"fm_fileDownload\.fileName\.value\s*=\s*[\"']([^\"']+)[\"']",
         row_html,
-        re.I,
+        re.IGNORECASE,
     )
     if not candidates:
         return ""
@@ -236,7 +236,7 @@ def _extract_url_from_onclick(text: str) -> str:
         r"""window\.open\s*\(\s*["']([^"']+)["']""",
         r"""location\.href\s*=\s*["']([^"']+)["']""",
     ):
-        m = re.search(pattern, text, re.I)
+        m = re.search(pattern, text, re.IGNORECASE)
         if m:
             url = m.group(1).strip()
             if url and not url.lower().startswith("javascript:"):
@@ -270,13 +270,13 @@ def _url_from_tr_element(tr: Any) -> str:
 
 def _href_from_tr_html(tr_html: str) -> str:
     """從 <tr> 原始 HTML 抽出簡報 URL (regex fallback)。"""
-    m = re.search(r"""href=["'](https?://[^"']+)["']""", tr_html, re.I)
+    m = re.search(r"""href=["'](https?://[^"']+)["']""", tr_html, re.IGNORECASE)
     if m:
         return m.group(1).strip()
     pdf = _best_pdf_from_row_html(tr_html)
     if pdf:
         return _calendar_presentation_ref(pdf)
-    m = re.search(r"""href=["']([^"'#][^"']*)["']""", tr_html, re.I)
+    m = re.search(r"""href=["']([^"'#][^"']*)["']""", tr_html, re.IGNORECASE)
     if m:
         href = m.group(1).strip()
         if href and not href.lower().startswith("javascript:"):
@@ -292,7 +292,7 @@ def _html_to_plain_text(html: str, *, max_chars: int = 20000) -> str:
         soup = BeautifulSoup(html, "lxml" if _has_lxml() else "html.parser")
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
-        parts: List[str] = []
+        parts: list[str] = []
         for tr in soup.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
             line = " | ".join(c for c in cells if c)
@@ -302,8 +302,8 @@ def _html_to_plain_text(html: str, *, max_chars: int = 20000) -> str:
             parts.append(soup.get_text("\n", strip=True))
         text = "\n".join(parts).strip()
     else:
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.S | re.I)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S | re.I)
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<[^>]+>", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if len(text) > max_chars:
@@ -316,10 +316,10 @@ def _parse_conference_html(
     year_roc: int,
     month: int,
     logger: logging.Logger,
-) -> List[ConferenceEntry]:
+) -> list[ConferenceEntry]:
     """容錯解析 MOPS 表格 (BeautifulSoup 優先，否則用正則 fallback)。"""
-    result: List[ConferenceEntry] = []
-    rows: List[Tuple[List[str], str]] = []
+    result: list[ConferenceEntry] = []
+    rows: list[tuple[list[str], str]] = []
     if _HAS_BS4:
         soup = BeautifulSoup(html, "lxml" if _has_lxml() else "html.parser")
         for table in soup.find_all("table"):
@@ -328,9 +328,9 @@ def _parse_conference_html(
                 if len(cells) >= 4:
                     rows.append((cells, _url_from_tr_element(tr)))
     else:
-        for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I):
+        for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE):
             tr_html = m.group(0)
-            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", m.group(1), re.S | re.I)
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", m.group(1), re.DOTALL | re.IGNORECASE)
             cleaned = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
             if len(cleaned) >= 4:
                 rows.append((cleaned, _href_from_tr_html(tr_html)))
@@ -388,18 +388,18 @@ MOPS_MATERIAL_URL = f"{MOPS_HOST}/mops/web/ajax_t05st02"
 URL_MATERIAL_OPENAPI = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
 
 
-def _material_key(item: MaterialInfo) -> Tuple[str, str]:
+def _material_key(item: MaterialInfo) -> tuple[str, str]:
     return (item.date.isoformat(), (item.subject or "").strip())
 
 
 def _merge_material_lists(
-    openapi_items: List[MaterialInfo],
-    mops_items: List[MaterialInfo],
-) -> List[MaterialInfo]:
+    openapi_items: list[MaterialInfo],
+    mops_items: list[MaterialInfo],
+) -> list[MaterialInfo]:
     """合併 OpenAPI 與 mopsov 重訊；以 mopsov detail_url 補 OpenAPI 列。"""
     mops_by_key = {_material_key(m): m for m in mops_items}
-    merged: List[MaterialInfo] = []
-    seen: set[Tuple[str, str]] = set()
+    merged: list[MaterialInfo] = []
+    seen: set[tuple[str, str]] = set()
 
     for item in openapi_items:
         key = _material_key(item)
@@ -433,8 +433,8 @@ def _fetch_material_mops(
     sess: requests.Session,
     log: logging.Logger,
     *,
-    stats: Optional[Dict[str, Any]] = None,
-) -> List[MaterialInfo]:
+    stats: Dict[str, Any] | None = None,
+) -> list[MaterialInfo]:
     payload = {
         "encodeURIComponent": "1",
         "step": "1",
@@ -462,13 +462,13 @@ def _fetch_material_mops(
 
 def fetch_material_info(
     ticker: str,
-    year_roc: Optional[int] = None,
-    logger: Optional[logging.Logger] = None,
-    session: Optional[requests.Session] = None,
+    year_roc: int | None = None,
+    logger: logging.Logger | None = None,
+    session: requests.Session | None = None,
     *,
     merge_sources: bool = True,
-    stats: Optional[Dict[str, Any]] = None,
-) -> List[MaterialInfo]:
+    stats: Dict[str, Any] | None = None,
+) -> list[MaterialInfo]:
     """個股重大訊息查詢。
 
     預設合併兩來源：
@@ -540,7 +540,7 @@ def _fetch_material_openapi(
     ticker: str,
     sess: requests.Session,
     log: logging.Logger,
-) -> List[MaterialInfo]:
+) -> list[MaterialInfo]:
     """從 TWSE OpenAPI t187ap04_L 取該 ticker 的當日重大訊息。"""
     try:
         resp = sess.get(URL_MATERIAL_OPENAPI, timeout=20)
@@ -551,7 +551,7 @@ def _fetch_material_openapi(
     except Exception:
         log.debug("重大訊息 OpenAPI 抓取/解析失敗", exc_info=True)
         return []
-    out: List[MaterialInfo] = []
+    out: list[MaterialInfo] = []
     for row in data if isinstance(data, list) else []:
         code = str(row.get("公司代號") or "").strip()
         if code != ticker:
@@ -577,7 +577,7 @@ def _fetch_material_openapi(
     return out
 
 
-def _roc_to_date(s: str) -> Optional[dt.date]:
+def _roc_to_date(s: str) -> dt.date | None:
     """民國 YYYMMDD / 西元 YYYYMMDD / YYY/MM/DD → date。"""
     s = (s or "").strip()
     if not s:
@@ -597,9 +597,9 @@ def _parse_material_html(
     html: str,
     ticker: str,
     logger: logging.Logger,
-) -> List[MaterialInfo]:
-    result: List[MaterialInfo] = []
-    rows: List[Tuple[List[str], str]] = []
+) -> list[MaterialInfo]:
+    result: list[MaterialInfo] = []
+    rows: list[tuple[list[str], str]] = []
     if _HAS_BS4:
         soup = BeautifulSoup(html, "lxml" if _has_lxml() else "html.parser")
         for tr in soup.find_all("tr"):
@@ -607,9 +607,9 @@ def _parse_material_html(
             if len(cells) >= 4:
                 rows.append((cells, _url_from_tr_element(tr)))
     else:
-        for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I):
+        for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE):
             tr_html = m.group(0)
-            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", m.group(1), re.S | re.I)
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", m.group(1), re.DOTALL | re.IGNORECASE)
             cleaned = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
             if len(cleaned) >= 4:
                 rows.append((cleaned, _href_from_tr_html(tr_html)))
@@ -642,8 +642,8 @@ def _parse_material_html(
 def fetch_material_detail(
     detail_url: str,
     *,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     max_chars: int = 20000,
 ) -> str:
     """抓取 MOPS 重大訊息詳情頁並抽成純文字。"""
@@ -671,9 +671,9 @@ def fetch_material_detail(
 def download_file(
     url: str,
     dest: Path,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Path]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> Path | None:
     """串流下載檔案。"""
     log = logger or get_logger("mops")
     sess = session or _new_session()
@@ -700,9 +700,9 @@ def download_calendar_file(
     filename: str,
     dest: Path,
     *,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Path]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> Path | None:
     """下載 MOPS 行事曆 PDF（POST ``fm_fileDownload``）。"""
     log = logger or get_logger("mops")
     sess = session or _new_session()
@@ -736,9 +736,9 @@ def download_presentation(
     url: str,
     dest: Path,
     *,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[PresentationText]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> PresentationText | None:
     """下載法說會簡報 (PDF/文字) 並盡量抽出純文字。"""
     if url.startswith(MOPS_CALENDAR_FILE_PREFIX):
         filename = url[len(MOPS_CALENDAR_FILE_PREFIX):]
@@ -767,7 +767,7 @@ def download_presentation(
     )
 
 
-def extract_pdf_text(path: Path, max_pages: int = 100) -> Optional[PresentationText]:
+def extract_pdf_text(path: Path, max_pages: int = 100) -> PresentationText | None:
     """抽 PDF 全文。若未安裝 pypdf 則回 None。"""
     if not _HAS_PYPDF:
         return None
@@ -775,7 +775,7 @@ def extract_pdf_text(path: Path, max_pages: int = 100) -> Optional[PresentationT
     try:
         reader = PdfReader(str(path))
         pages = min(len(reader.pages), max_pages)
-        text_parts: List[str] = []
+        text_parts: list[str] = []
         for i in range(pages):
             try:
                 text_parts.append(reader.pages[i].extract_text() or "")
@@ -810,17 +810,17 @@ def absolute_url(base: str, rel: str) -> str:
 
 
 __all__ = [
+    "MOPS_CALENDAR_FILE_PREFIX",
     "ConferenceEntry",
     "MaterialInfo",
     "PresentationText",
-    "MOPS_CALENDAR_FILE_PREFIX",
     "absolute_url",
     "download_calendar_file",
     "download_file",
     "download_presentation",
-    "is_meaningful_presentation_url",
     "extract_pdf_text",
     "fetch_conference_schedule",
     "fetch_material_detail",
     "fetch_material_info",
+    "is_meaningful_presentation_url",
 ]

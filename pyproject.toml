@@ -58,6 +58,7 @@ stock-smile-screen = "bot.smile_curve_screener_cli:main"
 stock-smile-audit = "bot.smile_curve_audit_cli:main"
 stock-watch-snapshot = "bot.watch_snapshot:main"
 stock-watch-data-fetch = "bot.watch_data_fetch:main"
+stock-llm-test = "bot.llm_smoke:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -69,3 +70,32 @@ packages = ["src/bot"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "SIM"]
+ignore = [
+    "E501",    # line too long (handled by formatter)
+    "E402",    # module-import-not-at-top (conditional imports)
+    "E741",    # ambiguous-variable-name (e.g. l, I in formulas)
+    "E701",    # multiple-statements-on-one-line
+    "SIM102",  # collapsible-if (readability preference)
+    "SIM103",  # needless-bool (readability preference)
+    "SIM105",  # suppressible-exception (explicit try/except preferred)
+    "SIM108",  # if-else-block-instead-of-if-exp
+    "SIM110",  # reimplemented-builtin
+    "SIM115",  # open-file-with-context-handler
+    "SIM117",  # multiple-with-statements
+    "SIM118",  # in-dict-keys
+    "SIM300",  # yoda-conditions
+    "UP006",   # non-pep585-annotation (Dict/List in older code)
+    "UP028",   # yield-in-for-loop
+    "UP035",   # deprecated-import
+    "F841",    # unused-variable (often intentional destructuring)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bot"]
