@@ -233,6 +233,44 @@ def lookup_company_info(
     )
 
 
+def _normalize_company_name(name: str) -> str:
+    """正規化投信/MoneyDJ 常見公司簡稱：去空白、尾端 *、全形空白。"""
+    s = str(name or "").replace("\u3000", " ").strip()
+    s = s.rstrip("*＊").strip()
+    return s
+
+
+def lookup_symbol_by_name(
+    name: str,
+    *,
+    root: Optional[Path] = None,
+    logger: Optional[logging.Logger] = None,
+    company_map: Optional[Dict[str, StockInfo]] = None,
+) -> Optional[str]:
+    """以公司簡稱/全名反查證券代號。
+
+    對齊順序：簡稱精確 → 全名精確 → 去 * 後簡稱精確。
+    多檔同名時取代號較小者（穩定、可重現）。查無回 None。
+    """
+    key = _normalize_company_name(name)
+    if not key:
+        return None
+    mp = company_map if company_map is not None else load_company_map(root=root, logger=logger)
+    exact_short: list[str] = []
+    exact_full: list[str] = []
+    for sym, info in mp.items():
+        short = _normalize_company_name(info.short_name)
+        full = _normalize_company_name(info.name)
+        if short == key:
+            exact_short.append(sym)
+        elif full == key:
+            exact_full.append(sym)
+    hits = exact_short or exact_full
+    if not hits:
+        return None
+    return sorted(hits)[0]
+
+
 def backfill_stock_info(
     db, *, root: Optional[Path] = None,
     only_missing: bool = True,
@@ -295,4 +333,5 @@ __all__ = [
     "industry_label",
     "load_company_map",
     "lookup_company_info",
+    "lookup_symbol_by_name",
 ]

@@ -24,7 +24,7 @@
 - **Telegram 通知** -- 買賣/停損停利/收盤摘要即時推播到手機
 - **模擬模式** -- `SIMULATION=true` 即可使用模擬環境測試
 - **Web 儀表板** -- `stock-dashboard` 啟動 Streamlit 介面，一站瀏覽所有功能
-- **主動式 ETF 跟單** -- 28+ 檔主動式 ETF 持股快照、共識加碼/新建倉/抬轎候選計算
+- **主動式 ETF 跟單** -- 28+ 檔主動式 ETF + 安聯台灣科技基金 (ALI006) 持股快照、共識加碼/新建倉/抬轎候選計算
 - **MOPS 法說會爬蟲** -- 抓法人說明會行事曆與個股重大訊息
 - **🤖 全自動法說研究** -- 自動抓行事曆 + 上網搜尋 (DuckDuckGo + Google News) + 鉅亨新聞 + LLM 結構化分析，不需貼逐字稿
 - **法說會行事曆自動快取** -- 上月 / 本月 / 下月 / +2 月四個月份自動每日更新，dashboard 進入即用
@@ -392,7 +392,7 @@ uv run streamlit run src/bot/dashboard.py
 | **個股深入分析** | 單檔 360 度視角，11 個分頁：分析 / 基本面 / **技術面 (含 K 線型態判讀 + 近 10 根型態表)** / 籌碼面 / 股利政策 / 季報 Q1-Q4 / **美股連動** / 原始資料 / 購買策略 / 目前狀況 / 歷史狀況 |
 | 自動化管線 | 一鍵跑完 ETF + 籌碼 + 法說 + **美股** + LLM + 每日簡報 + 跨市場簡報 |
 | **美股 / 跨市場** | S&P/NASDAQ/SOX/VIX/加權 + 重點美股 + ADR 溢價 + LLM 跨市場簡報 + 供應鏈對照表編輯 |
-| 主動 ETF 追蹤 | 28+ 檔主動式 ETF 清單、URL 設定、一鍵自動抓取、CSV 匯入、Top10 權重圖 |
+| 主動 ETF 追蹤 | 28+ 檔主動式 ETF + ALI006 安聯台灣科技基金、URL 設定、一鍵自動抓取、CSV 匯入、Top10 權重圖 |
 | 跟單訊號 | 共識持股、共識新建倉、共識加碼、持股變動明細 |
 | LLM 法說分析 | Gemini 解析法說會、抓 MOPS 行事曆、自動抓籌碼面+言行反查 |
 | Prompt 管理 | 編輯 prompts/*.yaml，render 預覽，即時生效 |
@@ -790,7 +790,8 @@ src/bot/
   recorder.py              # 交易紀錄收集與 CSV 匯出 (trade)
   notifier.py              # Telegram 推播通知
   utils.py                 # 工具函數 (Logger, 時間)
-  active_etf.py            # 主動式 ETF 清單與持股資料模型
+  active_etf.py            # 主動式 ETF 清單與持股資料模型（含 ALI006 共同基金）
+  fund_holdings_parser.py  # MoneyDJ 共同基金持股確定性解析（免 LLM）
   etf_consensus.py         # 共識持股 / 加碼 / 抬轎候選計算
   mops_scraper.py          # MOPS 法說會 / 重大訊息爬蟲
   llm_analyzer.py          # Gemini LLM 法說會語意解析 + 邏輯反查
@@ -983,7 +984,7 @@ dashboard 的「個股深入分析」頁採用 **3D + 催化劑** 視角，把�
 | **大戶 / 超大戶 / 散戶持股比例** | `chip_distribution.DistributionWeekly` | **TDCC 集保戶股權分散表** |
 | 大戶結構解讀 (吸籌 / 出貨 / 中性) | `chip_distribution.interpret_distribution` | 週度趨勢計算 |
 | 大戶 vs 散戶趨勢線圖 | dashboard 籌碼面分頁 | Altair |
-| 主動 ETF 共識持有與加碼 | `etf_consensus` | 28+ 檔主動式 ETF |
+| 主動 ETF 共識持有與加碼 | `etf_consensus` | 28+ 檔主動式 ETF + ALI006 |
 
 ### 四、配股配息：衡量資金回報與成熟度
 

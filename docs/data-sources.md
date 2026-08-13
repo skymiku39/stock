@@ -49,6 +49,16 @@
 | etfinfo.tw | `etfinfo.tw/etf/{symbol}/holdings` | 多數已掛牌主動式 ETF (22 檔) | 改 MoneyDJ |
 | MoneyDJ | `moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw` | etfinfo 未收錄者 (00402A/00404A/00405A/00406A/00407A/00998A)、海外型 | 來源頁顯示「查無資料」→ 標記 `no_data_yet` (略過 LLM，待後續自動補齊) |
 
+## 共同基金持股（納入共識追蹤）
+
+| 來源 | URL 樣式 | 適用 | 解析方式 |
+|------|---------|------|----------|
+| MoneyDJ FundDJ | `moneydj.com/funddj/yp/yp013000.djhtm?a=<fund_id>` | **ALI006 安聯台灣科技基金**（`fund_id=acdd04`） | `fund_holdings_parser` 確定性解析 HTML table（免 LLM）；公司名 → 代號走 `company_info.lookup_symbol_by_name` |
+
+> 共同基金不是 ETF，但持股對共識加碼／跟單候選仍有參考價值，故以虛擬代號
+> `ALI006` 掛進 `DEFAULT_ACTIVE_ETFS`，快照同樣寫入 `data/etf_holdings/ALI006/`。
+> Shioaji 查不到契約時會自動略過報價，不影響持股共識計算。
+
 > **已知限制（新掛牌）**：2026/5 下旬募集、6 月初才掛牌的 5 檔
 > (00402A、00404A、00405A、00406A、00407A) 連發行商與第三方 (etfinfo / MoneyDJ) **都尚未公開每日成分股**
 > (MoneyDJ 頁面顯示「查無資料」)。URL 雖回 HTTP 200，但持股表為空。

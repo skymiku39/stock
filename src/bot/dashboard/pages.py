@@ -1271,10 +1271,13 @@ def page_docs() -> None:
 
 def page_etf_tracker() -> None:
     st.title("主動式 ETF 追蹤")
-    st.caption("依 2025-2026 公開資訊整理的主動式 ETF 清單與持股快照")
+    st.caption(
+        "依 2025-2026 公開資訊整理的主動式 ETF 清單與持股快照；"
+        "亦含明星共同基金（如 ALI006 安聯台灣科技基金）"
+    )
 
     etfs = load_active_etfs(PROJECT_ROOT)
-    st.markdown(f"### 共 **{len(etfs)}** 檔主動式 ETF")
+    st.markdown(f"### 共 **{len(etfs)}** 檔追蹤標的")
 
     df_meta = pd.DataFrame([
         {

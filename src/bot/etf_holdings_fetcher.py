@@ -30,6 +30,10 @@ from bot.active_etf import (
     save_holdings,
 )
 from bot.cloud_file_cache import mirror_file_to_cloud
+from bot.fund_holdings_parser import (
+    is_moneydj_fund_holdings_url,
+    parse_moneydj_fund_holdings_html,
+)
 from bot.llm_analyzer import GeminiClient, extract_json, gemini_call
 from bot.utils import get_logger, mk_folder, now_tw
 
@@ -174,6 +178,7 @@ def fetch_and_save_holdings(
             "pdf" in content_type or etf.holdings_url.lower().endswith(".pdf")
         )
         raw_text = ""
+        raw_html = ""
         if is_pdf:
             raw_dir = (root or Path.cwd()) / "data" / "etf_holdings_raw" / etf.symbol
             mk_folder(str(raw_dir))
@@ -186,7 +191,8 @@ def fetch_and_save_holdings(
                 resp.encoding = resp.apparent_encoding or "utf-8"
             except Exception:
                 resp.encoding = "utf-8"
-            raw_text = _html_to_text(resp.text)
+            raw_html = resp.text
+            raw_text = _html_to_text(raw_html)
             raw_dir = (root or Path.cwd()) / "data" / "etf_holdings_raw" / etf.symbol
             mk_folder(str(raw_dir))
             tmp = raw_dir / f"{result.snapshot_date.isoformat()}.txt"
@@ -212,6 +218,32 @@ def fetch_and_save_holdings(
         result.error = f"fetch_failed: {e}"
         log.exception("[%s] 下載失敗", etf.symbol)
         return result
+
+    # ---- 1b. 共同基金持股：MoneyDJ 確定性解析（免 LLM）----
+    if raw_html and is_moneydj_fund_holdings_url(etf.holdings_url):
+        parsed = parse_moneydj_fund_holdings_html(
+            raw_html, root=root, logger=log,
+        )
+        if parsed.holdings:
+            if parsed.as_of:
+                result.snapshot_date = parsed.as_of
+            snap = HoldingsSnapshot(
+                symbol=etf.symbol,
+                date=result.snapshot_date,
+                holdings=parsed.holdings,
+            )
+            saved = save_holdings(snap, root)
+            result.success = True
+            result.holdings_count = len(parsed.holdings)
+            result.saved_path = saved
+            result.prompt_id = "fund_holdings_parser"
+            result.prompt_version = "deterministic"
+            log.info(
+                "[%s] 共同基金持股確定性解析 %d 檔 → %s (as_of=%s)",
+                etf.symbol, len(parsed.holdings), saved.name, result.snapshot_date,
+            )
+            return result
+        log.info("[%s] MoneyDJ 基金頁解析無持股，改走 LLM fallback", etf.symbol)
 
     # ---- 2. 呼叫 Gemini 抽 JSON ----
     if not client.enabled:

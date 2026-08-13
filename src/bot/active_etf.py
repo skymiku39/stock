@@ -44,6 +44,9 @@ _ETFINFO_HOLDINGS = "https://www.etfinfo.tw/etf/{symbol}/holdings"
 # 用於 etfinfo.tw 尚未收錄的標的 (例：部分 2026 新掛牌主動式 ETF 與海外型)。
 # 同時支援台股 (4 位數代號) 與海外持股 (公司名)。
 _MONEYDJ_HOLDINGS = "https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw"
+# MoneyDJ 境內共同基金持股頁 (非 ETF；例：安聯台灣科技基金)。
+# 由 fund_holdings_parser 確定性解析，不需 LLM。
+_MONEYDJ_FUND_HOLDINGS = "https://www.moneydj.com/funddj/yp/yp013000.djhtm?a={fund_id}"
 
 DEFAULT_ACTIVE_ETFS: List[Dict[str, str]] = [
     {"symbol": "00980A", "name": "主動野村臺灣優選", "issuer": "野村投信", "region": "台灣", "freq": "季配",
@@ -100,6 +103,9 @@ DEFAULT_ACTIVE_ETFS: List[Dict[str, str]] = [
      "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00406A")},
     {"symbol": "00407A", "name": "主動凱基台灣", "issuer": "凱基投信", "region": "台灣", "freq": "不配息",
      "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00407A")},
+    # 明星共同基金（非 ETF）：納入共識持股追蹤，代號採基富通 ALI006。
+    {"symbol": "ALI006", "name": "安聯台灣科技基金", "issuer": "安聯投信", "region": "台灣", "freq": "-",
+     "holdings_url": _MONEYDJ_FUND_HOLDINGS.format(fund_id="acdd04")},
 ]
 
 
