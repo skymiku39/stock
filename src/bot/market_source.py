@@ -7,7 +7,7 @@ TWSE MIS API 回傳的行情相較即時行情延遲 20 分鐘以上，
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
@@ -23,9 +23,9 @@ class TwsePublicMarketSource:
 
     def __init__(
         self,
-        symbols: List[str],
+        symbols: list[str],
         poll_seconds: int = 5,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ):
         self.symbols = symbols
         self.poll_seconds = poll_seconds
@@ -37,9 +37,9 @@ class TwsePublicMarketSource:
             "Accept": "application/json",
         })
 
-        self._exchange_map: Dict[str, str] = {}
-        self._prev_volumes: Dict[str, int] = {}
-        self._prev_close: Dict[str, float] = {}
+        self._exchange_map: dict[str, str] = {}
+        self._prev_volumes: dict[str, int] = {}
+        self._prev_close: dict[str, float] = {}
         self._initialized = False
 
     # ------------------------------------------------------------------
@@ -54,8 +54,8 @@ class TwsePublicMarketSource:
         except Exception:
             self.logger.exception("TWSE MIS session 初始化失敗")
 
-    def _build_ex_ch(self, symbols: List[str]) -> str:
-        parts: List[str] = []
+    def _build_ex_ch(self, symbols: list[str]) -> str:
+        parts: list[str] = []
         for s in symbols:
             if s in self._exchange_map:
                 parts.append(f"{self._exchange_map[s]}_{s}.tw")
@@ -64,7 +64,7 @@ class TwsePublicMarketSource:
                 parts.append(f"otc_{s}.tw")
         return "|".join(parts)
 
-    def _fetch_raw(self, symbols: List[str]) -> List[dict]:
+    def _fetch_raw(self, symbols: list[str]) -> list[dict]:
         if not self._initialized:
             self._init_session()
 
@@ -86,7 +86,7 @@ class TwsePublicMarketSource:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_float(value: Any) -> Optional[float]:
+    def _parse_float(value: Any) -> float | None:
         try:
             text = str(value or "").replace(",", "").strip()
             if not text or text == "-":
@@ -106,16 +106,16 @@ class TwsePublicMarketSource:
             return 0
 
     @classmethod
-    def _first_book_price(cls, value: Any) -> Optional[float]:
+    def _first_book_price(cls, value: Any) -> float | None:
         text = str(value or "").strip()
         if not text or text == "-":
             return None
         return cls._parse_float(text.split("_", 1)[0])
 
-    def get_prev_close(self, symbols: List[str]) -> Dict[str, float]:
+    def get_prev_close(self, symbols: list[str]) -> dict[str, float]:
         """取得昨日收盤價 (y 欄位)。"""
         items = self._fetch_raw(symbols)
-        result: Dict[str, float] = {}
+        result: dict[str, float] = {}
         for item in items:
             code = item.get("c", "")
             y_str = item.get("y", "")
@@ -133,11 +133,11 @@ class TwsePublicMarketSource:
         self.logger.info("TWSE 前日收盤: %s", result)
         return result
 
-    def get_quotes(self) -> Dict[str, Dict[str, Any]]:
+    def get_quotes(self) -> dict[str, dict[str, Any]]:
         """Return latest TWSE MIS quote payloads without suppressing unchanged volume."""
         items = self._fetch_raw(self.symbols)
         ts = now_tw()
-        result: Dict[str, Dict[str, Any]] = {}
+        result: dict[str, dict[str, Any]] = {}
         for item in items:
             code = item.get("c", "")
             if not code:
@@ -156,7 +156,7 @@ class TwsePublicMarketSource:
             previous_trade = self._parse_float(pz_str)
             best_bid = self._first_book_price(item.get("b"))
             best_ask = self._first_book_price(item.get("a"))
-            price: Optional[float] = None
+            price: float | None = None
             price_basis = ""
             if last_trade is not None:
                 price = last_trade
@@ -177,7 +177,7 @@ class TwsePublicMarketSource:
             prev_close = self._parse_float(y_str) or 0.0
             volume = self._parse_int(v_str)
 
-            pct_chg: Optional[float] = None
+            pct_chg: float | None = None
             if price is not None and prev_close > 0:
                 pct_chg = round(100 * (price - prev_close) / prev_close, 2)
             if ex:
@@ -204,10 +204,10 @@ class TwsePublicMarketSource:
             }
         return result
 
-    def poll(self) -> List[MarketTick]:
+    def poll(self) -> list[MarketTick]:
         """輪詢一次，回傳有新成交量的 MarketTick 清單。"""
         items = self._fetch_raw(self.symbols)
-        ticks: List[MarketTick] = []
+        ticks: list[MarketTick] = []
         ts = now_tw()
 
         for item in items:

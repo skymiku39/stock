@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -16,10 +16,10 @@ from bot.utils import get_logger, mk_folder, now_tw
 class TradeRecorder:
     """將每筆成交紀錄暫存於記憶體，結束時匯出為 CSV。"""
 
-    def __init__(self, output_dir: str = "data", logger: Optional[logging.Logger] = None):
+    def __init__(self, output_dir: str = "data", logger: logging.Logger | None = None):
         self.output_dir = output_dir
         self.logger = logger or get_logger("recorder")
-        self._records: List[Dict[str, Any]] = []
+        self._records: list[dict[str, Any]] = []
 
     def record_deal(
         self,
@@ -27,13 +27,13 @@ class TradeRecorder:
         *,
         unit: QtyUnit = "lot",
         trade_reason: str = "",
-        entry_price: Optional[float] = None,
-        pnl_pct: Optional[float] = None,
-        pnl_twd: Optional[float] = None,
+        entry_price: float | None = None,
+        pnl_pct: float | None = None,
+        pnl_twd: float | None = None,
     ) -> None:
         """從 Shioaji StockDeal callback msg 擷取欄位並暫存。"""
         custom_field = msg.get("custom_field", "")
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "datetime": now_tw().isoformat(timespec="seconds"),
             "symbol": msg.get("code", ""),
             "action": msg.get("action", ""),
@@ -58,7 +58,7 @@ class TradeRecorder:
     def deal_count(self) -> int:
         return len(self._records)
 
-    def export_csv(self) -> Optional[str]:
+    def export_csv(self) -> str | None:
         """匯出所有紀錄為 CSV，回傳檔案路徑。無紀錄時回傳 None。"""
         if not self._records:
             self.logger.info("無成交紀錄，跳過匯出")

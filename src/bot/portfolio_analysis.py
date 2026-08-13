@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import Any, Dict, Iterable, List, Mapping, Optional
-
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 QUALITY_FACTORS = [
     ("price", "價格"),
@@ -27,14 +27,14 @@ def build_portfolio_analysis_bundle(
     *,
     rows: Iterable[Mapping[str, Any]],
     snapshots: Mapping[str, Mapping[str, Any]],
-    broker_meta: Optional[Mapping[str, Any]] = None,
-    warnings: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    broker_meta: Mapping[str, Any] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
     """Build a JSON-serializable evidence bundle for portfolio LLM analysis."""
     clean_rows = [_jsonable(dict(row)) for row in rows]
     by_symbol = {str(row.get("代號") or row.get("symbol") or ""): row for row in clean_rows}
-    holdings: List[Dict[str, Any]] = []
-    quality_rows: List[Dict[str, Any]] = []
+    holdings: list[dict[str, Any]] = []
+    quality_rows: list[dict[str, Any]] = []
 
     for symbol, row in by_symbol.items():
         snap = dict(snapshots.get(symbol, {}) or {})
@@ -80,7 +80,7 @@ def build_portfolio_analysis_bundle(
     }
 
 
-def portfolio_totals(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+def portfolio_totals(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     items = list(rows)
     cost = sum(_num(r.get("券商成本")) for r in items)
     market = sum(_num(r.get("券商市值")) for r in items)
@@ -99,8 +99,8 @@ def portfolio_totals(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def industry_exposure(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    totals: Dict[str, float] = {}
+def industry_exposure(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    totals: dict[str, float] = {}
     for row in rows:
         industry = str(row.get("產業") or "未分類")
         totals[industry] = totals.get(industry, 0.0) + _num(row.get("券商市值"))
@@ -115,7 +115,7 @@ def industry_exposure(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
-def compact_snapshot(snap: Mapping[str, Any]) -> Dict[str, Any]:
+def compact_snapshot(snap: Mapping[str, Any]) -> dict[str, Any]:
     fundamentals = snap.get("fundamentals") or {}
     technicals = snap.get("technicals") or {}
     llm = snap.get("llm_analysis") or {}
@@ -161,7 +161,7 @@ def data_quality(
     symbol: str,
     row: Mapping[str, Any],
     snap: Mapping[str, Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     fundamentals = snap.get("fundamentals") or {}
     technicals = snap.get("technicals") or {}
     flags = {
@@ -188,12 +188,12 @@ def data_quality(
     }
 
 
-def summarize_quality(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+def summarize_quality(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     items = list(rows)
     if not items:
         return {"average_coverage_score": 0.0, "lowest_coverage": []}
     avg = sum(_num(r.get("coverage_score")) for r in items) / len(items)
-    missing_counts: Dict[str, int] = {}
+    missing_counts: dict[str, int] = {}
     for row in items:
         for missing in row.get("missing", []) or []:
             missing_counts[str(missing)] = missing_counts.get(str(missing), 0) + 1
@@ -223,7 +223,7 @@ def bundle_to_json(bundle: Mapping[str, Any], *, max_chars: int = 24000) -> str:
     return text
 
 
-def _pick(data: Any, keys: List[str]) -> Dict[str, Any]:
+def _pick(data: Any, keys: list[str]) -> dict[str, Any]:
     if not isinstance(data, Mapping):
         return {}
     return {key: data.get(key) for key in keys if key in data}

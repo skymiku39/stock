@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -25,7 +25,7 @@ class SimPosition:
 class SimFundState:
     max_fund: float
     fund_used: float = 0.0
-    positions: List[SimPosition] = field(default_factory=list)
+    positions: list[SimPosition] = field(default_factory=list)
     signal_count: int = 0
 
     @property
@@ -33,7 +33,7 @@ class SimFundState:
         return max(0.0, self.max_fund - self.fund_used)
 
 
-def load_risk_state(path: Path) -> Dict[str, Any]:
+def load_risk_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
@@ -42,7 +42,7 @@ def load_risk_state(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def fund_state_from_signals(df: Optional[pd.DataFrame], max_fund: float) -> SimFundState:
+def fund_state_from_signals(df: pd.DataFrame | None, max_fund: float) -> SimFundState:
     """由 signals CSV 重建虛擬資金與持倉。"""
     state = SimFundState(max_fund=max_fund)
     if df is None or df.empty:
@@ -53,7 +53,7 @@ def fund_state_from_signals(df: Optional[pd.DataFrame], max_fund: float) -> SimF
     if "ts" in work.columns:
         work = work.sort_values("ts")
 
-    holdings: Dict[str, SimPosition] = {}
+    holdings: dict[str, SimPosition] = {}
     fund_used = 0.0
 
     for _, row in work.iterrows():
@@ -88,7 +88,7 @@ def fund_state_from_signals(df: Optional[pd.DataFrame], max_fund: float) -> SimF
     return state
 
 
-SIM_TEMPLATES: Dict[str, Dict[str, str]] = {
+SIM_TEMPLATES: dict[str, dict[str, str]] = {
     "watch_10k": {
         "RUN_MODE": "watch",
         "MAX_FUND": "10000",

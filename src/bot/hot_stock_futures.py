@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 import requests
 
@@ -24,7 +24,7 @@ TAIFEX_MIS_PAGE_URL = (
     "https://mis.taifex.com.tw/futures/RegularSession/StockProducts/HotStockFutures/"
 )
 
-HOT_STOCK_FUTURES_PAGE_ATTR: Dict[str, str] = {
+HOT_STOCK_FUTURES_PAGE_ATTR: dict[str, str] = {
     "MarketType": "0",
     "SymbolType": "F",
     "KindID": "4",
@@ -44,17 +44,17 @@ class HotStockFuturesRow:
     spot_id: str = ""
     name: str = ""
     name_en: str = ""
-    last_price: Optional[float] = None
-    ref_price: Optional[float] = None
-    diff: Optional[float] = None
-    pct_chg: Optional[float] = None
-    amp_rate: Optional[float] = None
+    last_price: float | None = None
+    ref_price: float | None = None
+    diff: float | None = None
+    pct_chg: float | None = None
+    amp_rate: float | None = None
     volume: int = 0
-    bid_price: Optional[float] = None
-    ask_price: Optional[float] = None
-    high_price: Optional[float] = None
-    low_price: Optional[float] = None
-    open_price: Optional[float] = None
+    bid_price: float | None = None
+    ask_price: float | None = None
+    high_price: float | None = None
+    low_price: float | None = None
+    open_price: float | None = None
     quote_time: str = ""
     status: str = ""
 
@@ -67,10 +67,10 @@ class HotStockFuturesResult:
     quote_count: int = 0
     fetched: int = 0
     duration_sec: float = 0.0
-    rows: List[HotStockFuturesRow] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    rows: list[HotStockFuturesRow] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             **{k: v for k, v in asdict(self).items() if k != "rows"},
             "rows": [asdict(r) for r in self.rows],
@@ -92,7 +92,7 @@ def _session() -> requests.Session:
     return sess
 
 
-def _parse_float(value: Any) -> Optional[float]:
+def _parse_float(value: Any) -> float | None:
     try:
         text = str(value or "").replace(",", "").strip()
         if not text or text == "-":
@@ -119,7 +119,7 @@ def _format_quote_time(raw: str) -> str:
     return text
 
 
-def _parse_quote_item(item: Dict[str, Any]) -> HotStockFuturesRow:
+def _parse_quote_item(item: dict[str, Any]) -> HotStockFuturesRow:
     last_price = _parse_float(item.get("CLastPrice"))
     ref_price = _parse_float(item.get("CRefPrice"))
     diff = _parse_float(item.get("CDiff"))
@@ -149,7 +149,7 @@ def _parse_quote_item(item: Dict[str, Any]) -> HotStockFuturesRow:
     )
 
 
-def _sort_rows(rows: List[HotStockFuturesRow], direction: SortDirection) -> List[HotStockFuturesRow]:
+def _sort_rows(rows: list[HotStockFuturesRow], direction: SortDirection) -> list[HotStockFuturesRow]:
     if direction == "volume":
         return sorted(rows, key=lambda r: r.volume, reverse=True)
     if direction == "gainers":
@@ -163,8 +163,8 @@ def fetch_hot_stock_futures(
     *,
     limit: int = 50,
     direction: SortDirection = "volume",
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> HotStockFuturesResult:
     """抓取 TAIFEX 熱門個股期貨行情。"""
     log = logger or get_logger("hot-stock-futures")
@@ -215,10 +215,10 @@ def fetch_hot_stock_futures(
 
 __all__ = [
     "HOT_STOCK_FUTURES_PAGE_ATTR",
+    "TAIFEX_MIS_API_URL",
+    "TAIFEX_MIS_PAGE_URL",
     "HotStockFuturesResult",
     "HotStockFuturesRow",
     "SortDirection",
-    "TAIFEX_MIS_API_URL",
-    "TAIFEX_MIS_PAGE_URL",
     "fetch_hot_stock_futures",
 ]

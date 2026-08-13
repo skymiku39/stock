@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot.config import Settings
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 DEFAULT_ENTRY_MAX_PCT = 5.0
 
 
-def resolve_entry_range(symbol: str, settings: Settings) -> Tuple[float, float]:
+def resolve_entry_range(symbol: str, settings: Settings) -> tuple[float, float]:
     """回傳 (min_pct, max_pct) 進場漲幅區間。"""
     targets = getattr(settings, "buy_entry_targets", {}) or {}
     if symbol in targets:

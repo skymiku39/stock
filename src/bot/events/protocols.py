@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Protocol, TypeVar, runtime_checkable
+from collections.abc import Callable
+from typing import Protocol, TypeVar, runtime_checkable
 
 from bot.events.types import DomainEvent
 

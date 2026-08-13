@@ -14,7 +14,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
 @dataclass
@@ -23,9 +22,9 @@ class RunRecord:
     run_mode: str
     log_path: Path
     started_at: float
-    ended_at: Optional[float] = None
-    return_code: Optional[int] = None
-    extra_env: Dict[str, str] = field(default_factory=dict)
+    ended_at: float | None = None
+    return_code: int | None = None
+    extra_env: dict[str, str] = field(default_factory=dict)
 
 
 class BotProcessRunner:
@@ -33,7 +32,7 @@ class BotProcessRunner:
 
     def __init__(
         self,
-        project_root: Optional[Path] = None,
+        project_root: Path | None = None,
         *,
         console_script: str = "stock-bot",
         module: str = "bot.main",
@@ -48,8 +47,8 @@ class BotProcessRunner:
         self.log_prefix = log_prefix
         self.set_run_mode_env = set_run_mode_env
 
-        self._proc: Optional[subprocess.Popen] = None
-        self._record: Optional[RunRecord] = None
+        self._proc: subprocess.Popen | None = None
+        self._record: RunRecord | None = None
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -62,7 +61,7 @@ class BotProcessRunner:
                 return False
             return self._proc.poll() is None
 
-    def current(self) -> Optional[RunRecord]:
+    def current(self) -> RunRecord | None:
         with self._lock:
             if self._proc is None:
                 return self._record
@@ -79,8 +78,8 @@ class BotProcessRunner:
     def start(
         self,
         run_mode: str,
-        extra_env: Optional[Dict[str, str]] = None,
-        args: Optional[List[str]] = None,
+        extra_env: dict[str, str] | None = None,
+        args: list[str] | None = None,
     ) -> RunRecord:
         if self.is_running():
             assert self._record is not None
@@ -195,7 +194,7 @@ class BotProcessRunner:
     # 內部
     # ------------------------------------------------------------------
 
-    def _build_command(self, args: Optional[List[str]] = None) -> List[str]:
+    def _build_command(self, args: list[str] | None = None) -> list[str]:
         """Use the dashboard's Python to avoid uv rewriting locked console scripts."""
         extra = args or []
         return [sys.executable, "-m", self.module] + extra
@@ -205,18 +204,18 @@ class BotProcessRunner:
 # 全域單例 (供 Streamlit session 共用)
 # ----------------------------------------------------------------------
 
-_runner: Optional[BotProcessRunner] = None
-_scheduler_runner: Optional[BotProcessRunner] = None
+_runner: BotProcessRunner | None = None
+_scheduler_runner: BotProcessRunner | None = None
 
 
-def get_runner(project_root: Optional[Path] = None) -> BotProcessRunner:
+def get_runner(project_root: Path | None = None) -> BotProcessRunner:
     global _runner
     if _runner is None:
         _runner = BotProcessRunner(project_root=project_root)
     return _runner
 
 
-def get_scheduler_runner(project_root: Optional[Path] = None) -> BotProcessRunner:
+def get_scheduler_runner(project_root: Path | None = None) -> BotProcessRunner:
     global _scheduler_runner
     if _scheduler_runner is None:
         _scheduler_runner = BotProcessRunner(

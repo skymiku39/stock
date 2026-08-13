@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 from bot.events.types import DomainEvent, QuantDataFetchCompleted
 
@@ -45,7 +44,7 @@ def _event_payload(event: DomainEvent) -> dict:
 
 def attach_jsonl_recorder(
     bus,
-    path: Optional[Path] = None,
+    path: Path | None = None,
 ) -> JsonlEventRecorder:
     """註冊 JSONL 紀錄 handler 並回傳實例。"""
     from bot.events.wiring import get_event_bus

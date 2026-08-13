@@ -32,20 +32,18 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot import watchlist as wl
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
+from bot.conference_calendar import upcoming_tickers, update_calendar
 from bot.config import Settings
-from bot.conference_calendar import update_calendar, upcoming_tickers
 from bot.env_io import load_env
 from bot.llm_analyzer import (
-    ChipsContext,
     DEFAULT_MODEL,
+    ChipsContext,
     GeminiClient,
-    LogicCheckResult,
     PresentationAnalysis,
     analyze_presentation,
     extract_json,
@@ -55,7 +53,6 @@ from bot.llm_analyzer import (
 from bot.mops_scraper import MaterialInfo, fetch_material_info
 from bot.news_fetcher import NewsItem, fetch_today_news
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 AUTO_LLM_DIR_REL = "data/auto_llm"
 DEFAULT_AGE_HOURS = 12          # 同一個 ticker 12 小時內不重跑
@@ -72,7 +69,7 @@ def _gather_material_info(
     *,
     logger: logging.Logger,
     limit: int = 12,
-) -> List[MaterialInfo]:
+) -> list[MaterialInfo]:
     """抓最近一年的 MOPS 重大訊息 (最近 N 筆)。"""
     try:
         items = fetch_material_info(ticker, logger=logger)
@@ -87,17 +84,17 @@ def _gather_news(
     ticker: str,
     name_hint: str,
     *,
-    root: Optional[Path],
+    root: Path | None,
     logger: logging.Logger,
     limit: int = 15,
-) -> List[NewsItem]:
+) -> list[NewsItem]:
     """從鉅亨今日台股新聞挑出與此 ticker 相關的新聞。"""
     try:
         news = fetch_today_news(limit=200, root=root, logger=logger)
     except Exception:
         logger.exception("[%s] fetch_today_news 失敗", ticker)
         return []
-    out: List[NewsItem] = []
+    out: list[NewsItem] = []
     for n in news:
         hit = ticker in (n.related_tickers or [])
         if not hit and ticker in (n.title or "") + " " + (n.summary or ""):
@@ -122,7 +119,7 @@ def _gather_pipeline_text(
         root / "data" / "mops_downloads",
         root / "data" / "mops_cache",
     ]
-    chunks: List[str] = []
+    chunks: list[str] = []
     for d in raw_dirs:
         if not d.exists():
             continue
@@ -149,7 +146,7 @@ def _gather_calendar(
     *,
     root: Path,
     logger: logging.Logger,
-) -> Dict[str, List[Any]]:
+) -> dict[str, list[Any]]:
     """讀取/補抓法說會與全球科技事件，取出此 ticker 的相關項目。"""
     try:
         from bot.conference_calendar import (
@@ -203,7 +200,7 @@ def _gather_web(
     *,
     root: Path,
     logger: logging.Logger,
-) -> Optional["object"]:
+) -> object | None:
     """跑網頁搜尋並抓部分原文 (回 WebMaterial)。"""
     try:
         from bot.web_search import research_ticker as web_research
@@ -221,10 +218,10 @@ def _gather_web(
 # ----------------------------------------------------------------------
 
 
-def _format_calendar_text(items: List[Any]) -> str:
+def _format_calendar_text(items: list[Any]) -> str:
     if not items:
         return "(無)"
-    parts: List[str] = []
+    parts: list[str] = []
     for e in items:
         try:
             date_str = e.date.isoformat() if hasattr(e.date, "isoformat") else str(e.date)
@@ -237,10 +234,10 @@ def _format_calendar_text(items: List[Any]) -> str:
     return "\n".join(parts)
 
 
-def _format_materials(materials: List[MaterialInfo]) -> str:
+def _format_materials(materials: list[MaterialInfo]) -> str:
     if not materials:
         return "(無)"
-    parts: List[str] = []
+    parts: list[str] = []
     for m in materials:
         try:
             date_str = m.date.isoformat() if hasattr(m.date, "isoformat") else str(m.date)
@@ -250,10 +247,10 @@ def _format_materials(materials: List[MaterialInfo]) -> str:
     return "\n".join(parts)
 
 
-def _format_news(news: List[NewsItem]) -> str:
+def _format_news(news: list[NewsItem]) -> str:
     if not news:
         return "(無)"
-    parts: List[str] = []
+    parts: list[str] = []
     for n in news:
         line = f"- [{n.category or 'news'}] {n.title}"
         if n.summary:
@@ -268,8 +265,8 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n...(已截斷)"
 
 
-def _calendar_lines(items: List[Any], *, include_url: bool = True) -> List[str]:
-    lines: List[str] = []
+def _calendar_lines(items: list[Any], *, include_url: bool = True) -> list[str]:
+    lines: list[str] = []
     for e in items:
         try:
             date_str = e.date.isoformat() if hasattr(e.date, "isoformat") else str(e.date)
@@ -290,23 +287,23 @@ def _calendar_lines(items: List[Any], *, include_url: bool = True) -> List[str]:
 def _build_source_sections(
     ticker: str,
     *,
-    materials: List[MaterialInfo],
-    news: List[NewsItem],
-    calendar_data: Dict[str, List[Any]],
-    web_material: Optional[Any],
+    materials: list[MaterialInfo],
+    news: list[NewsItem],
+    calendar_data: dict[str, list[Any]],
+    web_material: Any | None,
     pipeline_text: str,
     composed_preview: str = "",
     logger: logging.Logger,
     detail_limit: int = 5,
     detail_max_chars: int = 3000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """組合結構化原始素材，供 dashboard 顯示與快取。"""
     from bot.mops_scraper import fetch_material_detail
 
     upcoming = calendar_data.get("upcoming") or []
     past = calendar_data.get("past") or []
 
-    mops_items: List[Dict[str, Any]] = []
+    mops_items: list[dict[str, Any]] = []
     for m in materials[:12]:
         mops_items.append({
             "date": m.date.isoformat() if hasattr(m.date, "isoformat") else str(m.date),
@@ -340,7 +337,7 @@ def _build_source_sections(
         for n in news[:15]
     ]
 
-    web_items: List[Dict[str, str]] = []
+    web_items: list[dict[str, str]] = []
     if web_material is not None:
         for p in (web_material.pages or [])[:10]:
             web_items.append({
@@ -351,7 +348,7 @@ def _build_source_sections(
 
     preview = composed_preview.strip()
     if not preview:
-        parts: List[str] = []
+        parts: list[str] = []
         up_lines = _calendar_lines(upcoming)
         past_lines = _calendar_lines(past[:12])
         global_up_text = calendar_data.get("global_upcoming_text") or ""
@@ -394,14 +391,14 @@ def _build_source_sections(
 def _compose_legacy_text(
     ticker: str,
     name: str,
-    materials: List[MaterialInfo],
-    news: List[NewsItem],
+    materials: list[MaterialInfo],
+    news: list[NewsItem],
     pipeline_text: str,
-    calendar_data: Dict[str, List[Any]],
+    calendar_data: dict[str, list[Any]],
     web_block: str,
 ) -> str:
     """退回到 analyze_presentation 用的長文 (沒有 research_ticker prompt 時)。"""
-    parts: List[str] = []
+    parts: list[str] = []
     parts.append(
         f"以下為 {ticker} {name} 近期公開資訊綜整 "
         "(自動彙整：MOPS 重大訊息 + 鉅亨新聞 + MOPS 法說會行事曆 + 網頁搜尋 + 既有法說文件)。"
@@ -451,7 +448,7 @@ def load_cached_auto_analysis(
     root: Path,
     *,
     max_age_hours: int = DEFAULT_AGE_HOURS,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """讀取仍有效的快取 (None 表示過期或不存在)。"""
     p = _cache_path(ticker, root)
     restore_file_from_cloud(p, root=root)
@@ -473,7 +470,7 @@ def load_cached_auto_analysis(
     return data
 
 
-def _save_cache(ticker: str, root: Path, payload: Dict[str, Any]) -> Path:
+def _save_cache(ticker: str, root: Path, payload: dict[str, Any]) -> Path:
     p = _cache_path(ticker, root)
     mk_folder(str(p.parent))
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -490,16 +487,16 @@ def _try_research_ticker(
     ticker: str,
     *,
     name: str,
-    upcoming: List[Any],
-    past: List[Any],
-    materials: List[MaterialInfo],
-    news: List[NewsItem],
+    upcoming: list[Any],
+    past: list[Any],
+    materials: list[MaterialInfo],
+    news: list[NewsItem],
     web_block: str,
     client: GeminiClient,
     logger: logging.Logger,
     global_upcoming_text: str = "(無)",
     global_recent_text: str = "(無)",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """嘗試呼叫 ``research_ticker`` prompt；若 registry 沒有此 prompt 回 None。"""
     try:
         from bot.prompt_registry import get_registry
@@ -509,7 +506,7 @@ def _try_research_ticker(
     except Exception:
         return None
 
-    past_events: List[str] = []
+    past_events: list[str] = []
     if past:
         past_events.append("【法說會 (過去 365 天)】")
         past_events.append(_format_calendar_text(past[:8]))
@@ -518,7 +515,7 @@ def _try_research_ticker(
         past_events.append(_format_materials(materials))
     past_block = "\n".join(past_events).strip() or "(無)"
 
-    upcoming_parts: List[str] = []
+    upcoming_parts: list[str] = []
     if upcoming:
         upcoming_parts.append("【法說會】\n" + _format_calendar_text(upcoming))
     if global_upcoming_text and global_upcoming_text != "(無)":
@@ -562,15 +559,15 @@ def auto_analyze_ticker(
     *,
     root: Path,
     name_hint: str = "",
-    client: Optional[GeminiClient] = None,
+    client: GeminiClient | None = None,
     model: str = DEFAULT_MODEL,
     force_refresh: bool = False,
     max_age_hours: int = DEFAULT_AGE_HOURS,
     enable_web_search: bool = True,
     enable_calendar: bool = True,
-    chips: Optional[ChipsContext] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Dict[str, Any]]:
+    chips: ChipsContext | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any] | None:
     """全自動為個股做 LLM 法說/情緒分析 + 反查。
 
     Returns:
@@ -603,7 +600,7 @@ def auto_analyze_ticker(
     materials = _gather_material_info(ticker, logger=log)
     news = _gather_news(ticker, name_hint=name_hint, root=root, logger=log)
     pipeline_text = _gather_pipeline_text(ticker, root=root)
-    calendar_data: Dict[str, List[Any]] = (
+    calendar_data: dict[str, list[Any]] = (
         _gather_calendar(ticker, root=root, logger=log)
         if enable_calendar else {
             "upcoming": [], "past": [],
@@ -627,8 +624,8 @@ def auto_analyze_ticker(
         global_recent_text=str(calendar_data.get("global_recent_text") or "(無)"),
     )
 
-    analysis: Optional[PresentationAnalysis] = None
-    payload: Dict[str, Any]
+    analysis: PresentationAnalysis | None = None
+    payload: dict[str, Any]
     if res is not None:
         data = res["data"]
         info = res["info"]
@@ -751,7 +748,7 @@ def auto_analyze_ticker(
     return payload
 
 
-def _source_sections_has_content(sections: Optional[Dict[str, Any]]) -> bool:
+def _source_sections_has_content(sections: dict[str, Any] | None) -> bool:
     """快取可能含空結構（truthy dict 但無實質內容）。"""
     if not sections:
         return False
@@ -769,8 +766,8 @@ def build_live_source_sections(
     ticker: str,
     root: Path,
     *,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any] | None:
     """不呼叫 LLM，從行事曆快取與 MOPS 重訊組合即時原始素材。"""
     log = logger or get_logger("auto-llm")
     try:
@@ -843,19 +840,19 @@ def resolve_llm_bundle(
     ticker: str,
     root: Path,
     *,
-    pipeline_analysis: Optional[Dict[str, Any]] = None,
+    pipeline_analysis: dict[str, Any] | None = None,
     auto_llm: bool = False,
     name_hint: str = "",
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, Any]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
     """合併 pipeline 摘要與 auto_llm 原始素材。
 
     - ``analysis``：優先 ``pipeline_analysis``，否則 auto_llm 快取 / 自動分析
     - ``source_sections``：來自 auto_llm 快取；僅在 **無** pipeline 摘要時才觸發自動分析
     """
     log = logger or get_logger("auto-llm")
-    analysis: Optional[Dict[str, Any]] = pipeline_analysis
-    source_sections: Dict[str, Any] = {}
+    analysis: dict[str, Any] | None = pipeline_analysis
+    source_sections: dict[str, Any] = {}
 
     cached_any = load_cached_auto_analysis(ticker, root, max_age_hours=999999)
     if cached_any:
@@ -892,8 +889,8 @@ def auto_research_ticker(
     days: int = 5,
     force_refresh: bool = True,
     refresh_calendar: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any] | None:
     """完整版自動研究：行事曆刷新 → 抓籌碼 → 自動分析 + 反查。
 
     比 ``auto_analyze_ticker`` 更主動：會強制刷新 + 抓籌碼面 + 強制跑反查。
@@ -909,7 +906,7 @@ def auto_research_ticker(
         except Exception:
             log.exception("行事曆更新失敗 (忽略)")
 
-    chips_ctx: Optional[ChipsContext] = None
+    chips_ctx: ChipsContext | None = None
     try:
         from bot.chips_fetcher import build_chip_summary, summary_to_chips_context
         summary = build_chip_summary(ticker, days=days, root=root, logger=log)
@@ -927,8 +924,8 @@ def auto_research_ticker(
     )
 
 
-def _parse_llm_tickers(args_tickers: List[str]) -> List[str]:
-    out: List[str] = []
+def _parse_llm_tickers(args_tickers: list[str]) -> list[str]:
+    out: list[str] = []
     for raw in args_tickers:
         for t in str(raw).split(","):
             t = t.strip()
@@ -937,7 +934,7 @@ def _parse_llm_tickers(args_tickers: List[str]) -> List[str]:
     return out
 
 
-def _load_watchlist_tickers(root: Path) -> List[str]:
+def _load_watchlist_tickers(root: Path) -> list[str]:
     try:
         items = wl.load(root).items
     except Exception:
@@ -962,7 +959,7 @@ def _name_hint_for(ticker: str, root: Path) -> str:
     return ""
 
 
-def _append_research_log(root: Path, entry: Dict[str, object]) -> None:
+def _append_research_log(root: Path, entry: dict[str, object]) -> None:
     log_path = root / "data" / "auto_llm" / "research_log.jsonl"
     mk_folder(str(log_path.parent))
     try:
@@ -975,14 +972,14 @@ def _append_research_log(root: Path, entry: Dict[str, object]) -> None:
 
 def run_llm_research_batch(
     *,
-    tickers: List[str],
+    tickers: list[str],
     root: Path,
     upcoming: bool = False,
     upcoming_days: int = 14,
     no_calendar: bool = False,
     refresh: bool = False,
     chip_days: int = 5,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> int:
     """對多檔個股跑 auto_research_ticker（供 stock-auto-research --llm-only 使用）。"""
     log = logger or get_logger("llm-research")

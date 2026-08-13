@@ -9,9 +9,10 @@ import datetime as dt
 import json
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.global_events_fetcher import fetch_all_global_events
@@ -27,7 +28,7 @@ DEFAULT_AGE_HOURS = 12
 class GlobalTechEvent:
     date: dt.date
     title: str
-    end_date: Optional[dt.date] = None
+    end_date: dt.date | None = None
     event_type: str = ""
     organizer: str = ""
     location: str = ""
@@ -37,7 +38,7 @@ class GlobalTechEvent:
     source_quality: str = ""
     url: str = ""
     canonical_key: str = ""
-    tickers: Tuple[str, ...] = field(default_factory=tuple)
+    tickers: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def effective_end_date(self) -> dt.date:
@@ -50,19 +51,19 @@ class GlobalTechEvent:
         return self.date <= end and self.effective_end_date >= start
 
 
-def _calendar_dir(root: Optional[Path]) -> Path:
+def _calendar_dir(root: Path | None) -> Path:
     return (root or Path.cwd()) / CALENDAR_DIR_REL
 
 
-def _events_path(root: Optional[Path]) -> Path:
+def _events_path(root: Path | None) -> Path:
     return _calendar_dir(root) / GLOBAL_EVENTS_FILE
 
 
-def _state_path(root: Optional[Path]) -> Path:
+def _state_path(root: Path | None) -> Path:
     return _calendar_dir(root) / STATE_FILE
 
 
-def _parse_date(value: Any) -> Optional[dt.date]:
+def _parse_date(value: Any) -> dt.date | None:
     if not value:
         return None
     try:
@@ -71,7 +72,7 @@ def _parse_date(value: Any) -> Optional[dt.date]:
         return None
 
 
-def _to_dict(e: GlobalTechEvent) -> Dict[str, Any]:
+def _to_dict(e: GlobalTechEvent) -> dict[str, Any]:
     return {
         "date": e.date.isoformat(),
         "end_date": e.effective_end_date.isoformat(),
@@ -90,7 +91,7 @@ def _to_dict(e: GlobalTechEvent) -> Dict[str, Any]:
     }
 
 
-def _from_dict(d: Dict[str, Any]) -> Optional[GlobalTechEvent]:
+def _from_dict(d: dict[str, Any]) -> GlobalTechEvent | None:
     day = _parse_date(d.get("date"))
     if not day:
         return None
@@ -113,7 +114,7 @@ def _from_dict(d: Dict[str, Any]) -> Optional[GlobalTechEvent]:
     )
 
 
-def _read_state(root: Optional[Path]) -> Dict[str, Any]:
+def _read_state(root: Path | None) -> dict[str, Any]:
     p = _state_path(root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -124,14 +125,14 @@ def _read_state(root: Optional[Path]) -> Dict[str, Any]:
         return {}
 
 
-def _write_state(state: Dict[str, Any], root: Optional[Path]) -> None:
+def _write_state(state: dict[str, Any], root: Path | None) -> None:
     p = _state_path(root)
     mk_folder(str(p.parent))
     p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     mirror_file_to_cloud(p, root=root)
 
 
-def _save_events(rows: List[Dict[str, Any]], root: Optional[Path]) -> Path:
+def _save_events(rows: list[dict[str, Any]], root: Path | None) -> Path:
     p = _events_path(root)
     mk_folder(str(p.parent))
     payload = {
@@ -144,7 +145,7 @@ def _save_events(rows: List[Dict[str, Any]], root: Optional[Path]) -> Path:
     return p
 
 
-def _load_rows(root: Optional[Path]) -> List[Dict[str, Any]]:
+def _load_rows(root: Path | None) -> list[dict[str, Any]]:
     p = _events_path(root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -160,12 +161,12 @@ def _load_rows(root: Optional[Path]) -> List[Dict[str, Any]]:
 
 
 def update_global_events(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
     force: bool = False,
     include_network: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, Any]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
     """重新抓取全球科技事件並寫入快取。"""
     log = logger or get_logger("global-events")
     try:
@@ -202,7 +203,7 @@ def update_global_events(
     return {"count": len(rows), "entries": rows}
 
 
-def _max_age_hours(override: Optional[int] = None) -> int:
+def _max_age_hours(override: int | None = None) -> int:
     if override is not None:
         return override
     raw = os.environ.get("GLOBAL_EVENTS_MAX_AGE_HOURS", "").strip()
@@ -215,10 +216,10 @@ def _max_age_hours(override: Optional[int] = None) -> int:
 
 
 def ensure_global_events_fresh(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
-    max_age_hours: Optional[int] = None,
-    logger: Optional[logging.Logger] = None,
+    max_age_hours: int | None = None,
+    logger: logging.Logger | None = None,
 ) -> bool:
     """過期才重抓。回傳 True=有重抓。"""
     log = logger or get_logger("global-events")
@@ -239,8 +240,8 @@ def ensure_global_events_fresh(
     return True
 
 
-def load_global_events(root: Optional[Path] = None) -> List[GlobalTechEvent]:
-    out: List[GlobalTechEvent] = []
+def load_global_events(root: Path | None = None) -> list[GlobalTechEvent]:
+    out: list[GlobalTechEvent] = []
     for row in _load_rows(root):
         if row.get("enabled") is False:
             continue
@@ -253,8 +254,8 @@ def load_global_events(root: Optional[Path] = None) -> List[GlobalTechEvent]:
 
 def upcoming_global_events(
     days: int = 14,
-    root: Optional[Path] = None,
-) -> List[GlobalTechEvent]:
+    root: Path | None = None,
+) -> list[GlobalTechEvent]:
     """未來 N 天內開始或進行中的事件 (含今日)。"""
     today = now_tw().date()
     end = today + dt.timedelta(days=days)
@@ -266,8 +267,8 @@ def upcoming_global_events(
 
 def recent_global_events(
     days: int = 2,
-    root: Optional[Path] = None,
-) -> List[GlobalTechEvent]:
+    root: Path | None = None,
+) -> list[GlobalTechEvent]:
     """過去 N 天內結束或仍在進行的事件 (含今日進行中)。"""
     today = now_tw().date()
     start = today - dt.timedelta(days=days)
@@ -279,8 +280,8 @@ def recent_global_events(
 
 def active_global_events_on(
     day: dt.date,
-    root: Optional[Path] = None,
-) -> List[GlobalTechEvent]:
+    root: Path | None = None,
+) -> list[GlobalTechEvent]:
     return [e for e in load_global_events(root) if e.occurs_on(day)]
 
 
@@ -289,20 +290,18 @@ def global_events_for_ticker(
     *,
     lookahead: int = 60,
     lookback: int = 2,
-    root: Optional[Path] = None,
-) -> Dict[str, List[GlobalTechEvent]]:
+    root: Path | None = None,
+) -> dict[str, list[GlobalTechEvent]]:
     """回傳個股相關的全球科技事件 (upcoming / recent)。"""
     today = now_tw().date()
-    upcoming: List[GlobalTechEvent] = []
-    recent: List[GlobalTechEvent] = []
+    upcoming: list[GlobalTechEvent] = []
+    recent: list[GlobalTechEvent] = []
     for e in load_global_events(root):
         if ticker not in e.tickers:
             continue
         if e.date >= today and (e.date - today).days <= lookahead:
             upcoming.append(e)
-        elif e.effective_end_date < today and (today - e.effective_end_date).days <= lookback:
-            recent.append(e)
-        elif e.occurs_on(today):
+        elif e.effective_end_date < today and (today - e.effective_end_date).days <= lookback or e.occurs_on(today):
             recent.append(e)
     upcoming.sort(key=lambda x: x.date)
     recent.sort(key=lambda x: x.date, reverse=True)
@@ -311,9 +310,9 @@ def global_events_for_ticker(
 
 def upcoming_tickers_from_global_events(
     days: int = 14,
-    root: Optional[Path] = None,
-) -> List[str]:
-    out: List[str] = []
+    root: Path | None = None,
+) -> list[str]:
+    out: list[str] = []
     for e in upcoming_global_events(days=days, root=root):
         for t in e.tickers:
             if t.isdigit() and t not in out:
@@ -326,7 +325,7 @@ def upcoming_tickers_from_global_events(
     return out
 
 
-def last_global_refresh_at(root: Optional[Path] = None) -> str:
+def last_global_refresh_at(root: Path | None = None) -> str:
     state = _read_state(root)
     ge = state.get("global_events") or {}
     return str(ge.get("last_refresh_at") or "")
@@ -335,7 +334,7 @@ def last_global_refresh_at(root: Optional[Path] = None) -> str:
 def format_global_event_text(events: Sequence[GlobalTechEvent]) -> str:
     if not events:
         return "(無)"
-    parts: List[str] = []
+    parts: list[str] = []
     for e in events:
         end = e.effective_end_date
         date_text = e.date.isoformat()

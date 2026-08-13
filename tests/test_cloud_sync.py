@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from typing import Any, Dict, List
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,7 +11,6 @@ from bot.cloud_sync import (
     CloudConfig,
     CloudSyncDependencyError,
     GoogleSheetSync,
-    TableSyncResult,
     _coerce_row,
     _max_updated_at,
 )
@@ -35,15 +32,15 @@ def sync(db: StockDB) -> GoogleSheetSync:
 class FakeWorksheet:
     """模擬 gspread worksheet 行為。"""
 
-    def __init__(self, values: List[List[str]] | None = None) -> None:
-        self.values: List[List[str]] = values or []
-        self.updated: List[tuple] = []
+    def __init__(self, values: list[list[str]] | None = None) -> None:
+        self.values: list[list[str]] = values or []
+        self.updated: list[tuple] = []
         self.cleared: bool = False
 
-    def get_all_values(self) -> List[List[str]]:
+    def get_all_values(self) -> list[list[str]]:
         return [list(r) for r in self.values]
 
-    def row_values(self, row: int) -> List[str]:
+    def row_values(self, row: int) -> list[str]:
         return list(self.values[row - 1]) if 0 < row <= len(self.values) else []
 
     def clear(self) -> None:
@@ -56,8 +53,8 @@ class FakeWorksheet:
             self.values = [list(r) for r in data]
 
 
-def _patch_get_or_create(sync: GoogleSheetSync, table_ws: Dict[str, FakeWorksheet]):
-    def get_or_create(table: str, columns: List[str]) -> FakeWorksheet:
+def _patch_get_or_create(sync: GoogleSheetSync, table_ws: dict[str, FakeWorksheet]):
+    def get_or_create(table: str, columns: list[str]) -> FakeWorksheet:
         ws = table_ws.setdefault(table, FakeWorksheet())
         if not ws.values:
             ws.values = [list(columns)]
@@ -69,7 +66,7 @@ class TestPush:
     def test_push_writes_all_rows(self, sync: GoogleSheetSync, db: StockDB) -> None:
         db.upsert_stock_info(StockInfo(symbol="2330", name="台積電"))
         db.upsert_stock_info(StockInfo(symbol="0050", name="元大 50"))
-        table_ws: Dict[str, FakeWorksheet] = {}
+        table_ws: dict[str, FakeWorksheet] = {}
         _patch_get_or_create(sync, table_ws)
 
         result = sync.push("stock_info")
@@ -209,7 +206,7 @@ class TestPriceHistorySync:
             PriceBar(symbol="2330", date="2026-05-21",
                      open=905, high=920, low=900, close=918, volume=22_000),
         ])
-        table_ws: Dict[str, FakeWorksheet] = {}
+        table_ws: dict[str, FakeWorksheet] = {}
         _patch_get_or_create(sync, table_ws)
 
         result = sync.push("price_history")
@@ -288,7 +285,7 @@ class TestLlmDailyReports:
                 updated_at="2026-06-03T18:00:00",
             )
         )
-        table_ws: Dict[str, FakeWorksheet] = {}
+        table_ws: dict[str, FakeWorksheet] = {}
         _patch_get_or_create(sync, table_ws)
 
         result = sync.push("llm_daily_reports")

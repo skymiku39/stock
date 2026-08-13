@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from bot.market_calendar import (
     CATEGORY_LABELS,
@@ -70,14 +70,14 @@ def test_parse_tpex_dividend_event() -> None:
 
 def test_fetch_ex_dividend_events_uses_both_sources(tmp_path: Path) -> None:
     class _Resp:
-        def __init__(self, rows: List[Dict[str, Any]]) -> None:
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
             self.rows = rows
             self.encoding = "utf-8"
 
         def raise_for_status(self) -> None:
             return None
 
-        def json(self) -> List[Dict[str, Any]]:
+        def json(self) -> list[dict[str, Any]]:
             return self.rows
 
     class _Session:

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, Optional
+from typing import TYPE_CHECKING
 
 from bot.entry_rules import in_entry_range, resolve_entry_range
 from bot.models import MarketTick
 from bot.strategy import BaseStrategy
-from bot.utils import get_logger, now_tw_time
+from bot.utils import now_tw_time
+
+if TYPE_CHECKING:
+    from bot.broker import SjBroker
+    from bot.config import Settings
+    from bot.market_source import TwsePublicMarketSource
 
 _BUY_REASON_FIELDS = {
     "進場": "enter",
@@ -30,10 +35,10 @@ class ConfigurableStrategy(BaseStrategy):
 
     def __init__(
         self,
-        broker: Optional["SjBroker"],
-        settings: "Settings",
-        market_source: Optional["TwsePublicMarketSource"] = None,
-        logger: Optional[logging.Logger] = None,
+        broker: SjBroker | None,
+        settings: Settings,
+        market_source: TwsePublicMarketSource | None = None,
+        logger: logging.Logger | None = None,
         publisher=None,
         *,
         wire_handlers: bool = True,
@@ -42,9 +47,9 @@ class ConfigurableStrategy(BaseStrategy):
             broker, settings, market_source, logger,
             publisher=publisher, wire_handlers=wire_handlers,
         )
-        self._last_watch_log: Dict[str, float] = {}
+        self._last_watch_log: dict[str, float] = {}
 
-    def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
+    def _on_prev_close_ready(self, refs: dict[str, float]) -> None:
         self.logger.info("前日收盤已載入: %s", refs)
 
     def _buy_field_for_reason(self, reason: str) -> str:

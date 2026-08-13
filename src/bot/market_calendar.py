@@ -12,15 +12,15 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
 
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, read_json_cache, write_json_cache
 from bot.utils import get_logger, now_tw
-
 
 CALENDAR_DIR_REL = "data/calendar"
 EXHIBITIONS_FILE = "exhibitions.json"
@@ -44,7 +44,7 @@ class MarketCalendarEvent:
     date: dt.date
     title: str
     category: str
-    end_date: Optional[dt.date] = None
+    end_date: dt.date | None = None
     time: str = ""
     ticker: str = ""
     company: str = ""
@@ -54,7 +54,7 @@ class MarketCalendarEvent:
     source: str = ""
     source_quality: str = ""
     url: str = ""
-    tickers: Tuple[str, ...] = field(default_factory=tuple)
+    tickers: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def category_label(self) -> str:
@@ -87,17 +87,17 @@ def build_market_calendar(
     start: dt.date,
     end: dt.date,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     include_conferences: bool = True,
     include_dividends: bool = True,
     include_exhibitions: bool = True,
     include_global_tech: bool = True,
     dividend_security_scope: str = "stock",
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[MarketCalendarEvent]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[MarketCalendarEvent]:
     log = logger or get_logger("market_calendar")
-    events: List[MarketCalendarEvent] = []
+    events: list[MarketCalendarEvent] = []
     if include_conferences:
         events.extend(load_conference_events(start, end, root=root))
     if include_dividends:
@@ -120,11 +120,11 @@ def load_conference_events(
     start: dt.date,
     end: dt.date,
     *,
-    root: Optional[Path] = None,
-) -> List[MarketCalendarEvent]:
+    root: Path | None = None,
+) -> list[MarketCalendarEvent]:
     from bot.conference_calendar import load_calendar
 
-    out: List[MarketCalendarEvent] = []
+    out: list[MarketCalendarEvent] = []
     for e in load_calendar(root=root):
         if not (start <= e.date <= end):
             continue
@@ -148,13 +148,13 @@ def fetch_ex_dividend_events(
     start: dt.date,
     end: dt.date,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = EX_DIVIDEND_CACHE_TTL,
     security_scope: str = "stock",
-    logger: Optional[logging.Logger] = None,
-) -> List[MarketCalendarEvent]:
+    logger: logging.Logger | None = None,
+) -> list[MarketCalendarEvent]:
     log = logger or get_logger("market_calendar")
     sess = session or requests.Session()
     twse_rows = _load_api_rows(
@@ -182,8 +182,8 @@ def fetch_ex_dividend_events(
     ]
 
 
-def parse_twse_dividend_events(rows: Iterable[Dict[str, Any]]) -> List[MarketCalendarEvent]:
-    out: List[MarketCalendarEvent] = []
+def parse_twse_dividend_events(rows: Iterable[dict[str, Any]]) -> list[MarketCalendarEvent]:
+    out: list[MarketCalendarEvent] = []
     for row in rows:
         day = parse_roc_date(row.get("Date"))
         if not day:
@@ -214,8 +214,8 @@ def parse_twse_dividend_events(rows: Iterable[Dict[str, Any]]) -> List[MarketCal
     return out
 
 
-def parse_tpex_dividend_events(rows: Iterable[Dict[str, Any]]) -> List[MarketCalendarEvent]:
-    out: List[MarketCalendarEvent] = []
+def parse_tpex_dividend_events(rows: Iterable[dict[str, Any]]) -> list[MarketCalendarEvent]:
+    out: list[MarketCalendarEvent] = []
     for row in rows:
         day = parse_roc_date(row.get("ExRrightsExDividendDate"))
         if not day:
@@ -250,10 +250,10 @@ def load_exhibition_events(
     start: dt.date,
     end: dt.date,
     *,
-    root: Optional[Path] = None,
-) -> List[MarketCalendarEvent]:
+    root: Path | None = None,
+) -> list[MarketCalendarEvent]:
     rows = _load_exhibition_rows(root=root)
-    out: List[MarketCalendarEvent] = []
+    out: list[MarketCalendarEvent] = []
     for row in rows:
         day = parse_iso_date(row.get("date"))
         if not day:
@@ -283,11 +283,11 @@ def load_global_tech_events(
     start: dt.date,
     end: dt.date,
     *,
-    root: Optional[Path] = None,
-) -> List[MarketCalendarEvent]:
+    root: Path | None = None,
+) -> list[MarketCalendarEvent]:
     from bot.global_event_calendar import load_global_events
 
-    out: List[MarketCalendarEvent] = []
+    out: list[MarketCalendarEvent] = []
     for e in load_global_events(root=root):
         if not e.overlaps(start, end):
             continue
@@ -308,9 +308,9 @@ def load_global_tech_events(
     return out
 
 
-def unique_events(events: Sequence[MarketCalendarEvent]) -> List[MarketCalendarEvent]:
-    seen: set[Tuple[Any, ...]] = set()
-    out: List[MarketCalendarEvent] = []
+def unique_events(events: Sequence[MarketCalendarEvent]) -> list[MarketCalendarEvent]:
+    seen: set[tuple[Any, ...]] = set()
+    out: list[MarketCalendarEvent] = []
     for e in events:
         key = (
             e.date,
@@ -327,7 +327,7 @@ def unique_events(events: Sequence[MarketCalendarEvent]) -> List[MarketCalendarE
     return out
 
 
-def sort_events(events: Sequence[MarketCalendarEvent]) -> List[MarketCalendarEvent]:
+def sort_events(events: Sequence[MarketCalendarEvent]) -> list[MarketCalendarEvent]:
     priority = {
         "conference": 0,
         "ex_right_dividend": 1,
@@ -339,7 +339,7 @@ def sort_events(events: Sequence[MarketCalendarEvent]) -> List[MarketCalendarEve
     return sorted(events, key=lambda e: (e.date, e.time or "99:99", priority.get(e.category, 9), e.ticker, e.title))
 
 
-def event_to_row(event: MarketCalendarEvent) -> Dict[str, Any]:
+def event_to_row(event: MarketCalendarEvent) -> dict[str, Any]:
     date_text = event.date.isoformat()
     if event.effective_end_date != event.date:
         date_text = f"{date_text} ~ {event.effective_end_date.isoformat()}"
@@ -357,7 +357,7 @@ def event_to_row(event: MarketCalendarEvent) -> Dict[str, Any]:
     }
 
 
-def parse_roc_date(value: Any) -> Optional[dt.date]:
+def parse_roc_date(value: Any) -> dt.date | None:
     if value is None:
         return None
     digits = re.sub(r"\D", "", str(value))
@@ -377,7 +377,7 @@ def parse_roc_date(value: Any) -> Optional[dt.date]:
         return None
 
 
-def parse_iso_date(value: Any) -> Optional[dt.date]:
+def parse_iso_date(value: Any) -> dt.date | None:
     if not value:
         return None
     try:
@@ -386,7 +386,7 @@ def parse_iso_date(value: Any) -> Optional[dt.date]:
         return None
 
 
-def _calendar_dir(root: Optional[Path]) -> Path:
+def _calendar_dir(root: Path | None) -> Path:
     return (root or Path.cwd()) / CALENDAR_DIR_REL
 
 
@@ -394,12 +394,12 @@ def _load_api_rows(
     url: str,
     cache_name: str,
     *,
-    root: Optional[Path],
+    root: Path | None,
     session: requests.Session,
     use_cache: bool,
     cache_ttl: int,
     logger: logging.Logger,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     cache_path = _calendar_dir(root) / cache_name
     if use_cache:
         cached = read_json_cache(cache_path, root=root, ttl_seconds=cache_ttl)
@@ -434,7 +434,7 @@ def _load_api_rows(
         return rows
 
 
-def _payload_rows(payload: Any) -> Optional[List[Dict[str, Any]]]:
+def _payload_rows(payload: Any) -> list[dict[str, Any]] | None:
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
     if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
@@ -442,7 +442,7 @@ def _payload_rows(payload: Any) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
-def _load_exhibition_rows(*, root: Optional[Path]) -> List[Dict[str, Any]]:
+def _load_exhibition_rows(*, root: Path | None) -> list[dict[str, Any]]:
     path = _calendar_dir(root) / EXHIBITIONS_FILE
     payload = read_json_cache(path, root=root, ttl_seconds=None)
     rows = _payload_rows(payload)
@@ -481,8 +481,8 @@ def _payload_schema_version(payload: Any) -> int:
 
 def _curated_exhibition_payload(
     *,
-    custom_rows: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+    custom_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     entries = [asdict(x) for x in _default_exhibition_seeds()]
     entries.extend(custom_rows or [])
     return {
@@ -496,9 +496,9 @@ def _curated_exhibition_payload(
     }
 
 
-def _clean_exhibition_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    seen: set[Tuple[str, str, str, str]] = set()
+def _clean_exhibition_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for row in rows:
         if not isinstance(row, dict) or row.get("enabled") is False:
             continue
@@ -528,14 +528,14 @@ _LEGACY_EXHIBITION_TITLES = {
 }
 
 
-def _looks_like_legacy_exhibitions(rows: Sequence[Dict[str, Any]]) -> bool:
+def _looks_like_legacy_exhibitions(rows: Sequence[dict[str, Any]]) -> bool:
     titles = {str(row.get("title") or "").strip() for row in rows}
     return len(titles & _LEGACY_EXHIBITION_TITLES) >= 4
 
 
-def _custom_exhibition_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _custom_exhibition_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     curated_titles = {seed.title for seed in _default_exhibition_seeds()}
-    custom: List[Dict[str, Any]] = []
+    custom: list[dict[str, Any]] = []
     for row in rows:
         title = str(row.get("title") or "").strip()
         if title in _LEGACY_EXHIBITION_TITLES or title in curated_titles:
@@ -558,10 +558,10 @@ class _ExhibitionSeed:
     source_quality: str = "official"
     verified_at: str = "2026-06-02"
     enabled: bool = True
-    tickers: Tuple[str, ...] = ()
+    tickers: tuple[str, ...] = ()
 
 
-def _default_exhibition_seeds() -> List[_ExhibitionSeed]:
+def _default_exhibition_seeds() -> list[_ExhibitionSeed]:
     return [
         _ExhibitionSeed(
             date="2026-05-05",
@@ -670,7 +670,7 @@ def _dividend_note(
     subscription: Any,
     subscription_price: Any,
 ) -> str:
-    parts: List[str] = []
+    parts: list[str] = []
     cash_text = _clean_value(cash)
     stock_text = _clean_value(stock)
     sub_text = _clean_value(subscription)

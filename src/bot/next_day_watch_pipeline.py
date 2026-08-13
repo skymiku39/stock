@@ -29,23 +29,27 @@ import datetime as dt
 import json
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.config import Settings
+from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.llm_analyzer import GeminiClient, gemini_call
+from bot.market_macro import fetch_macro_snapshot, macro_to_dict
+from bot.news_fetcher import fetch_today_news, news_to_compact_text
 from bot.pipeline_shared import (
     consensus_tickers_today as _consensus_tickers_today,
+)
+from bot.pipeline_shared import (
     macro_summary_text as _macro_summary_text,
+)
+from bot.pipeline_shared import (
     parse_json_blob as _parse_json,
 )
-from bot.llm_analyzer import GeminiClient, gemini_call
-from bot.market_macro import fetch_macro_snapshot, load_supply_chain, macro_to_dict
-from bot.news_fetcher import fetch_today_news, news_to_compact_text
-from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 REPORT_TYPE = "next_day_watch"
 
@@ -63,13 +67,13 @@ class NextDayCandidate:
     name: str = ""
 
     # 來源
-    sources: List[str] = field(default_factory=list)  # 'carry_theme','strong_carry','event','watchlist','etf'
+    sources: list[str] = field(default_factory=list)  # 'carry_theme','strong_carry','event','watchlist','etf'
     theme: str = ""
     theme_heat: int = 0
     entry_logic: str = ""           # 補漲 / 強勢承接 / 拉回承接 / 事件驅動
 
     # 今日盤後數據
-    today_close: Optional[float] = None
+    today_close: float | None = None
     today_pct_change: float = 0.0
     volume_ratio: float = 0.0       # 今日量 / 20日均量
     strength_score: float = 0.0     # 0-100，由 pct/量比/法人共同計算
@@ -85,7 +89,7 @@ class NextDayCandidate:
     event_side: str = ""            # 受惠 / 受壓 / 中性
 
     # 美股連動 (供參考)
-    adr_premium_pct: Optional[float] = None
+    adr_premium_pct: float | None = None
 
     # 綜合分
     next_day_score: float = 0.0
@@ -100,17 +104,17 @@ class NextDayReport:
     mode: str = "draft"             # draft | update
     market_tone: str = "neutral"
     overall_brief: str = ""
-    carry_themes: List[Dict[str, Any]] = field(default_factory=list)
-    event_focus: List[Dict[str, Any]] = field(default_factory=list)
-    strong_carry_llm: List[Dict[str, Any]] = field(default_factory=list)
-    rankings: List[NextDayCandidate] = field(default_factory=list)
-    macro_summary: Dict[str, Any] = field(default_factory=dict)
+    carry_themes: list[dict[str, Any]] = field(default_factory=list)
+    event_focus: list[dict[str, Any]] = field(default_factory=list)
+    strong_carry_llm: list[dict[str, Any]] = field(default_factory=list)
+    rankings: list[NextDayCandidate] = field(default_factory=list)
+    macro_summary: dict[str, Any] = field(default_factory=dict)
     catalyst_count: int = 0
     brief_md: str = ""
     brief_prompt_id: str = ""
     brief_prompt_version: str = ""
     duration_sec: float = 0.0
-    errors: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     output_dir: str = ""
 
 
@@ -130,7 +134,7 @@ def next_trading_day(asof: dt.date) -> dt.date:
     return cur
 
 
-def _to_int(x: Any) -> Optional[int]:
+def _to_int(x: Any) -> int | None:
     try:
         return int(float(x))
     except Exception:
@@ -142,7 +146,7 @@ def _to_int(x: Any) -> Optional[int]:
 # ----------------------------------------------------------------------
 
 
-def _watchlist_tickers(root: Path) -> List[Tuple[str, str]]:
+def _watchlist_tickers(root: Path) -> list[tuple[str, str]]:
     try:
         from bot import watchlist as wl_mod
         wl = wl_mod.load(root)
@@ -155,7 +159,7 @@ def _tomorrow_event_tickers(
     target_date: dt.date,
     root: Path,
     log: logging.Logger,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """從 MOPS 法說會、全球科技事件、國際展覽取明日與近期催化劑。"""
     return _catalyst_events(target_date, root, log)
 
@@ -164,10 +168,10 @@ def _catalyst_events(
     target_date: dt.date,
     root: Path,
     log: logging.Logger,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """整合法說會、全球科技事件、國際展覽催化劑。"""
-    out: List[Dict[str, Any]] = []
-    seen: set[Tuple[str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
 
     def _add(
         ticker: str,
@@ -212,11 +216,9 @@ def _catalyst_events(
         global_events = []
         if target_date >= today:
             global_events.extend(active_global_events_on(target_date, root=root))
-        if target_date == today + dt.timedelta(days=1):
+        if target_date == today + dt.timedelta(days=1) or target_date == today:
             global_events.extend(recent_global_events(days=1, root=root))
-        elif target_date == today:
-            global_events.extend(recent_global_events(days=1, root=root))
-        dedup_ge: Dict[str, Any] = {}
+        dedup_ge: dict[str, Any] = {}
         for ge in global_events:
             dedup_ge[ge.canonical_key or ge.title] = ge
         for ge in dedup_ge.values():
@@ -261,7 +263,7 @@ def _today_strength_for_ticker(
     project_root: Path,
     refresh: bool,
     log: logging.Logger,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """取單檔今日 K 線 / 量比 / RSI 摘要。
 
     回傳 ``None`` 表示資料不可用或非今日。
@@ -309,7 +311,7 @@ def _chip_for_ticker(
     today: dt.date,
     project_root: Path,
     log: logging.Logger,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """取近 3 日法人累計買賣超。"""
     try:
         from bot.chips_fetcher import build_chip_summary, summary_to_dict
@@ -373,9 +375,9 @@ def _scan_today_strength(
     refresh: bool,
     log: logging.Logger,
     max_tickers: int = 60,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """掃描候選池中每檔今日表現，回傳 ticker -> strength data。"""
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     pool = list(dict.fromkeys(tickers))[:max_tickers]
     log.info("掃描 %d 檔今日強勢度 (refresh=%s) ...", len(pool), refresh)
     for t in pool:
@@ -406,8 +408,8 @@ def _scan_today_strength(
 
 
 def _strong_carry_text(
-    strength_map: Dict[str, Dict[str, Any]],
-    name_map: Dict[str, str],
+    strength_map: dict[str, dict[str, Any]],
+    name_map: dict[str, str],
     top_n: int = 15,
 ) -> str:
     """挑強勢度前 N 名，輸出為 LLM 可讀文字。"""
@@ -417,7 +419,7 @@ def _strong_carry_text(
     )[:top_n]
     if not rows:
         return "(今日無顯著強勢承接候選)"
-    lines: List[str] = []
+    lines: list[str] = []
     for i, (t, d) in enumerate(rows, 1):
         nm = name_map.get(t, "")
         lines.append(
@@ -427,9 +429,9 @@ def _strong_carry_text(
     return "\n".join(lines)
 
 
-def _radar_candidate_tickers(report: NextDayReport) -> List[Tuple[str, str]]:
+def _radar_candidate_tickers(report: NextDayReport) -> list[tuple[str, str]]:
     """Collect tickers discovered by LLM radar output."""
-    out: List[Tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     def add(raw_ticker: Any, raw_name: Any = "") -> None:
@@ -453,10 +455,10 @@ def _radar_candidate_tickers(report: NextDayReport) -> List[Tuple[str, str]]:
     return out
 
 
-def _catalyst_text(events: List[Dict[str, Any]]) -> str:
+def _catalyst_text(events: list[dict[str, Any]]) -> str:
     if not events:
         return "(無已知法說/權息/全球科技事件)"
-    lines: List[str] = []
+    lines: list[str] = []
     for i, e in enumerate(events, 1):
         title = e.get("title") or ""
         title_part = f" ｜ {title}" if title else ""
@@ -475,16 +477,16 @@ def _catalyst_text(events: List[Dict[str, Any]]) -> str:
 def run_next_day_watch(
     *,
     mode: str = "draft",
-    project_root: Optional[Path] = None,
-    settings: Optional[Settings] = None,
+    project_root: Path | None = None,
+    settings: Settings | None = None,
     news_limit: int = 120,
     candidate_limit: int = 25,
     scan_limit: int = 60,
     force_refresh_news: bool = False,
     force_refresh_macro: bool = False,
-    force_refresh_technicals: Optional[bool] = None,
-    target_date: Optional[dt.date] = None,
-    logger: Optional[logging.Logger] = None,
+    force_refresh_technicals: bool | None = None,
+    target_date: dt.date | None = None,
+    logger: logging.Logger | None = None,
     publisher=None,
 ) -> NextDayReport:
     """跑明日當沖預備清單管線。
@@ -568,13 +570,13 @@ def run_next_day_watch(
     # ---- 4. 候選池 + 強勢度掃描 ----
     log.info("[4/7] 組候選池 + 掃描今日強勢度 ...")
     wl = _watchlist_tickers(root)
-    name_map: Dict[str, str] = {t: n for t, n in wl}
+    name_map: dict[str, str] = {t: n for t, n in wl}
     consensus = _consensus_tickers_today(root)
     event_tickers = [e["ticker"] for e in events]
     for e in events:
         name_map.setdefault(e["ticker"], e.get("name", ""))
 
-    initial_pool: List[str] = []
+    initial_pool: list[str] = []
     for src_list in (event_tickers, [t for t, _n in wl], consensus):
         for t in src_list:
             if t and t.isdigit() and t not in initial_pool:
@@ -596,7 +598,7 @@ def run_next_day_watch(
         model=settings.gemini_model,
         logger=log,
     )
-    radar_obj: Dict[str, Any] = {}
+    radar_obj: dict[str, Any] = {}
     if client.enabled:
         log.info("[5/7] LLM next_day_radar (%s) ...", mode)
         try:
@@ -656,7 +658,7 @@ def run_next_day_watch(
 
     # ---- 6. 合併候選股 + 算 next_day_score ----
     log.info("[6/7] 合併三大來源 + 排序 ...")
-    pool: Dict[str, NextDayCandidate] = {}
+    pool: dict[str, NextDayCandidate] = {}
 
     def _ensure(t: str, nm: str = "") -> NextDayCandidate:
         if t not in pool:
@@ -884,7 +886,7 @@ def _next_day_composite(row: NextDayCandidate) -> float:
 # ----------------------------------------------------------------------
 
 
-def _report_to_json(r: NextDayReport) -> Dict[str, Any]:
+def _report_to_json(r: NextDayReport) -> dict[str, Any]:
     return {
         "asof": r.asof,
         "target_date": r.target_date,
@@ -907,10 +909,10 @@ def _report_to_json(r: NextDayReport) -> Dict[str, Any]:
 
 
 def load_latest_next_day(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
     prefer_update: bool = True,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """讀最近一次 next_day_watch 報告。
 
     優先讀 ``report_update.json`` (凌晨更新版)，沒有再退 ``report.json``。
@@ -920,7 +922,7 @@ def load_latest_next_day(
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
         rows = db.list_llm_daily_reports(report_type=REPORT_TYPE, limit=200)
-        seen_dates: List[str] = []
+        seen_dates: list[str] = []
         for row in rows:
             if row.report_date not in seen_dates:
                 seen_dates.append(row.report_date)
@@ -955,12 +957,12 @@ def load_latest_next_day(
 
 
 def load_next_day_by_date(
-    root: Optional[Path] = None,
-    target_date: Optional[dt.date | str] = None,
+    root: Path | None = None,
+    target_date: dt.date | str | None = None,
     *,
     prefer_update: bool = True,
-    mode: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+    mode: str | None = None,
+) -> dict[str, Any] | None:
     """依 target_date 讀取明日當沖報告，不會觸發 LLM 生成。"""
     root_path = root or Path.cwd()
     if target_date is None:
@@ -1008,12 +1010,12 @@ def load_next_day_by_date(
 
 
 def load_next_day_by_asof(
-    root: Optional[Path] = None,
-    asof_date: Optional[dt.date | str] = None,
+    root: Path | None = None,
+    asof_date: dt.date | str | None = None,
     *,
     prefer_update: bool = True,
-    mode: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+    mode: str | None = None,
+) -> dict[str, Any] | None:
     """依產生日(asof)讀取明日當沖報告，不會觸發 LLM 生成。"""
     root_path = root or Path.cwd()
     if asof_date is None:
@@ -1027,7 +1029,7 @@ def load_next_day_by_asof(
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
         rows = db.list_llm_daily_reports(report_type=REPORT_TYPE, limit=500)
-        seen_dates: List[str] = []
+        seen_dates: list[str] = []
         for row in rows:
             if row.asof != date_iso:
                 continue
@@ -1063,7 +1065,7 @@ def load_next_day_by_asof(
     return None
 
 
-def _daily_report_row_to_payload(row: Any) -> Optional[Dict[str, Any]]:
+def _daily_report_row_to_payload(row: Any) -> dict[str, Any] | None:
     if row is None or not row.payload_json:
         return None
     try:
@@ -1080,7 +1082,7 @@ def _daily_report_row_to_payload(row: Any) -> Optional[Dict[str, Any]]:
 
 
 def _persist_report_json_to_db(
-    data: Dict[str, Any],
+    data: dict[str, Any],
     *,
     root: Path,
     log: logging.Logger,
@@ -1113,9 +1115,9 @@ def _persist_report_json_to_db(
 __all__ = [
     "NextDayCandidate",
     "NextDayReport",
+    "load_latest_next_day",
     "load_next_day_by_asof",
     "load_next_day_by_date",
-    "load_latest_next_day",
     "next_trading_day",
     "run_next_day_watch",
 ]

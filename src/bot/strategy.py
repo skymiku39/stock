@@ -22,7 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING
 
 from shioaji import Exchange, TickSTKv1
 from shioaji.constant import Action, OrderState
@@ -39,7 +39,15 @@ from bot.events import (
     wire_trading_handlers,
 )
 from bot.events.protocols import EventPublisher
-from bot.models import MarketTick, OrderRecord, PositionInfo, QtyUnit, SignalEvent, qty_multiplier
+from bot.intraday_llm_advisor import IntradayLlmAdvisor
+from bot.llm_gate import LlmGate
+from bot.models import (
+    MarketTick,
+    OrderRecord,
+    PositionInfo,
+    QtyUnit,
+    SignalEvent,
+)
 from bot.notifier import TelegramNotifier
 from bot.ownership import (
     BOT_OWNER_TAG,
@@ -48,8 +56,6 @@ from bot.ownership import (
     is_bot_order_field,
     is_bot_owner,
 )
-from bot.intraday_llm_advisor import IntradayLlmAdvisor
-from bot.llm_gate import LlmGate
 from bot.recorder import TradeRecorder
 from bot.risk_guard import EntryKind, RiskGuard
 from bot.signal_recorder import SignalRecorder
@@ -83,11 +89,11 @@ class BaseStrategy(ABC):
 
     def __init__(
         self,
-        broker: Optional[SjBroker],
+        broker: SjBroker | None,
         settings: Settings,
-        market_source: Optional[TwsePublicMarketSource] = None,
-        logger: Optional[logging.Logger] = None,
-        publisher: Optional[EventPublisher] = None,
+        market_source: TwsePublicMarketSource | None = None,
+        logger: logging.Logger | None = None,
+        publisher: EventPublisher | None = None,
         *,
         wire_handlers: bool = True,
     ):
@@ -98,43 +104,43 @@ class BaseStrategy(ABC):
         self._publisher: EventPublisher = publisher or get_event_bus()
 
         # 部位管理
-        self.positions: Dict[str, PositionInfo] = {}
+        self.positions: dict[str, PositionInfo] = {}
 
         # 委託追蹤: symbol -> list of pending order_no (trade 模式)
-        self.pending_orders: Dict[str, List[str]] = defaultdict(list)
-        self._pending_lock: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+        self.pending_orders: dict[str, list[str]] = defaultdict(list)
+        self._pending_lock: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
         # 已送出進場/出場的 order record
-        self.order_records: Dict[str, OrderRecord] = {}
+        self.order_records: dict[str, OrderRecord] = {}
 
         # 已送出進場單的 symbol (避免重複送單；平倉後清除)
-        self._enter_placed: Set[str] = set()
+        self._enter_placed: set[str] = set()
 
         # 單檔最近一次賣出（回落買回用）
-        self._symbol_exits: Dict[str, SymbolExitRecord] = {}
+        self._symbol_exits: dict[str, SymbolExitRecord] = {}
 
         # 持倉期間淨利高點 %（移動停利用）
-        self._peak_net_pnl: Dict[str, float] = {}
+        self._peak_net_pnl: dict[str, float] = {}
 
         # 收盤全出場標記
-        self._closure_placed: Set[str] = set()
-        self._closure_pending: Set[str] = set()
-        self._closure_blocked: Set[str] = set()
+        self._closure_placed: set[str] = set()
+        self._closure_pending: set[str] = set()
+        self._closure_blocked: set[str] = set()
 
         # 委託 metadata: ordno -> {symbol, action, custom_field}
-        self._order_meta: Dict[str, dict] = {}
+        self._order_meta: dict[str, dict] = {}
 
         # Tick 佇列: (exchange, tick) -- trade/watch 模式
         self._tick_queue: Queue = Queue(maxsize=50_000)
 
         # 進場單位追蹤 (整張 / 零股)
-        self._entry_units: Dict[str, QtyUnit] = {}
+        self._entry_units: dict[str, QtyUnit] = {}
 
         # 前日收盤 (所有模式共用)
-        self._prev_close: Dict[str, float] = {}
+        self._prev_close: dict[str, float] = {}
 
         # 最新成交價追蹤 (虛擬出場用)
-        self._last_price: Dict[str, float] = {}
+        self._last_price: dict[str, float] = {}
 
         # 交易紀錄 (trade 模式)
         self.recorder = TradeRecorder()
@@ -182,7 +188,7 @@ class BaseStrategy(ABC):
         # 四源監控池
         self._watch_pool_lock = threading.Lock()
         self._last_watch_pool_refresh = 0.0
-        self._watch_subscribed: Set[str] = set()
+        self._watch_subscribed: set[str] = set()
 
     # ------------------------------------------------------------------
     # 模式判斷
@@ -197,8 +203,8 @@ class BaseStrategy(ABC):
 
     def _run_startup_safety_and_restore(self) -> None:
         """啟動對帳 + 恢復持久化資金與 AI 部位。"""
-        from bot.position_safety import run_startup_safety_checks
         from bot.portfolio import load_bot_portfolio
+        from bot.position_safety import run_startup_safety_checks
 
         report = run_startup_safety_checks(
             self.settings,
@@ -294,7 +300,7 @@ class BaseStrategy(ABC):
         self._fetch_prev_close_shioaji()
         self._subscribe_symbols()
 
-        threads: List[threading.Thread] = [
+        threads: list[threading.Thread] = [
             threading.Thread(
                 target=self._tick_consumer, daemon=True, name="tick-consumer",
             ),
@@ -458,7 +464,7 @@ class BaseStrategy(ABC):
         self._prev_close.update(refs)
         self._on_prev_close_ready(refs)
 
-    def _on_prev_close_ready(self, refs: Dict[str, float]) -> None:
+    def _on_prev_close_ready(self, refs: dict[str, float]) -> None:
         """子類別可覆寫以接收前日收盤價。預設不做事。"""
 
     # ------------------------------------------------------------------
@@ -490,7 +496,7 @@ class BaseStrategy(ABC):
         *,
         reason: str,
         refresh_live_quotes: bool = False,
-    ) -> List[str]:
+    ) -> list[str]:
         from bot.watch_symbol_pool import merge_watch_symbols_into_settings
 
         if not getattr(self.settings, "symbols_auto_merge", True):
@@ -507,7 +513,7 @@ class BaseStrategy(ABC):
             self._ensure_position_symbols_monitored()
             return [s for s in self.settings.symbols if s not in before]
 
-    def _sync_watch_subscriptions(self, added: List[str]) -> None:
+    def _sync_watch_subscriptions(self, added: list[str]) -> None:
         if not added or self.broker is None:
             return
         need = [s for s in added if s not in self._watch_subscribed]
@@ -744,7 +750,7 @@ class BaseStrategy(ABC):
         quantity: int,
         reason: str,
         *,
-        unit: Optional[QtyUnit] = None,
+        unit: QtyUnit | None = None,
         llm_gate: str = "",
     ) -> None:
         pos = self.positions.get(symbol)
@@ -946,7 +952,7 @@ class BaseStrategy(ABC):
         quantity: int,
         custom_field: str = "enter",
         *,
-        pct_chg: Optional[float] = None,
+        pct_chg: float | None = None,
         unit: QtyUnit = "lot",
         llm_gate: str = "",
     ) -> bool:
@@ -1117,14 +1123,14 @@ class BaseStrategy(ABC):
             self._closure_pending.add(symbol)
         return True
 
-    def _sell_profit_target(self, symbol: str) -> Optional[float]:
+    def _sell_profit_target(self, symbol: str) -> float | None:
         targets = getattr(self.settings, "sell_profit_targets", {}) or {}
         target = targets.get(symbol)
         if target is None:
             return None
         return float(target)
 
-    def _position_pnl_pct(self, symbol: str, price: float) -> Optional[float]:
+    def _position_pnl_pct(self, symbol: str, price: float) -> float | None:
         pos = self.positions.get(symbol)
         if pos is None or pos.avg_price <= 0 or price <= 0:
             return None

@@ -19,11 +19,10 @@
 from __future__ import annotations
 
 import dataclasses
-import datetime as dt
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.active_etf import (
     HoldingsSnapshot,
@@ -55,6 +54,8 @@ from bot.etf_consensus import (
 from bot.fundamentals_fetcher import (
     FundamentalSnapshot,
     build_fundamental_snapshot,
+)
+from bot.fundamentals_fetcher import (
     snapshot_to_dict as fundamental_to_dict,
 )
 from bot.portfolio import load_portfolio
@@ -62,10 +63,11 @@ from bot.quarterly import summarize_quarterly
 from bot.technicals import (
     TechnicalSnapshot,
     build_technical_snapshot,
+)
+from bot.technicals import (
     snapshot_to_dict as technical_to_dict,
 )
 from bot.utils import get_logger, now_tw
-
 
 # ----------------------------------------------------------------------
 # 模型
@@ -76,10 +78,10 @@ from bot.utils import get_logger, now_tw
 class HistoryItem:
     run_id: str
     started_at: str
-    llm_sentiment: Optional[str] = None
-    llm_score: Optional[float] = None
-    logic_verdict: Optional[str] = None
-    foreign_net: Optional[float] = None
+    llm_sentiment: str | None = None
+    llm_score: float | None = None
+    logic_verdict: str | None = None
+    foreign_net: float | None = None
     note: str = ""
 
 
@@ -108,48 +110,48 @@ class TickerSnapshot:
     volume: float = 0.0
 
     # 籌碼
-    chip_summary: Optional[Dict[str, Any]] = None       # summary_to_dict 輸出
-    chip_summary_obj: Optional[ChipSummary] = None      # 原始物件 (圖表用)
+    chip_summary: dict[str, Any] | None = None       # summary_to_dict 輸出
+    chip_summary_obj: ChipSummary | None = None      # 原始物件 (圖表用)
 
     # ETF
-    consensus: Optional[Dict[str, Any]] = None
-    new_build_signal: Optional[Dict[str, Any]] = None
-    add_signal: Optional[Dict[str, Any]] = None
-    held_by_etfs: List[Dict[str, Any]] = field(default_factory=list)
+    consensus: dict[str, Any] | None = None
+    new_build_signal: dict[str, Any] | None = None
+    add_signal: dict[str, Any] | None = None
+    held_by_etfs: list[dict[str, Any]] = field(default_factory=list)
 
     # LLM
-    llm_analysis: Optional[Dict[str, Any]] = None
-    llm_source_sections: Optional[Dict[str, Any]] = None
-    logic_check: Optional[Dict[str, Any]] = None
+    llm_analysis: dict[str, Any] | None = None
+    llm_source_sections: dict[str, Any] | None = None
+    logic_check: dict[str, Any] | None = None
 
     # 原始資料 / 譜系
     pipeline_run_id: str = ""
     pipeline_run_dir: str = ""
-    source_files: List[Dict[str, str]] = field(default_factory=list)
+    source_files: list[dict[str, str]] = field(default_factory=list)
 
     # 歷史
-    history: List[HistoryItem] = field(default_factory=list)
+    history: list[HistoryItem] = field(default_factory=list)
 
     # 交易/持倉
-    trades: List[TradeRecord] = field(default_factory=list)
+    trades: list[TradeRecord] = field(default_factory=list)
     position_qty: float = 0.0
     position_avg_cost: float = 0.0
-    unrealized_pl: Optional[float] = None
+    unrealized_pl: float | None = None
 
     # 基本面 / 技術面 / 集保 / 季報 (3D 視角)
-    fundamentals: Optional[FundamentalSnapshot] = None
-    technicals: Optional[TechnicalSnapshot] = None
-    distribution: Optional[DistributionWeekly] = None
-    distribution_trend: Optional[DistributionTrend] = None
+    fundamentals: FundamentalSnapshot | None = None
+    technicals: TechnicalSnapshot | None = None
+    distribution: DistributionWeekly | None = None
+    distribution_trend: DistributionTrend | None = None
     distribution_label: str = ""
     distribution_detail: str = ""
     distribution_score: float = 50.0
-    quarterly_view: Dict[str, Any] = field(default_factory=dict)
+    quarterly_view: dict[str, Any] = field(default_factory=dict)
 
     # 美股 / 跨市場連動
-    macro_snapshot: Optional[Dict[str, Any]] = None  # market_macro.macro_to_dict()
-    us_related: List[Dict[str, Any]] = field(default_factory=list)  # 對應美股客戶/夥伴
-    adr_premium: Optional[Dict[str, Any]] = None     # 若本身有 ADR (例如 2330)
+    macro_snapshot: dict[str, Any] | None = None  # market_macro.macro_to_dict()
+    us_related: list[dict[str, Any]] = field(default_factory=list)  # 對應美股客戶/夥伴
+    adr_premium: dict[str, Any] | None = None     # 若本身有 ADR (例如 2330)
 
 
 # ----------------------------------------------------------------------
@@ -191,8 +193,8 @@ def build_snapshot(
     # ---- 1. ETF 共識 ----
     etfs = load_active_etfs(project_root)
     etf_meta = {e.symbol: e for e in etfs}
-    latest_holds: Dict[str, HoldingsSnapshot] = {}
-    prev_holds: Dict[str, HoldingsSnapshot] = {}
+    latest_holds: dict[str, HoldingsSnapshot] = {}
+    prev_holds: dict[str, HoldingsSnapshot] = {}
     for e in etfs:
         dates = list_holdings_dates(e.symbol, project_root)
         if not dates:
@@ -205,7 +207,7 @@ def build_snapshot(
             if p:
                 prev_holds[e.symbol] = p
 
-    consensus_list: List[ConsensusHolding] = build_consensus(
+    consensus_list: list[ConsensusHolding] = build_consensus(
         latest_holds, etf_meta, min_etf_count=1,
     )
     match = next((c for c in consensus_list if c.ticker == ticker), None)
@@ -244,7 +246,7 @@ def build_snapshot(
     # ---- 2. Pipeline 歷史 ----
     pipeline_dir = project_root / "data" / "pipeline_runs"
     runs = _list_runs(pipeline_dir)
-    history: List[HistoryItem] = []
+    history: list[HistoryItem] = []
     for run_path in runs:
         run_data = _load_run(run_path)
         if not run_data:
@@ -333,7 +335,7 @@ def build_snapshot(
                 log.exception("[%s] 自動抓籌碼面失敗", ticker)
 
     # ---- 4. 來源檔案清單 ----
-    sources: List[Dict[str, str]] = []
+    sources: list[dict[str, str]] = []
     # 4-a ETF 原始抓取頁
     etf_raw_dir = project_root / "data" / "etf_holdings_raw"
     if etf_raw_dir.exists():
@@ -442,7 +444,7 @@ def build_snapshot(
     # TDCC 每週公布、資料免費；無快取時自動抓一次，避免使用者誤以為「無資料」。
     try:
         trend = load_distribution_trend(ticker, root=project_root)
-        cur: Optional[DistributionWeekly] = None
+        cur: DistributionWeekly | None = None
         need_refresh = refresh_distribution or (auto_fill_missing and not trend.weeks)
         if need_refresh:
             try:
@@ -543,7 +545,7 @@ def build_snapshot(
 # ----------------------------------------------------------------------
 
 
-def _signal_to_dict(s: FollowSignal) -> Dict[str, Any]:
+def _signal_to_dict(s: FollowSignal) -> dict[str, Any]:
     return {
         "ticker": s.ticker, "name": s.name,
         "signal_type": s.signal_type, "etf_count": s.etf_count,
@@ -552,10 +554,10 @@ def _signal_to_dict(s: FollowSignal) -> Dict[str, Any]:
     }
 
 
-def _list_runs(pipeline_dir: Path) -> List[Path]:
+def _list_runs(pipeline_dir: Path) -> list[Path]:
     if not pipeline_dir.exists():
         return []
-    out: List[Path] = []
+    out: list[Path] = []
     for d in pipeline_dir.iterdir():
         if d.is_dir() and (d / "run.json").exists():
             out.append(d / "run.json")
@@ -563,7 +565,7 @@ def _list_runs(pipeline_dir: Path) -> List[Path]:
     return out
 
 
-def _load_run(p: Path) -> Optional[Dict[str, Any]]:
+def _load_run(p: Path) -> dict[str, Any] | None:
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
@@ -572,7 +574,7 @@ def _load_run(p: Path) -> Optional[Dict[str, Any]]:
 
 def _scan_trades_for(
     ticker: str, root: Path,
-) -> tuple[List[TradeRecord], float, float]:
+) -> tuple[list[TradeRecord], float, float]:
     """Scan local trade CSV files and estimate the open position with FIFO lots."""
     all_trades, positions = load_portfolio(root)
     trades = [
@@ -592,8 +594,8 @@ def _scan_trades_for(
     return trades, pos.qty, round(pos.avg_cost, 2)
 
 
-def snapshot_to_dict(s: TickerSnapshot) -> Dict[str, Any]:
-    distribution_out: Optional[Dict[str, Any]] = None
+def snapshot_to_dict(s: TickerSnapshot) -> dict[str, Any]:
+    distribution_out: dict[str, Any] | None = None
     if s.distribution is not None:
         try:
             distribution_out = dataclasses.asdict(s.distribution)

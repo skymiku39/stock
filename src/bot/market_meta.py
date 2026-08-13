@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
 
 import requests
 
@@ -33,10 +32,10 @@ URL_TWSE_CODES = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_AL
 URL_TPEX_CODES = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
 
 # 程序內快取，避免同一次執行重複讀檔/打網路
-_MARKET_MAP: Optional[Dict[str, str]] = None
+_MARKET_MAP: dict[str, str] | None = None
 
 
-def _map_path(root: Optional[Path]) -> Path:
+def _map_path(root: Path | None) -> Path:
     base = (root or Path.cwd()) / "data" / "meta"
     mk_folder(str(base))
     return base / "market_map.json"
@@ -55,13 +54,13 @@ def _session() -> requests.Session:
 
 def _build_market_map(
     *,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, str]:
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, str]:
     """從 TWSE / TPEx 全市場清單建立 {代號: 市場別}。"""
     log = logger or get_logger("market-meta")
     sess = session or _session()
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     # 上市
     try:
         r = sess.get(URL_TWSE_CODES, timeout=20)
@@ -87,11 +86,11 @@ def _build_market_map(
 
 def load_market_map(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     force_refresh: bool = False,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, str]:
+    logger: logging.Logger | None = None,
+) -> dict[str, str]:
     """載入 (或建立) 市場別對照表，每日快取一次。"""
     global _MARKET_MAP
     if _MARKET_MAP is not None and not force_refresh:
@@ -134,9 +133,9 @@ def load_market_map(
 def detect_market(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> str:
     """回傳個股市場別：'twse'(上市) / 'tpex'(上櫃) / 'unknown'。"""
     ticker = str(ticker).strip()

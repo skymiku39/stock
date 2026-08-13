@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from bot.market_macro import MacroSnapshot, fetch_macro_snapshot
 from bot import ticker_view as tv
+from bot.market_macro import MacroSnapshot, fetch_macro_snapshot
 
 
 def test_macro_cache_only_miss_does_not_fetch(monkeypatch, tmp_path: Path) -> None:

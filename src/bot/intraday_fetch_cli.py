@@ -19,7 +19,6 @@ import argparse
 import datetime as dt
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.config import Settings
 from bot.intraday_history import (
@@ -37,9 +36,9 @@ def _parse_date(text: str) -> dt.date:
 
 def _resolve_range(
     *,
-    start: Optional[str],
-    end: Optional[str],
-    days: Optional[int],
+    start: str | None,
+    end: str | None,
+    days: int | None,
 ) -> tuple[dt.date, dt.date]:
     today = now_tw().date()
     if days is not None and days > 0:
@@ -60,7 +59,7 @@ def _resolve_range(
     return start_d, end_d
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="從 Shioaji 補齊分 K / Tick 歷史至 SQLite",
     )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
 
 import requests
 
@@ -20,7 +19,7 @@ class TelegramNotifier:
         self,
         bot_token: str = "",
         chat_id: str = "",
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ):
         self.bot_token = bot_token
         self.chat_id = chat_id

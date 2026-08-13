@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.app_bootstrap import get_or_create_bus
 from bot.auto_llm import run_llm_research_batch
@@ -28,14 +27,14 @@ from bot.data_pipeline import (
 from bot.utils import get_logger
 
 
-def _read_pdf_text(path: Path) -> Optional[str]:
+def _read_pdf_text(path: Path) -> str | None:
     try:
         from pypdf import PdfReader  # type: ignore
     except Exception:
         return None
     try:
         reader = PdfReader(str(path))
-        parts: List[str] = []
+        parts: list[str] = []
         for p in reader.pages[:80]:
             try:
                 parts.append(p.extract_text() or "")
@@ -46,7 +45,7 @@ def _read_pdf_text(path: Path) -> Optional[str]:
         return None
 
 
-def _read_text_or_pdf(path: Path) -> Optional[str]:
+def _read_text_or_pdf(path: Path) -> str | None:
     if not path.exists():
         return None
     if path.suffix.lower() == ".pdf":
@@ -57,7 +56,7 @@ def _read_text_or_pdf(path: Path) -> Optional[str]:
         return path.read_bytes().decode("utf-8", errors="replace")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-auto-research",
         description="自動化股票研究管線 (ETF + 籌碼 + 法說 + LLM 每日簡報)",
@@ -135,7 +134,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     settings = Settings()
 
-    presentations: List[PresentationInput] = []
+    presentations: list[PresentationInput] = []
     for spec in args.pdf:
         if "=" not in spec:
             logger.warning("--pdf 參數需為 <ticker>=<path> 格式，已略過: %s", spec)

@@ -24,7 +24,7 @@ import logging
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
@@ -37,7 +37,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ----------------------------------------------------------------------
 
 # 美股 / 全球指數
-DEFAULT_INDICES: List[Tuple[str, str, str]] = [
+DEFAULT_INDICES: list[tuple[str, str, str]] = [
     # (symbol, name, group)
     ("^GSPC", "S&P 500", "us_index"),
     ("^IXIC", "NASDAQ Composite", "us_index"),
@@ -49,7 +49,7 @@ DEFAULT_INDICES: List[Tuple[str, str, str]] = [
 
 # 重要美股 / ADR
 # (symbol, name, role, parent_tw_ticker)
-DEFAULT_STOCKS: List[Tuple[str, str, str, str]] = [
+DEFAULT_STOCKS: list[tuple[str, str, str, str]] = [
     ("NVDA", "NVIDIA", "AI/GPU 龍頭", ""),
     ("AMD", "AMD", "AI/CPU/GPU", ""),
     ("AAPL", "Apple", "消費電子龍頭", ""),
@@ -68,7 +68,7 @@ DEFAULT_STOCKS: List[Tuple[str, str, str, str]] = [
 ]
 
 # ADR 兌母股比例：1 張 ADR 對應幾股母股 (台股 1 張 = 1000 股)
-ADR_RATIOS: Dict[str, float] = {
+ADR_RATIOS: dict[str, float] = {
     "TSM": 5.0,   # 1 ADR = 5 shares of 2330
     "UMC": 5.0,
     "ASX": 2.0,
@@ -143,19 +143,19 @@ class FuturesBasis:
 class MacroSnapshot:
     fetched_at: str
     asof_date: str            # 多半是抓取當日 (美股結算可能落後一日)
-    indices: Dict[str, IndexQuote] = field(default_factory=dict)
-    stocks: Dict[str, StockQuote] = field(default_factory=dict)
-    adr_premiums: List[AdrPremium] = field(default_factory=list)
+    indices: dict[str, IndexQuote] = field(default_factory=dict)
+    stocks: dict[str, StockQuote] = field(default_factory=dict)
+    adr_premiums: list[AdrPremium] = field(default_factory=list)
     usdtwd: float = 0.0
-    notes: List[str] = field(default_factory=list)
-    futures_basis: Optional[FuturesBasis] = None
+    notes: list[str] = field(default_factory=list)
+    futures_basis: FuturesBasis | None = None
     cached: bool = False
 
     # ---- 便利方法 ----
-    def index(self, sym: str) -> Optional[IndexQuote]:
+    def index(self, sym: str) -> IndexQuote | None:
         return self.indices.get(sym)
 
-    def stock(self, sym: str) -> Optional[StockQuote]:
+    def stock(self, sym: str) -> StockQuote | None:
         return self.stocks.get(sym)
 
 
@@ -172,7 +172,7 @@ def _import_yf():
         return None
 
 
-def _safe_quote(yf_module: Any, symbol: str, logger: logging.Logger) -> Optional[Dict[str, Any]]:
+def _safe_quote(yf_module: Any, symbol: str, logger: logging.Logger) -> dict[str, Any] | None:
     try:
         t = yf_module.Ticker(symbol)
         hist = t.history(period="5d", auto_adjust=False)
@@ -213,11 +213,11 @@ URL_TWSE_STOCK_DAY_AVG = (
 )
 
 # 程序內快取：避免每檔 ADR 都重打一次全市場列表。
-_TW_CLOSE_CACHE: Dict[str, float] = {}
+_TW_CLOSE_CACHE: dict[str, float] = {}
 _TW_CLOSE_CACHE_LOADED = False
 
 
-def _load_twse_close_map(logger: logging.Logger) -> Dict[str, float]:
+def _load_twse_close_map(logger: logging.Logger) -> dict[str, float]:
     """抓 TWSE 全市場收盤價對照表 {ticker: close}，程序內只抓一次。"""
     global _TW_CLOSE_CACHE_LOADED
     if _TW_CLOSE_CACHE_LOADED:
@@ -248,7 +248,7 @@ def _load_twse_close_map(logger: logging.Logger) -> Dict[str, float]:
     return _TW_CLOSE_CACHE
 
 
-def _fetch_tw_close(ticker: str, logger: logging.Logger) -> Optional[float]:
+def _fetch_tw_close(ticker: str, logger: logging.Logger) -> float | None:
     """先試 yfinance (例：2330.TW)；失敗時改用 TWSE OpenAPI 收盤價。"""
     yf = _import_yf()
     if yf is not None:
@@ -285,8 +285,8 @@ def _to_float_loose(x: Any) -> float:
 def fetch_tx_futures_basis(
     spot_price: float,
     *,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[FuturesBasis]:
+    logger: logging.Logger | None = None,
+) -> FuturesBasis | None:
     """抓台指期 (TX) 近月行情並計算與現貨 (加權指) 的正逆價差。
 
     Args:
@@ -314,7 +314,7 @@ def fetch_tx_futures_basis(
         return None
 
     # 只取大台指 TX 的「月合約」(ContractMonth(Week) 為 6 位數，排除週合約 W)
-    tx_rows: List[Dict[str, Any]] = []
+    tx_rows: list[dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict):
             continue
@@ -362,11 +362,11 @@ def fetch_tx_futures_basis(
 # ----------------------------------------------------------------------
 
 
-def _cache_path(date: dt.date, root: Optional[Path]) -> Path:
+def _cache_path(date: dt.date, root: Path | None) -> Path:
     return (root or Path.cwd()) / "data" / "macro" / f"macro_{date.isoformat()}.json"
 
 
-def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[MacroSnapshot]:
+def _load_cache(date: dt.date, root: Path | None) -> MacroSnapshot | None:
     p = _cache_path(date, root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -397,7 +397,7 @@ def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[MacroSnapshot]:
         return None
 
 
-def _save_cache(snap: MacroSnapshot, root: Optional[Path]) -> Path:
+def _save_cache(snap: MacroSnapshot, root: Path | None) -> Path:
     asof = dt.date.fromisoformat(snap.asof_date) if snap.asof_date else now_tw().date()
     p = _cache_path(asof, root)
     mk_folder(str(p.parent))
@@ -423,11 +423,11 @@ def _save_cache(snap: MacroSnapshot, root: Optional[Path]) -> Path:
 
 def fetch_macro_snapshot(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     force_refresh: bool = False,
     use_cache: bool = True,
     cache_only: bool = False,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> MacroSnapshot:
     """抓 (或回傳快取的) 美股 + 加權 + ADR 溢價總覽。
 
@@ -452,7 +452,7 @@ def fetch_macro_snapshot(
             )
 
     yf = _import_yf()
-    notes: List[str] = []
+    notes: list[str] = []
     if yf is None:
         notes.append("yfinance 未安裝，回傳空資料")
         return MacroSnapshot(
@@ -555,7 +555,7 @@ def _tw_name_for(ticker: str, adr: str) -> str:
 # ----------------------------------------------------------------------
 
 
-def macro_to_dict(s: MacroSnapshot) -> Dict[str, Any]:
+def macro_to_dict(s: MacroSnapshot) -> dict[str, Any]:
     return {
         "fetched_at": s.fetched_at,
         "asof_date": s.asof_date,
@@ -569,7 +569,7 @@ def macro_to_dict(s: MacroSnapshot) -> Dict[str, Any]:
     }
 
 
-def load_supply_chain(root: Optional[Path] = None) -> Dict[str, Any]:
+def load_supply_chain(root: Path | None = None) -> dict[str, Any]:
     """讀取 data/supply_chain.json (美股 → 台股供應鏈對照)。"""
     p = (root or Path.cwd()) / "data" / "supply_chain.json"
     restore_file_from_cloud(p, root=root)
@@ -581,7 +581,7 @@ def load_supply_chain(root: Optional[Path] = None) -> Dict[str, Any]:
         return {"us_stocks": {}}
 
 
-def save_supply_chain(data: Dict[str, Any], root: Optional[Path] = None) -> Path:
+def save_supply_chain(data: dict[str, Any], root: Path | None = None) -> Path:
     p = (root or Path.cwd()) / "data" / "supply_chain.json"
     mk_folder(str(p.parent))
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -591,12 +591,12 @@ def save_supply_chain(data: Dict[str, Any], root: Optional[Path] = None) -> Path
 
 def related_us_stocks_for_tw(
     tw_ticker: str,
-    supply_chain: Optional[Dict[str, Any]] = None,
-    root: Optional[Path] = None,
-) -> List[Dict[str, Any]]:
+    supply_chain: dict[str, Any] | None = None,
+    root: Path | None = None,
+) -> list[dict[str, Any]]:
     """反查：某檔台股對應到哪些美股客戶/供應鏈夥伴。"""
     sc = supply_chain or load_supply_chain(root)
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for us_sym, info in (sc.get("us_stocks") or {}).items():
         for entry in info.get("tw_supply_chain", []) or []:
             if entry.get("tw_ticker") == tw_ticker:
@@ -614,9 +614,9 @@ def related_us_stocks_for_tw(
 
 __all__ = [
     "ADR_RATIOS",
-    "AdrPremium",
     "DEFAULT_INDICES",
     "DEFAULT_STOCKS",
+    "AdrPremium",
     "FuturesBasis",
     "IndexQuote",
     "MacroSnapshot",

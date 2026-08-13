@@ -18,9 +18,10 @@ import datetime as dt
 import json
 import logging
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from bot.utils import get_logger, mk_folder, now_tw
 
@@ -34,11 +35,11 @@ class LlmCallRecord:
     input: str
     output: str
     latency_ms: int = 0
-    tokens_in: Optional[int] = None
-    tokens_out: Optional[int] = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
     success: bool = True
     error: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class LlmCallLogger:
@@ -46,8 +47,8 @@ class LlmCallLogger:
 
     def __init__(
         self,
-        log_dir: Optional[Path] = None,
-        logger: Optional[logging.Logger] = None,
+        log_dir: Path | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.log_dir = log_dir or (Path.cwd() / "log" / "llm_calls")
         self.logger = logger or get_logger("llm-log")
@@ -66,11 +67,11 @@ class LlmCallLogger:
         input_text: str,
         output_text: str,
         latency_ms: int = 0,
-        tokens_in: Optional[int] = None,
-        tokens_out: Optional[int] = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
         success: bool = True,
         error: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> LlmCallRecord:
         ts = now_tw()
         rec = LlmCallRecord(
@@ -89,10 +90,9 @@ class LlmCallLogger:
         )
         path = self._path_for(ts)
         try:
-            with self._lock:
-                with path.open("a", encoding="utf-8") as f:
-                    json.dump(rec.__dict__, f, ensure_ascii=False)
-                    f.write("\n")
+            with self._lock, path.open("a", encoding="utf-8") as f:
+                json.dump(rec.__dict__, f, ensure_ascii=False)
+                f.write("\n")
         except Exception:
             self.logger.exception("LLM call log 寫入失敗")
 
@@ -108,8 +108,8 @@ class LlmCallLogger:
     # 查詢
     # ------------------------------------------------------------------
 
-    def list_dates(self) -> List[dt.date]:
-        out: List[dt.date] = []
+    def list_dates(self) -> list[dt.date]:
+        out: list[dt.date] = []
         if not self.log_dir.exists():
             return out
         for f in self.log_dir.glob("llm_calls_*.jsonl"):
@@ -122,9 +122,9 @@ class LlmCallLogger:
 
     def read(
         self,
-        date: Optional[dt.date] = None,
+        date: dt.date | None = None,
         limit: int = 500,
-    ) -> List[LlmCallRecord]:
+    ) -> list[LlmCallRecord]:
         if date is None:
             dates = self.list_dates()
             if not dates:
@@ -133,7 +133,7 @@ class LlmCallLogger:
         path = self.log_dir / f"llm_calls_{date.isoformat()}.jsonl"
         if not path.exists():
             return []
-        records: List[LlmCallRecord] = []
+        records: list[LlmCallRecord] = []
         try:
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -152,7 +152,7 @@ class LlmCallLogger:
 
     def iter_records(
         self,
-        dates: Optional[Iterable[dt.date]] = None,
+        dates: Iterable[dt.date] | None = None,
     ) -> Iterable[LlmCallRecord]:
         ds = list(dates) if dates is not None else self.list_dates()
         for d in ds:
@@ -255,11 +255,11 @@ def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
 # Singleton
 # ----------------------------------------------------------------------
 
-_logger_instance: Optional[LlmCallLogger] = None
+_logger_instance: LlmCallLogger | None = None
 _lock = threading.Lock()
 
 
-def get_call_logger(log_dir: Optional[Path] = None) -> LlmCallLogger:
+def get_call_logger(log_dir: Path | None = None) -> LlmCallLogger:
     global _logger_instance
     with _lock:
         if _logger_instance is None:

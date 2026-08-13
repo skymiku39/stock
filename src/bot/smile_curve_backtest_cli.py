@@ -15,7 +15,6 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.config import Settings
 from bot.smile_curve_backtest import SmileBacktestSummary, SmileCurveBacktester
@@ -31,7 +30,7 @@ def _normalize_symbol(raw: str) -> str:
     return s
 
 
-def _resolve_dates(days: int, start: Optional[str], end: Optional[str]) -> tuple[str, str]:
+def _resolve_dates(days: int, start: str | None, end: str | None) -> tuple[str, str]:
     today = now_tw().date()
     if start:
         start_d = dt.date.fromisoformat(start)
@@ -46,7 +45,7 @@ def _resolve_dates(days: int, start: Optional[str], end: Optional[str]) -> tuple
 
 
 def _ensure_daily_data(
-    symbols: List[str],
+    symbols: list[str],
     start: str,
     end: str,
     *,
@@ -115,7 +114,7 @@ def _export_csv(summary: SmileBacktestSummary, path: Path) -> None:
             ])
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="微笑曲線策略日 K 回測")
     parser.add_argument("--symbols", required=True, help="逗號分隔股票代號")
     parser.add_argument("--start", help="起始日期 YYYY-MM-DD")

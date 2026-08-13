@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from bot.events.bus import InMemoryEventBus
 from bot.events.wiring import get_event_bus, wire_application_handlers
@@ -16,9 +15,9 @@ from bot.events.wiring import get_event_bus, wire_application_handlers
 def bootstrap_event_bus(
     *,
     enable_jsonl: bool = True,
-    jsonl_path: Optional[Path] = None,
-    enable_chain_smile_screen: Optional[bool] = None,
-    project_root: Optional[Path] = None,
+    jsonl_path: Path | None = None,
+    enable_chain_smile_screen: bool | None = None,
+    project_root: Path | None = None,
 ) -> InMemoryEventBus:
     """初始化程序內事件匯流排與橫切 handler。"""
     root = project_root or Path.cwd()

@@ -16,7 +16,6 @@ from bot.history_fetch_queue import (
     init_state,
     load_state,
     next_work_item,
-    save_state,
 )
 from bot.stock_db import PriceBar, StockDB, default_db_path
 

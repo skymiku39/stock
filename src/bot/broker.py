@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import shioaji as sj
 from shioaji import BidAskSTKv1, Exchange, TickSTKv1
@@ -23,8 +24,8 @@ from shioaji.constant import (
     StockPriceType,
 )
 
-from bot.utils import get_logger
 from bot.ownership import clean_order_field
+from bot.utils import get_logger
 
 if TYPE_CHECKING:
     from shioaji.contracts import Contract
@@ -40,22 +41,22 @@ BALANCE_CACHE_TTL_SEC = 30
 class SjBroker:
     """封裝 Shioaji SDK 的所有低階操作。"""
 
-    def __init__(self, settings: Settings, logger: Optional[logging.Logger] = None):
+    def __init__(self, settings: Settings, logger: logging.Logger | None = None):
         self.settings = settings
         self.logger = logger or get_logger("broker")
-        self.api: Optional[sj.Shioaji] = None
+        self.api: sj.Shioaji | None = None
 
-        self._subscribed_symbols: List[str] = []
-        self._contracts: Dict[str, Contract] = {}
+        self._subscribed_symbols: list[str] = []
+        self._contracts: dict[str, Contract] = {}
 
-        self._tick_callback: Optional[Callable] = None
-        self._bidask_callback: Optional[Callable] = None
-        self._order_callback: Optional[Callable] = None
-        self._subscriptions: set[Tuple[str, str]] = set()
+        self._tick_callback: Callable | None = None
+        self._bidask_callback: Callable | None = None
+        self._order_callback: Callable | None = None
+        self._subscriptions: set[tuple[str, str]] = set()
 
         self._reconnect_lock = threading.Lock()
-        self.last_order_error: Optional[Exception] = None
-        self._balance_cache: Optional[Tuple[float, float]] = None  # (monotonic_ts, amount)
+        self.last_order_error: Exception | None = None
+        self._balance_cache: tuple[float, float] | None = None  # (monotonic_ts, amount)
 
     def _should_activate_ca(self) -> bool:
         """Only trade mode may activate CA; watch mode must stay quote-only."""
@@ -65,7 +66,7 @@ class SjBroker:
             and self.settings.run_mode == "trade"
         )
 
-    def _subscribe(self, contract: "Contract", quote_type: QuoteType) -> None:
+    def _subscribe(self, contract: Contract, quote_type: QuoteType) -> None:
         assert self.api is not None
         if hasattr(self.api, "subscribe"):
             try:
@@ -76,7 +77,7 @@ class SjBroker:
                 return
         self.api.quote.subscribe(contract, quote_type=quote_type)
 
-    def _unsubscribe(self, contract: "Contract", quote_type: QuoteType) -> None:
+    def _unsubscribe(self, contract: Contract, quote_type: QuoteType) -> None:
         assert self.api is not None
         if hasattr(self.api, "unsubscribe"):
             try:
@@ -152,7 +153,7 @@ class SjBroker:
                 self.api = None
                 self.logger.info("已登出")
 
-    def get_available_balance(self, *, force_refresh: bool = False) -> Optional[float]:
+    def get_available_balance(self, *, force_refresh: bool = False) -> float | None:
         """讀取證券帳戶可用餘額 (acc_balance)；失敗回傳 None。"""
         if self.api is None:
             return None
@@ -178,7 +179,7 @@ class SjBroker:
     # 合約
     # ------------------------------------------------------------------
 
-    def get_contract(self, symbol: str) -> Optional[Contract]:
+    def get_contract(self, symbol: str) -> Contract | None:
         """取得股票合約物件，並快取結果。"""
         if symbol in self._contracts:
             return self._contracts[symbol]
@@ -372,8 +373,8 @@ class SjBroker:
         order_type: OrderType = OrderType.ROD,
         custom_field: str = "",
         order_lot: StockOrderLot = StockOrderLot.Common,
-        max_sell_qty: Optional[int] = None,
-    ) -> Optional[Trade]:
+        max_sell_qty: int | None = None,
+    ) -> Trade | None:
         if self.settings.run_mode != "trade":
             self.logger.error(
                 "非 trade 模式 (%s) 禁止下單 — 已攔截",
@@ -437,7 +438,7 @@ class SjBroker:
         order_type: OrderType,
         custom_field: str,
         order_lot: StockOrderLot = StockOrderLot.Common,
-    ) -> "Order":
+    ) -> Order:
         assert self.api is not None
         kwargs = dict(
             price=price,
@@ -460,8 +461,8 @@ class SjBroker:
         symbol: str,
         quantity: int,
         custom_field: str = "close",
-        max_sell_qty: Optional[int] = None,
-    ) -> Optional[Trade]:
+        max_sell_qty: int | None = None,
+    ) -> Trade | None:
         """市價 IOC 賣出 (用於停損/全出場)。"""
         return self.place_order(
             symbol=symbol,
@@ -481,8 +482,8 @@ class SjBroker:
         shares: int,
         price: float,
         custom_field: str = "odd",
-        max_sell_qty: Optional[int] = None,
-    ) -> Optional[Trade]:
+        max_sell_qty: int | None = None,
+    ) -> Trade | None:
         """盤中零股委託 (IntradayOdd)。
 
         shares 為「股數」(1~999)，price 必為限價 (零股不支援市價)。
@@ -548,14 +549,14 @@ class SjBroker:
     # 快照 / 前日收盤
     # ------------------------------------------------------------------
 
-    def get_snapshots(self, symbols: list[str]) -> Dict[str, float]:
+    def get_snapshots(self, symbols: list[str]) -> dict[str, float]:
         """取得多檔商品的前日收盤 (reference) 價。
 
         優先使用合約物件的 reference 屬性，若為 0 則透過 snapshots API
         以 close - change_price 推算。
         """
         assert self.api is not None, "尚未登入"
-        result: Dict[str, float] = {}
+        result: dict[str, float] = {}
 
         contracts = []
         for s in symbols:
@@ -586,7 +587,7 @@ class SjBroker:
     # 訂單狀態查詢
     # ------------------------------------------------------------------
 
-    def update_status(self, trade: Optional["Trade"] = None) -> None:
+    def update_status(self, trade: Trade | None = None) -> None:
         assert self.api is not None
         if trade is not None:
             self.api.update_status(trade=trade)
@@ -597,7 +598,7 @@ class SjBroker:
         assert self.api is not None
         return self.api.list_trades()
 
-    def cancel_order(self, trade: "Trade") -> Optional["Trade"]:
+    def cancel_order(self, trade: Trade) -> Trade | None:
         """Cancel an order and refresh status using Shioaji's recommended flow."""
         assert self.api is not None
         try:
@@ -627,7 +628,7 @@ def _clean_custom_field(custom_field: str) -> str:
     return clean_order_field(custom_field)
 
 
-def _lookup_stock_contract(api: sj.Shioaji, symbol: str) -> Optional["Contract"]:
+def _lookup_stock_contract(api: sj.Shioaji, symbol: str) -> Contract | None:
     stocks = api.Contracts.Stocks
     for getter in (
         lambda: stocks.get(symbol),

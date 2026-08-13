@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Set
 
 from bot.events.bus import InMemoryEventBus, LoggingEventHandler
 from bot.events.handlers import attach_jsonl_recorder
@@ -19,10 +18,10 @@ from bot.events.types import (
     TradeSellFilled,
 )
 
-_default_bus: Optional[InMemoryEventBus] = None
-_trading_wired_bus_ids: Set[int] = set()
-_jsonl_attached_bus_ids: Set[int] = set()
-_chain_wired_bus_ids: Set[int] = set()
+_default_bus: InMemoryEventBus | None = None
+_trading_wired_bus_ids: set[int] = set()
+_jsonl_attached_bus_ids: set[int] = set()
+_chain_wired_bus_ids: set[int] = set()
 
 
 def create_event_bus(*, enable_logging: bool = True) -> InMemoryEventBus:
@@ -53,7 +52,7 @@ def reset_event_bus() -> None:
 
 
 def publish_if_bus(
-    bus: Optional[EventBus],
+    bus: EventBus | None,
     event,
 ) -> None:
     """可選發布 — 呼叫端不依賴具體 bus 實作。"""
@@ -101,7 +100,7 @@ def wire_chain_handlers(
     bus: EventBus,
     *,
     enable_smile_screen: bool = False,
-    project_root: Optional[Path] = None,
+    project_root: Path | None = None,
 ) -> None:
     """註冊可選事件鏈（依設定啟用）。"""
     if not enable_smile_screen:
@@ -124,12 +123,12 @@ def wire_chain_handlers(
 
 
 def wire_application_handlers(
-    bus: Optional[EventBus] = None,
+    bus: EventBus | None = None,
     *,
-    jsonl_path: Optional[Path] = None,
+    jsonl_path: Path | None = None,
     enable_jsonl: bool = True,
     enable_chain_smile_screen: bool = False,
-    project_root: Optional[Path] = None,
+    project_root: Path | None = None,
 ) -> InMemoryEventBus:
     """應用程式層預設 wiring：logging + JSONL 稽核 + 可選事件鏈。"""
     resolved = bus if isinstance(bus, InMemoryEventBus) else get_event_bus()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot.config import Settings
@@ -64,7 +64,7 @@ def is_bot_order_field(value: str, *, include_legacy: bool = False) -> bool:
 def infer_owner_tag(
     *,
     custom_field: str = "",
-    explicit_owner: Optional[str] = None,
+    explicit_owner: str | None = None,
     include_legacy: bool = False,
 ) -> str:
     """Infer the owner tag stored on local portfolio records."""
@@ -81,7 +81,7 @@ def is_bot_owner(owner_tag: str) -> bool:
     return clean_order_field(owner_tag).upper() == BOT_OWNER_TAG
 
 
-def effective_trading_blacklist(settings: "Settings") -> set[str]:
+def effective_trading_blacklist(settings: Settings) -> set[str]:
     """黑名單 + 手動長期持股 — 自動交易應排除的代號集合。"""
     symbols: set[str] = set()
     for raw in getattr(settings, "blacklist_symbols", []) or []:

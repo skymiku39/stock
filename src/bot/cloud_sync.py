@@ -21,12 +21,12 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 from bot.stock_db import (
     ALL_TABLES,
@@ -34,8 +34,7 @@ from bot.stock_db import (
     StockDB,
     get_db,
 )
-from bot.utils import get_logger, now_tw
-
+from bot.utils import get_logger
 
 # ----------------------------------------------------------------------
 # Lazy import gspread —— 缺套件時要能給出可讀錯誤
@@ -61,7 +60,7 @@ def _import_gspread():
 
 
 # Google Sheets API 必需的 scopes
-_DEFAULT_SCOPES: Tuple[str, ...] = (
+_DEFAULT_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 )
@@ -78,13 +77,13 @@ class CloudConfig:
 
     sheet_id: str = ""
     service_account_json: str = ""   # 檔案路徑 或 JSON 內文
-    scopes: Tuple[str, ...] = _DEFAULT_SCOPES
+    scopes: tuple[str, ...] = _DEFAULT_SCOPES
 
     @property
     def enabled(self) -> bool:
         return bool(self.sheet_id) and bool(self.service_account_json)
 
-    def credentials_dict(self) -> Dict[str, Any]:
+    def credentials_dict(self) -> dict[str, Any]:
         """允許 service_account_json 是路徑或直接 JSON 內文。"""
         s = self.service_account_json.strip()
         if not s:
@@ -130,8 +129,8 @@ class GoogleSheetSync:
     def __init__(
         self,
         cfg: CloudConfig,
-        db: Optional[StockDB] = None,
-        logger: Optional[logging.Logger] = None,
+        db: StockDB | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self.cfg = cfg
         self.db = db or get_db()
@@ -177,7 +176,7 @@ class GoogleSheetSync:
 
     # ----- worksheet helpers -----
 
-    def _get_or_create_worksheet(self, table: str, columns: List[str]):
+    def _get_or_create_worksheet(self, table: str, columns: list[str]):
         sh = self._ensure_sheet()
         try:
             ws = sh.worksheet(table)
@@ -194,12 +193,12 @@ class GoogleSheetSync:
                 ws.update("A1", [columns])
         return ws
 
-    def _worksheet_to_rows(self, ws) -> Tuple[List[str], List[Dict[str, Any]]]:
-        values: List[List[str]] = ws.get_all_values()
+    def _worksheet_to_rows(self, ws) -> tuple[list[str], list[dict[str, Any]]]:
+        values: list[list[str]] = ws.get_all_values()
         if not values:
             return [], []
         header = values[0]
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for raw in values[1:]:
             if not any(c.strip() for c in raw):
                 continue
@@ -229,7 +228,7 @@ class GoogleSheetSync:
             self.db.mark_sync_error(table, str(e))
             return TableSyncResult(table=table, direction="push", error=str(e))
 
-    def push_all(self, tables: Optional[Iterable[str]] = None) -> List[TableSyncResult]:
+    def push_all(self, tables: Iterable[str] | None = None) -> list[TableSyncResult]:
         tables = list(tables or SYNCABLE_TABLES)
         return [self.push(t) for t in tables]
 
@@ -255,7 +254,7 @@ class GoogleSheetSync:
             self.db.mark_sync_error(table, str(e))
             return TableSyncResult(table=table, direction="pull", error=str(e))
 
-    def pull_all(self, tables: Optional[Iterable[str]] = None) -> List[TableSyncResult]:
+    def pull_all(self, tables: Iterable[str] | None = None) -> list[TableSyncResult]:
         tables = list(tables or SYNCABLE_TABLES)
         return [self.pull(t) for t in tables]
 
@@ -305,7 +304,7 @@ class GoogleSheetSync:
             self.db.mark_sync_error(table, str(e))
             return TableSyncResult(table=table, direction="sync", error=str(e))
 
-    def sync_all(self, tables: Optional[Iterable[str]] = None) -> List[TableSyncResult]:
+    def sync_all(self, tables: Iterable[str] | None = None) -> list[TableSyncResult]:
         tables = list(tables or SYNCABLE_TABLES)
         return [self.sync(t) for t in tables]
 
@@ -349,9 +348,9 @@ _FLOAT_COLS = {
 }
 
 
-def _coerce_row(table: str, cols: List[str], raw: Dict[str, Any]) -> Dict[str, Any]:
+def _coerce_row(table: str, cols: list[str], raw: dict[str, Any]) -> dict[str, Any]:
     """把 Sheets 拿回來的字串型 row 轉成符合 schema 的型別。"""
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for c in cols:
         v = raw.get(c, "")
         if isinstance(v, str):
@@ -380,7 +379,7 @@ def _cell_repr(v: Any) -> Any:
     return str(v)
 
 
-def _max_updated_at(rows: Iterable[Dict[str, Any]]) -> str:
+def _max_updated_at(rows: Iterable[dict[str, Any]]) -> str:
     best = ""
     for r in rows:
         v = r.get("updated_at", "")

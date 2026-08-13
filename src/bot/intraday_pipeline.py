@@ -21,7 +21,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.cloud_file_cache import (
     mirror_file_to_cloud,
@@ -29,6 +29,7 @@ from bot.cloud_file_cache import (
     restore_tree_from_cloud,
 )
 from bot.config import Settings
+from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.llm_analyzer import GeminiClient, gemini_call
 from bot.market_macro import (
     fetch_macro_snapshot,
@@ -37,16 +38,20 @@ from bot.market_macro import (
     related_us_stocks_for_tw,
 )
 from bot.news_fetcher import fetch_today_news, news_to_compact_text
-from bot.scoring import compute_scorecard
 from bot.pipeline_shared import (
     consensus_tickers_today as _consensus_tickers_today,
+)
+from bot.pipeline_shared import (
     intraday_report_to_dict as _report_to_json,
+)
+from bot.pipeline_shared import (
     macro_summary_text as _macro_summary_text,
+)
+from bot.pipeline_shared import (
     parse_json_blob as _parse_json,
 )
-from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.scoring import compute_scorecard
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 REPORT_TYPE = "intraday"
 
@@ -63,7 +68,7 @@ class CandidateRow:
     theme: str = ""
     theme_heat: int = 0
     role: str = ""
-    today_close: Optional[float] = None
+    today_close: float | None = None
     today_pct_change: float = 0.0
     volume: float = 0.0
     volume_ratio: float = 0.0
@@ -71,10 +76,10 @@ class CandidateRow:
     day_trade_score: float = 0.0
     action: str = "HOLD"
     us_market_score: float = 50.0
-    adr_premium_pct: Optional[float] = None
+    adr_premium_pct: float | None = None
     chip_summary_text: str = ""
     risk_text: str = ""
-    sources: List[str] = field(default_factory=list)  # ['theme','supply_chain','etf','watchlist']
+    sources: list[str] = field(default_factory=list)  # ['theme','supply_chain','etf','watchlist']
 
 
 @dataclass
@@ -82,14 +87,14 @@ class IntradayReport:
     asof: str
     market_tone: str = "neutral"
     overall_brief: str = ""
-    themes: List[Dict[str, Any]] = field(default_factory=list)
-    rankings: List[CandidateRow] = field(default_factory=list)
-    macro_summary: Dict[str, Any] = field(default_factory=dict)
+    themes: list[dict[str, Any]] = field(default_factory=list)
+    rankings: list[CandidateRow] = field(default_factory=list)
+    macro_summary: dict[str, Any] = field(default_factory=dict)
     brief_md: str = ""
     brief_prompt_id: str = ""
     brief_prompt_version: str = ""
     duration_sec: float = 0.0
-    errors: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     output_dir: str = ""
 
 
@@ -99,14 +104,14 @@ class IntradayReport:
 
 
 def _build_candidate_pool(
-    themes: List[Dict[str, Any]],
-    supply_chain: Dict[str, Any],
-    consensus_tickers: List[str],
-    watchlist_tickers: List[str],
-    macro: Dict[str, Any],
-) -> Dict[str, CandidateRow]:
+    themes: list[dict[str, Any]],
+    supply_chain: dict[str, Any],
+    consensus_tickers: list[str],
+    watchlist_tickers: list[str],
+    macro: dict[str, Any],
+) -> dict[str, CandidateRow]:
     """合併 4 個來源產出唯一候選股清單。"""
-    pool: Dict[str, CandidateRow] = {}
+    pool: dict[str, CandidateRow] = {}
 
     # 1) 題材股
     for th in themes:
@@ -171,7 +176,7 @@ def _technical_for_ticker(
     project_root: Path,
     refresh: bool,
     log: logging.Logger,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     try:
         from bot.technicals import build_technical_snapshot, snapshot_to_dict
         snap, _df = build_technical_snapshot(
@@ -218,10 +223,10 @@ def _technical_for_ticker(
 def _score_candidate(
     row: CandidateRow,
     *,
-    macro: Dict[str, Any],
-    supply_chain: Dict[str, Any],
+    macro: dict[str, Any],
+    supply_chain: dict[str, Any],
     project_root: Path,
-    today: Optional[dt.date] = None,
+    today: dt.date | None = None,
     chip_lookback: int = 5,
     refresh_technicals: bool = True,
     log: logging.Logger,
@@ -232,7 +237,7 @@ def _score_candidate(
     asof = today or now_tw().date()
 
     # 籌碼摘要
-    chip_dict: Optional[Dict[str, Any]] = None
+    chip_dict: dict[str, Any] | None = None
     try:
         summary = build_chip_summary(
             row.ticker,
@@ -305,13 +310,13 @@ def _score_candidate(
 
 def run_intraday(
     *,
-    project_root: Optional[Path] = None,
-    settings: Optional[Settings] = None,
+    project_root: Path | None = None,
+    settings: Settings | None = None,
     news_limit: int = 120,
     candidate_limit: int = 25,
     force_refresh_news: bool = False,
     force_refresh_technicals: bool = True,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
     publisher=None,
 ) -> IntradayReport:
     log = logger or get_logger("intraday")
@@ -361,7 +366,7 @@ def run_intraday(
         model=settings.gemini_model,
         logger=log,
     )
-    themes: List[Dict[str, Any]] = []
+    themes: list[dict[str, Any]] = []
     if client.enabled and news_text:
         log.info("[3/6] LLM 萃取今日熱門題材...")
         try:
@@ -490,7 +495,7 @@ def run_intraday(
 # ----------------------------------------------------------------------
 
 
-def _watchlist_tickers(root: Path) -> List[str]:
+def _watchlist_tickers(root: Path) -> list[str]:
     try:
         from bot import watchlist as wl_mod
         wl = wl_mod.load(root)
@@ -499,7 +504,7 @@ def _watchlist_tickers(root: Path) -> List[str]:
         return []
 
 
-def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+def load_latest_intraday(root: Path | None = None) -> dict[str, Any] | None:
     root_path = root or Path.cwd()
     try:
         from bot.stock_db import StockDB
@@ -531,9 +536,9 @@ def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]
 
 
 def load_intraday_by_date(
-    root: Optional[Path] = None,
-    report_date: Optional[dt.date | str] = None,
-) -> Optional[Dict[str, Any]]:
+    root: Path | None = None,
+    report_date: dt.date | str | None = None,
+) -> dict[str, Any] | None:
     """依 asof 日期讀取當沖報告，不會觸發 LLM 生成。"""
     root_path = root or Path.cwd()
     if report_date is None:
@@ -567,7 +572,7 @@ def load_intraday_by_date(
         return None
 
 
-def _daily_report_row_to_payload(row: Any) -> Optional[Dict[str, Any]]:
+def _daily_report_row_to_payload(row: Any) -> dict[str, Any] | None:
     if row is None or not row.payload_json:
         return None
     try:
@@ -583,7 +588,7 @@ def _daily_report_row_to_payload(row: Any) -> Optional[Dict[str, Any]]:
 
 
 def _persist_report_json_to_db(
-    data: Dict[str, Any],
+    data: dict[str, Any],
     *,
     root: Path,
     log: logging.Logger,

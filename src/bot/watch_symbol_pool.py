@@ -15,7 +15,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 from bot.ownership import effective_trading_blacklist
 from bot.trade_cost import max_affordable_qty
@@ -48,15 +48,15 @@ def _clean_ticker(value: object) -> str:
 
 
 def _ranking_tickers(
-    report: Optional[Dict],
+    report: dict | None,
     *,
     top_n: int,
     score_key: str = "day_trade_score",
-) -> List[Tuple[str, float]]:
+) -> list[tuple[str, float]]:
     if not report or top_n <= 0:
         return []
     rows = report.get("rankings") or []
-    scored: List[Tuple[str, float]] = []
+    scored: list[tuple[str, float]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -69,7 +69,7 @@ def _ranking_tickers(
     return scored[:top_n]
 
 
-def _price_hint_from_report(report: Optional[Dict], ticker: str) -> float:
+def _price_hint_from_report(report: dict | None, ticker: str) -> float:
     if not report:
         return 0.0
     for row in report.get("rankings") or []:
@@ -89,7 +89,7 @@ def _price_hint_from_report(report: Optional[Dict], ticker: str) -> float:
     return 0.0
 
 
-def _affordable(settings: "Settings", price: float) -> bool:
+def _affordable(settings: Settings, price: float) -> bool:
     if price <= 0:
         return True
     budget = float(settings.effective_fund_cap())
@@ -118,16 +118,16 @@ def _affordable(settings: "Settings", price: float) -> bool:
 
 @dataclass
 class WatchPoolResult:
-    symbols: List[str] = field(default_factory=list)
-    sources_by_symbol: Dict[str, List[str]] = field(default_factory=dict)
-    source_counts: Dict[str, int] = field(default_factory=dict)
+    symbols: list[str] = field(default_factory=list)
+    sources_by_symbol: dict[str, list[str]] = field(default_factory=dict)
+    source_counts: dict[str, int] = field(default_factory=dict)
     trading_day: str = ""
-    skipped_blacklist: List[str] = field(default_factory=list)
-    skipped_budget: List[str] = field(default_factory=list)
+    skipped_blacklist: list[str] = field(default_factory=list)
+    skipped_budget: list[str] = field(default_factory=list)
 
 
 def _add_symbol(
-    pool: Dict[str, List[str]],
+    pool: dict[str, list[str]],
     ticker: str,
     source: str,
 ) -> None:
@@ -144,7 +144,7 @@ def _live_open_tickers(
     top_n: int,
     refresh_quotes: bool,
     logger: logging.Logger,
-) -> List[Tuple[str, float]]:
+) -> list[tuple[str, float]]:
     from bot.intraday_live import build_live_tracking_rows, load_live_review
     from bot.intraday_pipeline import load_intraday_by_date
 
@@ -152,7 +152,7 @@ def _live_open_tickers(
     if not report:
         return []
 
-    scored: List[Tuple[str, float]] = []
+    scored: list[tuple[str, float]] = []
     review = load_live_review(root, trading_day)
     if review:
         tracking = (review.get("tracking") or {})
@@ -197,13 +197,13 @@ def _live_open_tickers(
 
 
 def resolve_watch_symbol_pool(
-    settings: "Settings",
-    root: Optional[Path] = None,
+    settings: Settings,
+    root: Path | None = None,
     *,
-    asof: Optional[dt.datetime] = None,
-    include_live: Optional[bool] = None,
+    asof: dt.datetime | None = None,
+    include_live: bool | None = None,
     refresh_live_quotes: bool = False,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> WatchPoolResult:
     """解析四源關注清單並回傳合併結果（不修改 settings）。"""
     from bot.intraday_pipeline import load_intraday_by_date
@@ -224,9 +224,9 @@ def resolve_watch_symbol_pool(
     budget_filter = bool(getattr(settings, "symbols_merge_budget_filter", True))
     blacklist = effective_trading_blacklist(settings)
 
-    pool: Dict[str, List[str]] = {}
-    price_hints: Dict[str, float] = {}
-    source_payloads: Dict[str, List[Tuple[str, float]]] = {}
+    pool: dict[str, list[str]] = {}
+    price_hints: dict[str, float] = {}
+    source_payloads: dict[str, list[tuple[str, float]]] = {}
 
     for raw in settings.symbols or []:
         ticker = _clean_ticker(raw)
@@ -292,9 +292,9 @@ def resolve_watch_symbol_pool(
     manual_set = {
         t for t, tags in pool.items() if SOURCE_MANUAL in tags
     }
-    skipped_blacklist: List[str] = []
-    skipped_budget: List[str] = []
-    ordered: List[str] = []
+    skipped_blacklist: list[str] = []
+    skipped_budget: list[str] = []
+    ordered: list[str] = []
 
     def _try_add(ticker: str) -> None:
         if ticker in ordered:
@@ -344,9 +344,9 @@ def resolve_watch_symbol_pool(
 
 
 def apply_watch_pool_to_settings(
-    settings: "Settings",
+    settings: Settings,
     result: WatchPoolResult,
-) -> List[str]:
+) -> list[str]:
     """將合併結果寫入 settings.symbols，回傳新增代號。"""
     previous = list(settings.symbols or [])
     previous_set = set(previous)
@@ -355,13 +355,13 @@ def apply_watch_pool_to_settings(
 
 
 def merge_watch_symbols_into_settings(
-    settings: "Settings",
-    root: Optional[Path] = None,
+    settings: Settings,
+    root: Path | None = None,
     *,
     reason: str = "startup",
-    include_live: Optional[bool] = None,
+    include_live: bool | None = None,
     refresh_live_quotes: bool = False,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> WatchPoolResult:
     """解析四源並更新 settings.symbols；寫 log 供盤中對帳。"""
     log = logger or get_logger("watch-pool")
@@ -397,7 +397,7 @@ def merge_watch_symbols_into_settings(
     return result
 
 
-def in_watch_pool_refresh_window(asof: Optional[dt.datetime] = None) -> bool:
+def in_watch_pool_refresh_window(asof: dt.datetime | None = None) -> bool:
     now = asof or now_tw()
     if now.weekday() >= 5:
         return False

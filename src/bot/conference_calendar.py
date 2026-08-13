@@ -27,14 +27,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.mops_scraper import ConferenceEntry, fetch_conference_schedule
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 CALENDAR_DIR_REL = "data/calendar"
 STATE_FILE = "calendar_state.json"
@@ -47,22 +45,22 @@ WINDOW_MONTHS = (-1, 0, 1, 2)        # 上月 / 本月 / 下月 / 兩個月後
 # ----------------------------------------------------------------------
 
 
-def _calendar_dir(root: Optional[Path]) -> Path:
+def _calendar_dir(root: Path | None) -> Path:
     return (root or Path.cwd()) / CALENDAR_DIR_REL
 
 
-def _month_file(year: int, month: int, root: Optional[Path]) -> Path:
+def _month_file(year: int, month: int, root: Path | None) -> Path:
     return _calendar_dir(root) / f"conferences_{year:04d}-{month:02d}.json"
 
 
-def _shift_month(today: dt.date, delta: int) -> Tuple[int, int]:
+def _shift_month(today: dt.date, delta: int) -> tuple[int, int]:
     m = today.month + delta
     y = today.year + (m - 1) // 12
     m = ((m - 1) % 12) + 1
     return y, m
 
 
-def _to_dict(e: ConferenceEntry) -> Dict[str, Any]:
+def _to_dict(e: ConferenceEntry) -> dict[str, Any]:
     return {
         "date": e.date.isoformat() if hasattr(e.date, "isoformat") else str(e.date),
         "time": e.time,
@@ -73,7 +71,7 @@ def _to_dict(e: ConferenceEntry) -> Dict[str, Any]:
     }
 
 
-def _from_dict(d: Dict[str, Any]) -> Optional[ConferenceEntry]:
+def _from_dict(d: dict[str, Any]) -> ConferenceEntry | None:
     try:
         date_str = str(d.get("date", ""))
         if not date_str:
@@ -100,7 +98,7 @@ def _fetch_month(
     month: int,
     *,
     logger: logging.Logger,
-) -> List[ConferenceEntry]:
+) -> list[ConferenceEntry]:
     """抓單一西元年/月 (內部會轉成民國年)。"""
     year_roc = year - 1911
     try:
@@ -112,8 +110,8 @@ def _fetch_month(
 
 
 def _save_month(
-    year: int, month: int, entries: List[ConferenceEntry],
-    root: Optional[Path],
+    year: int, month: int, entries: list[ConferenceEntry],
+    root: Path | None,
 ) -> Path:
     p = _month_file(year, month, root)
     mk_folder(str(p.parent))
@@ -129,8 +127,8 @@ def _save_month(
 
 
 def _load_month(
-    year: int, month: int, root: Optional[Path],
-) -> List[ConferenceEntry]:
+    year: int, month: int, root: Path | None,
+) -> list[ConferenceEntry]:
     p = _month_file(year, month, root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -139,7 +137,7 @@ def _load_month(
         raw = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return []
-    out: List[ConferenceEntry] = []
+    out: list[ConferenceEntry] = []
     for d in raw.get("entries", []) or []:
         e = _from_dict(d)
         if e:
@@ -147,11 +145,11 @@ def _load_month(
     return out
 
 
-def _state_path(root: Optional[Path]) -> Path:
+def _state_path(root: Path | None) -> Path:
     return _calendar_dir(root) / STATE_FILE
 
 
-def _read_state(root: Optional[Path]) -> Dict[str, Any]:
+def _read_state(root: Path | None) -> dict[str, Any]:
     p = _state_path(root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -162,7 +160,7 @@ def _read_state(root: Optional[Path]) -> Dict[str, Any]:
         return {}
 
 
-def _write_state(state: Dict[str, Any], root: Optional[Path]) -> None:
+def _write_state(state: dict[str, Any], root: Path | None) -> None:
     p = _state_path(root)
     mk_folder(str(p.parent))
     p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -175,11 +173,11 @@ def _write_state(state: Dict[str, Any], root: Optional[Path]) -> None:
 
 
 def update_calendar(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
-    months: Tuple[int, ...] = WINDOW_MONTHS,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, int]:
+    months: tuple[int, ...] = WINDOW_MONTHS,
+    logger: logging.Logger | None = None,
+) -> dict[str, int]:
     """重新抓取本月前後 N 個月的法說會行事曆，覆蓋本地快取。
 
     Returns:
@@ -187,7 +185,7 @@ def update_calendar(
     """
     log = logger or get_logger("calendar")
     today = now_tw().date()
-    summary: Dict[str, int] = {}
+    summary: dict[str, int] = {}
     for delta in months:
         y, m = _shift_month(today, delta)
         entries = _fetch_month(y, m, logger=log)
@@ -215,7 +213,7 @@ def update_calendar(
 
 
 def calendar_needs_url_refresh(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
     min_rate: float = 0.05,
 ) -> bool:
@@ -225,10 +223,10 @@ def calendar_needs_url_refresh(
 
 
 def ensure_calendar_fresh(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
     max_age_hours: int = DEFAULT_AGE_HOURS,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> bool:
     """過期或簡報連結缺失時重抓。回傳 True=有重抓 / False=直接走快取。"""
     log = logger or get_logger("calendar")
@@ -255,18 +253,18 @@ def ensure_calendar_fresh(
 
 
 def load_calendar(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
-    months: Tuple[int, ...] = WINDOW_MONTHS,
-) -> List[ConferenceEntry]:
+    months: tuple[int, ...] = WINDOW_MONTHS,
+) -> list[ConferenceEntry]:
     """讀取上下文窗口內的所有法說會 (依日期排序)。"""
     today = now_tw().date()
-    out: List[ConferenceEntry] = []
+    out: list[ConferenceEntry] = []
     for delta in months:
         y, m = _shift_month(today, delta)
         out.extend(_load_month(y, m, root))
     seen: set = set()
-    unique: List[ConferenceEntry] = []
+    unique: list[ConferenceEntry] = []
     for e in out:
         key = (e.date, e.ticker, e.time)
         if key in seen:
@@ -279,8 +277,8 @@ def load_calendar(
 
 def upcoming_conferences(
     days: int = 14,
-    root: Optional[Path] = None,
-) -> List[ConferenceEntry]:
+    root: Path | None = None,
+) -> list[ConferenceEntry]:
     """未來 ``days`` 天內 (含今日) 的法說會。"""
     today = now_tw().date()
     end = today + dt.timedelta(days=days)
@@ -291,8 +289,8 @@ def upcoming_conferences(
 
 def recent_conferences(
     days: int = 14,
-    root: Optional[Path] = None,
-) -> List[ConferenceEntry]:
+    root: Path | None = None,
+) -> list[ConferenceEntry]:
     """過去 ``days`` 天內 (不含今日) 的法說會。"""
     today = now_tw().date()
     start = today - dt.timedelta(days=days)
@@ -303,19 +301,19 @@ def recent_conferences(
 
 def conferences_for_ticker(
     ticker: str,
-    root: Optional[Path] = None,
-) -> List[ConferenceEntry]:
+    root: Path | None = None,
+) -> list[ConferenceEntry]:
     """此 ticker 在快取窗口內的所有法說會 (含過往)，依日期由新到舊。"""
     items = [e for e in load_calendar(root) if e.ticker == ticker]
     items.sort(key=lambda e: e.date, reverse=True)
     return items
 
 
-def last_refresh_at(root: Optional[Path] = None) -> str:
+def last_refresh_at(root: Path | None = None) -> str:
     return str(_read_state(root).get("last_full_refresh_at", ""))
 
 
-def presentation_url_fill_rate(root: Optional[Path] = None) -> Tuple[int, int, float]:
+def presentation_url_fill_rate(root: Path | None = None) -> tuple[int, int, float]:
     """回傳 (有簡報連結筆數, 總筆數, 填充率 0~1)。"""
     items = load_calendar(root)
     total = len(items)
@@ -332,10 +330,10 @@ def presentation_url_fill_rate(root: Optional[Path] = None) -> Tuple[int, int, f
 
 def upcoming_tickers(
     days: int = 14,
-    root: Optional[Path] = None,
-) -> List[str]:
+    root: Path | None = None,
+) -> list[str]:
     """未來 N 天有法說會的個股代號 (去重，依日期排序)。"""
-    out: List[str] = []
+    out: list[str] = []
     for e in upcoming_conferences(days=days, root=root):
         if e.ticker and e.ticker not in out:
             out.append(e.ticker)
@@ -351,7 +349,7 @@ __all__ = [
     "load_calendar",
     "presentation_url_fill_rate",
     "recent_conferences",
-    "update_calendar",
     "upcoming_conferences",
     "upcoming_tickers",
+    "update_calendar",
 ]

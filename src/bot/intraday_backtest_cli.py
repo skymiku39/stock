@@ -15,7 +15,6 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.config import Settings
 from bot.daily_backtest import DailyBacktester
@@ -26,7 +25,7 @@ from bot.stock_db import StockDB, default_db_path
 from bot.utils import get_logger, mk_folder, now_tw
 
 
-def _resolve_dates(days: int, start: Optional[str], end: Optional[str]) -> tuple[str, str]:
+def _resolve_dates(days: int, start: str | None, end: str | None) -> tuple[str, str]:
     today = now_tw().date()
     if start:
         start_d = dt.date.fromisoformat(start)
@@ -59,7 +58,7 @@ def _pick_granularity(
 
 
 def _ensure_daily_data(
-    symbols: List[str],
+    symbols: list[str],
     start: str,
     end: str,
     *,
@@ -102,7 +101,7 @@ def _ensure_daily_data(
 
 
 def _ensure_intraday_data(
-    symbols: List[str],
+    symbols: list[str],
     start: str,
     end: str,
     *,
@@ -113,7 +112,7 @@ def _ensure_intraday_data(
 ) -> None:
     from bot.broker import SjBroker
 
-    need_fetch: List[str] = []
+    need_fetch: list[str] = []
     start_d = dt.date.fromisoformat(start)
     end_d = dt.date.fromisoformat(end)
     for sym in symbols:
@@ -196,7 +195,7 @@ def _print_summary(summary: BacktestSummary, meta: dict) -> None:
             score = f"{float(score):.1f}"
         note = r.skip_reason or ""
         print(
-            f"{r.symbol:<8} {str(rank):<6} {str(score):<8} {r.bar_days:<5} "
+            f"{r.symbol:<8} {rank!s:<6} {score!s:<8} {r.bar_days:<5} "
             f"{len(r.trades):<5} {r.win_count:<4} {r.total_pnl_twd:>10,.0f}  {note}"
         )
     if trades:
@@ -208,7 +207,7 @@ def _print_summary(summary: BacktestSummary, meta: dict) -> None:
             )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="LLM 清單分 K 量化回測")
     parser.add_argument("--symbols", help="覆寫股票清單 (逗號分隔)；預設取近期 LLM 報告")
     parser.add_argument(

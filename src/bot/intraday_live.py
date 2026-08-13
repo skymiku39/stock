@@ -10,8 +10,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.news_fetcher import NewsItem, fetch_today_news
@@ -33,20 +34,20 @@ def _clean_ticker(value: Any) -> str:
 
 
 def extract_llm_mentions(
-    report: Dict[str, Any],
+    report: dict[str, Any],
     *,
     max_tickers: int = 20,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Extract tickers the intraday LLM report mentioned.
 
     Rankings are kept first because they are the action list. Theme-only
     candidates follow so the page still catches names that the LLM discussed
     but the scoring layer ranked lower.
     """
-    seen: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
+    seen: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
 
-    def add(ticker: str, payload: Dict[str, Any]) -> None:
+    def add(ticker: str, payload: dict[str, Any]) -> None:
         ticker = _clean_ticker(ticker)
         if not ticker:
             return
@@ -102,8 +103,8 @@ def extract_llm_mentions(
     return [seen[t] for t in order[:max_tickers]]
 
 
-def related_news_for_ticker(items: Iterable[NewsItem], ticker: str, *, limit: int = 3) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
+def related_news_for_ticker(items: Iterable[NewsItem], ticker: str, *, limit: int = 3) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
     for item in items:
         haystack = f"{item.title} {item.summary}"
         if ticker not in (item.related_tickers or []) and ticker not in haystack:
@@ -118,7 +119,7 @@ def related_news_for_ticker(items: Iterable[NewsItem], ticker: str, *, limit: in
     return out
 
 
-def assess_tracking_status(row: Dict[str, Any]) -> Dict[str, Any]:
+def assess_tracking_status(row: dict[str, Any]) -> dict[str, Any]:
     """Rule-based check of whether the original intraday thesis is holding up."""
     initial_score = _as_float(row.get("initial_technical_score"), 50.0)
     current_score = _as_float(row.get("current_technical_score"), 0.0)
@@ -177,23 +178,23 @@ def assess_tracking_status(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_live_tracking_rows(
-    report: Dict[str, Any],
+    report: dict[str, Any],
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     max_tickers: int = 12,
     refresh_quotes: bool = True,
     refresh_technicals: bool = False,
     refresh_chips: bool = False,
     refresh_news: bool = False,
     include_news: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, Any]:
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
     """Build the auto-refresh table payload for today's LLM-mentioned stocks."""
     root_path = root or Path.cwd()
     log = logger or get_logger("intraday-live")
     mentions = extract_llm_mentions(report, max_tickers=max_tickers)
     tickers = [m["ticker"] for m in mentions]
-    quote_map: Dict[str, Dict[str, Any]] = {}
+    quote_map: dict[str, dict[str, Any]] = {}
     if refresh_quotes and tickers:
         try:
             from bot.market_source import TwsePublicMarketSource
@@ -201,7 +202,7 @@ def build_live_tracking_rows(
         except Exception:
             log.debug("TWSE MIS quote refresh failed", exc_info=True)
 
-    news_items: List[NewsItem] = []
+    news_items: list[NewsItem] = []
     if include_news:
         try:
             news_items = fetch_today_news(
@@ -215,10 +216,10 @@ def build_live_tracking_rows(
             log.debug("fetch news for intraday live failed", exc_info=True)
             news_items = []
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for mention in mentions:
         ticker = mention["ticker"]
-        live: Dict[str, Any] = dict(mention)
+        live: dict[str, Any] = dict(mention)
         live.update({
             "has_current_data": False,
             "current_last_date": "",
@@ -339,22 +340,22 @@ def build_live_tracking_rows(
     }
 
 
-def live_review_path(root: Optional[Path], report_date: dt.date | str) -> Path:
+def live_review_path(root: Path | None, report_date: dt.date | str) -> Path:
     date_iso = report_date.isoformat() if hasattr(report_date, "isoformat") else str(report_date)
     return (root or Path.cwd()) / "data" / "intraday" / date_iso / "live_review.md"
 
 
-def live_review_json_path(root: Optional[Path], report_date: dt.date | str) -> Path:
+def live_review_json_path(root: Path | None, report_date: dt.date | str) -> Path:
     date_iso = report_date.isoformat() if hasattr(report_date, "isoformat") else str(report_date)
     return (root or Path.cwd()) / "data" / "intraday" / date_iso / "live_review.json"
 
 
 def save_live_review(
     *,
-    root: Optional[Path],
+    root: Path | None,
     report_date: dt.date | str,
     markdown: str,
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
 ) -> None:
     md_path = live_review_path(root, report_date)
     json_path = live_review_json_path(root, report_date)
@@ -365,14 +366,14 @@ def save_live_review(
     mirror_file_to_cloud(json_path, root=root)
 
 
-def load_live_review(root: Optional[Path], report_date: dt.date | str) -> Optional[Dict[str, Any]]:
+def load_live_review(root: Path | None, report_date: dt.date | str) -> dict[str, Any] | None:
     md_path = live_review_path(root, report_date)
     json_path = live_review_json_path(root, report_date)
     restore_file_from_cloud(md_path, root=root)
     restore_file_from_cloud(json_path, root=root)
     if not md_path.exists():
         return None
-    out: Dict[str, Any] = {"markdown": md_path.read_text(encoding="utf-8"), "path": str(md_path)}
+    out: dict[str, Any] = {"markdown": md_path.read_text(encoding="utf-8"), "path": str(md_path)}
     if json_path.exists():
         try:
             out.update(json.loads(json_path.read_text(encoding="utf-8")))

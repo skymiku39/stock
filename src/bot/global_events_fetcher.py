@@ -17,10 +17,11 @@ import html
 import logging
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
 
 import requests
 
@@ -30,7 +31,7 @@ from bot.utils import get_logger, now_tw
 APPLE_NEWSROOM_RSS = "https://www.apple.com/newsroom/rss-feed.rss"
 
 # 科技巨頭官方活動頁 (輕量 HTML 日期解析)
-CORPORATE_EVENT_PAGES: Tuple[Dict[str, str], ...] = (
+CORPORATE_EVENT_PAGES: tuple[dict[str, str], ...] = (
     {"url": "https://developer.apple.com/wwdc/", "organizer": "AAPL", "hint": "wwdc", "title": "WWDC Keynote"},
     {"url": "https://www.apple.com/apple-events/", "organizer": "AAPL", "hint": "apple-event", "title": "Apple Event"},
     {"url": "https://build.microsoft.com/en-US/home", "organizer": "MSFT", "hint": "microsoft-build", "title": "Microsoft Build"},
@@ -61,18 +62,18 @@ NEWS_KEYWORD_RE = re.compile(
     r"Meta\s+Connect|AWS\s+re:?Invent|re:Invent|"
     r"NVIDIA\s+GTC|GTC\s+\d{4}|CES\s+\d{4}|MWC\s+\d{4}|"
     r"Azure\s+AI|Copilot)",
-    re.I,
+    re.IGNORECASE,
 )
 
-ORGANIZER_FROM_TITLE: Tuple[Tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"apple|wwdc|siri|ios|ipados|macos|visionos", re.I), "AAPL"),
-    (re.compile(r"nvidia|gtc", re.I), "NVDA"),
-    (re.compile(r"google\s+i/?o|alphabet", re.I), "GOOGL"),
-    (re.compile(r"microsoft\s+build|azure|copilot", re.I), "MSFT"),
-    (re.compile(r"meta\s+connect", re.I), "META"),
-    (re.compile(r"samsung|galaxy\s+unpacked", re.I), "SAMSUNG"),
-    (re.compile(r"aws\s+re:?invent|re:invent", re.I), "AMZN"),
-    (re.compile(r"amd\s+advancing", re.I), "AMD"),
+ORGANIZER_FROM_TITLE: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"apple|wwdc|siri|ios|ipados|macos|visionos", re.IGNORECASE), "AAPL"),
+    (re.compile(r"nvidia|gtc", re.IGNORECASE), "NVDA"),
+    (re.compile(r"google\s+i/?o|alphabet", re.IGNORECASE), "GOOGL"),
+    (re.compile(r"microsoft\s+build|azure|copilot", re.IGNORECASE), "MSFT"),
+    (re.compile(r"meta\s+connect", re.IGNORECASE), "META"),
+    (re.compile(r"samsung|galaxy\s+unpacked", re.IGNORECASE), "SAMSUNG"),
+    (re.compile(r"aws\s+re:?invent|re:invent", re.IGNORECASE), "AMZN"),
+    (re.compile(r"amd\s+advancing", re.IGNORECASE), "AMD"),
 )
 
 # supply_chain 中視為「必須有行事曆覆蓋」的巨頭代號
@@ -101,14 +102,14 @@ class GlobalTechSeed:
     source_quality: str = "official"
     verified_at: str = ""
     enabled: bool = True
-    tickers: Tuple[str, ...] = ()
+    tickers: tuple[str, ...] = ()
 
 
-def _news_queries_for_year(year: int) -> Tuple[str, ...]:
+def _news_queries_for_year(year: int) -> tuple[str, ...]:
     return tuple(t.format(year=year) for t in NEWS_QUERY_TEMPLATES)
 
 
-def _mega_tech_seeds_for_year(year: int) -> List[GlobalTechSeed]:
+def _mega_tech_seeds_for_year(year: int) -> list[GlobalTechSeed]:
     """年度科技巨頭 + 國際主展種子 (日期未確認者標 estimated)。"""
     y = year
     return [
@@ -223,7 +224,7 @@ def _mega_tech_seeds_for_year(year: int) -> List[GlobalTechSeed]:
     ]
 
 
-def _default_global_tech_seeds() -> List[GlobalTechSeed]:
+def _default_global_tech_seeds() -> list[GlobalTechSeed]:
     year = now_tw().year
     return _mega_tech_seeds_for_year(year)
 
@@ -231,17 +232,17 @@ def _default_global_tech_seeds() -> List[GlobalTechSeed]:
 def tickers_for_organizer(
     organizer: str,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     min_weight: float = DEFAULT_MIN_SUPPLY_WEIGHT,
-    explicit: Optional[Sequence[str]] = None,
-) -> List[str]:
+    explicit: Sequence[str] | None = None,
+) -> list[str]:
     if explicit:
         return [str(t).strip() for t in explicit if str(t).strip()]
     if not organizer:
         return []
     sc = load_supply_chain(root)
     info = (sc.get("us_stocks") or {}).get(organizer) or {}
-    out: List[str] = []
+    out: list[str] = []
     for row in info.get("tw_supply_chain") or []:
         try:
             weight = float(row.get("weight") or 0)
@@ -253,13 +254,13 @@ def tickers_for_organizer(
     return out
 
 
-def mega_tech_organizers_in_supply_chain(*, root: Optional[Path] = None) -> List[str]:
+def mega_tech_organizers_in_supply_chain(*, root: Path | None = None) -> list[str]:
     sc = load_supply_chain(root)
     keys = set((sc.get("us_stocks") or {}).keys())
     return sorted(keys & MEGA_TECH_ORGANIZERS)
 
 
-def _seed_to_row(seed: GlobalTechSeed, *, root: Optional[Path]) -> Dict[str, Any]:
+def _seed_to_row(seed: GlobalTechSeed, *, root: Path | None) -> dict[str, Any]:
     tickers = list(seed.tickers) or tickers_for_organizer(seed.organizer, root=root)
     row = asdict(seed)
     row["tickers"] = tickers
@@ -268,7 +269,7 @@ def _seed_to_row(seed: GlobalTechSeed, *, root: Optional[Path]) -> Dict[str, Any
     return row
 
 
-def _parse_rss_pubdate(value: str) -> Optional[dt.datetime]:
+def _parse_rss_pubdate(value: str) -> dt.datetime | None:
     if not value:
         return None
     try:
@@ -279,11 +280,11 @@ def _parse_rss_pubdate(value: str) -> Optional[dt.datetime]:
 
 def fetch_apple_newsroom_events(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     lookback_hours: int = NEWS_LOOKBACK_HOURS,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """從 Apple Newsroom RSS 偵測近期發表。"""
     log = logger or get_logger("global-events")
     sess = session or requests.Session()
@@ -291,7 +292,7 @@ def fetch_apple_newsroom_events(
         "User-Agent",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     )
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     try:
         resp = sess.get(APPLE_NEWSROOM_RSS, timeout=20)
         resp.raise_for_status()
@@ -365,10 +366,10 @@ def canonical_from_title(title: str, day: dt.date) -> str:
 
 def fetch_corporate_official_pages(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """解析科技巨頭官方活動頁中的日期線索。"""
     log = logger or get_logger("global-events")
     sess = session or requests.Session()
@@ -376,7 +377,7 @@ def fetch_corporate_official_pages(
         "User-Agent",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     )
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     min_year = now_tw().year - 1
     for spec in CORPORATE_EVENT_PAGES:
         url = spec["url"]
@@ -426,17 +427,17 @@ def fetch_corporate_official_pages(
 
 def fetch_apple_official_pages(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """向後相容：僅 Apple 官方頁。"""
     rows = fetch_corporate_official_pages(root=root, session=session, logger=logger)
     return [r for r in rows if r.get("organizer") == "AAPL"]
 
 
-def _extract_iso_dates(text: str) -> List[dt.date]:
-    out: List[dt.date] = []
+def _extract_iso_dates(text: str) -> list[dt.date]:
+    out: list[dt.date] = []
     for m in re.finditer(r"\b(20\d{2})-(\d{2})-(\d{2})\b", text):
         try:
             out.append(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
@@ -446,7 +447,7 @@ def _extract_iso_dates(text: str) -> List[dt.date]:
         r"\b(January|February|March|April|May|June|July|August|September|"
         r"October|November|December)\s+(\d{1,2}),?\s+(20\d{2})\b",
         text,
-        re.I,
+        re.IGNORECASE,
     ):
         try:
             out.append(dt.datetime.strptime(
@@ -459,11 +460,11 @@ def _extract_iso_dates(text: str) -> List[dt.date]:
 
 def fetch_news_keyword_events(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     lookback_hours: int = NEWS_LOOKBACK_HOURS,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """以 Google News 關鍵字補漏近期全球科技發表。"""
     from bot.web_search import search_news
 
@@ -471,7 +472,7 @@ def fetch_news_keyword_events(
     sess = session or requests.Session()
     cutoff = now_tw() - dt.timedelta(hours=lookback_hours)
     seen_titles: set[str] = set()
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     year = now_tw().year
 
     for query in _news_queries_for_year(year):
@@ -512,7 +513,7 @@ def fetch_news_keyword_events(
     return out
 
 
-def _news_published_date(published_at: str, cutoff: dt.datetime) -> Optional[dt.date]:
+def _news_published_date(published_at: str, cutoff: dt.datetime) -> dt.date | None:
     if not published_at:
         return now_tw().date()
     try:
@@ -534,11 +535,11 @@ def _organizer_from_text(text: str) -> str:
 
 
 def merge_global_event_rows(
-    *sources: Iterable[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    *sources: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """依 canonical_key 合併；高品質來源優先，低品質不污染官方種子 note。"""
     quality_rank = {"official": 3, "estimated": 2, "news": 1}
-    merged: Dict[str, Dict[str, Any]] = {}
+    merged: dict[str, dict[str, Any]] = {}
     for rows in sources:
         for row in rows:
             if row.get("enabled") is False:
@@ -580,11 +581,11 @@ def merge_global_event_rows(
 
 def fetch_all_global_events(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     include_network: bool = True,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """收集所有來源並合併。"""
     log = logger or get_logger("global-events")
     seeds = [_seed_to_row(s, root=root) for s in _default_global_tech_seeds()]
@@ -614,8 +615,8 @@ def fetch_all_global_events(
 _canonical_from_title = canonical_from_title
 
 __all__ = [
-    "GlobalTechSeed",
     "MEGA_TECH_ORGANIZERS",
+    "GlobalTechSeed",
     "canonical_from_title",
     "fetch_all_global_events",
     "fetch_apple_newsroom_events",

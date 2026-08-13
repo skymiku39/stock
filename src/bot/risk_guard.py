@@ -50,15 +50,13 @@ import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Set, Tuple
+from typing import Literal
 
 EntryKind = Literal["enter", "reenter", "rebuy"]
 
-from bot.models import QtyUnit, qty_multiplier
+from bot.models import QtyUnit
 from bot.trade_cost import buy_cash_required, max_affordable_qty, net_pnl_twd
-
 from bot.utils import get_logger, now_tw
-
 
 KILL_SWITCH_FILENAME = ".kill_switch"
 DAILY_STATE_PREFIX = "risk_state_"
@@ -84,11 +82,11 @@ class DailyState:
     """當日累積狀態 (持久化到 risk_state_*.json)。"""
     date: str
     today_orders: int = 0
-    today_orders_per_symbol: Dict[str, int] = field(default_factory=dict)
+    today_orders_per_symbol: dict[str, int] = field(default_factory=dict)
     realized_pnl_twd: float = 0.0
-    last_exit_ts: Dict[str, float] = field(default_factory=dict)
+    last_exit_ts: dict[str, float] = field(default_factory=dict)
     kill_switch_engaged: bool = False
-    blocked_attempts: List[Dict[str, str]] = field(default_factory=list)
+    blocked_attempts: list[dict[str, str]] = field(default_factory=list)
     fund_used: float = 0.0
     open_positions: int = 0
 
@@ -108,8 +106,8 @@ class RiskGuard:
     def __init__(
         self,
         settings,                           # bot.config.Settings (避免循環 import)
-        project_root: Optional[Path] = None,
-        logger: Optional[logging.Logger] = None,
+        project_root: Path | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.settings = settings
         self.logger = logger or get_logger("risk_guard")
@@ -121,8 +119,8 @@ class RiskGuard:
         self._fund_used: float = 0.0
         self._unrealized_pnl: float = 0.0
         self._open_positions: int = 0
-        self._open_symbols: Set[str] = set()
-        self._pending_exposure: Dict[str, float] = {}
+        self._open_symbols: set[str] = set()
+        self._pending_exposure: dict[str, float] = {}
 
         self.state = self._load_today_state()
         self._fund_used = float(self.state.fund_used)
@@ -137,7 +135,7 @@ class RiskGuard:
     # 狀態持久化
     # ------------------------------------------------------------------
 
-    def _state_path(self, date: Optional[dt.date] = None) -> Path:
+    def _state_path(self, date: dt.date | None = None) -> Path:
         d = date or now_tw().date()
         return self.data_dir / f"{DAILY_STATE_PREFIX}{d.isoformat()}.json"
 
@@ -189,8 +187,8 @@ class RiskGuard:
         self,
         amount: float,
         *,
-        open_positions: Optional[int] = None,
-        open_symbols: Optional[List[str]] = None,
+        open_positions: int | None = None,
+        open_symbols: list[str] | None = None,
     ) -> None:
         """同步已用資金（啟動恢復部位時與策略對齊）。"""
         with self._lock:
@@ -265,8 +263,8 @@ class RiskGuard:
         requested_lots: int,
         *,
         unit: QtyUnit = "lot",
-        pct_chg: Optional[float] = None,
-        available_balance: Optional[float] = None,
+        pct_chg: float | None = None,
+        available_balance: float | None = None,
         enforce_account_balance: bool = False,
         entry_kind: EntryKind = "enter",
     ) -> EntryDecision:
@@ -431,9 +429,9 @@ class RiskGuard:
         qty: int,
         unit: QtyUnit,
         *,
-        available_balance: Optional[float],
+        available_balance: float | None,
         enforce_account_balance: bool,
-    ) -> Optional[EntryDecision]:
+    ) -> EntryDecision | None:
         if not enforce_account_balance or not self.settings.check_account_balance:
             return None
         if available_balance is None:
@@ -457,8 +455,8 @@ class RiskGuard:
         price: float,
         requested_shares: int,
         *,
-        pct_chg: Optional[float] = None,
-        available_balance: Optional[float] = None,
+        pct_chg: float | None = None,
+        available_balance: float | None = None,
         enforce_account_balance: bool = False,
         entry_kind: EntryKind = "enter",
     ) -> EntryDecision:
@@ -703,7 +701,7 @@ class RiskGuard:
     # 對外: 給 dashboard 用
     # ------------------------------------------------------------------
 
-    def snapshot(self) -> Dict[str, object]:
+    def snapshot(self) -> dict[str, object]:
         cap = self.settings.daily_max_loss_twd
         if self.settings.daily_max_loss_pct > 0:
             implied = self._loss_base * (self.settings.daily_max_loss_pct / 100.0)
@@ -738,9 +736,9 @@ class RiskGuard:
 
 
 __all__ = [
-    "RiskGuard",
+    "KILL_SWITCH_FILENAME",
+    "DailyState",
     "EntryDecision",
     "EntryKind",
-    "DailyState",
-    "KILL_SWITCH_FILENAME",
+    "RiskGuard",
 ]

@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
-from bot.smile_curve_backtest_cli import _ensure_daily_data, _normalize_symbol, _resolve_dates
+from bot.smile_curve_backtest_cli import (
+    _ensure_daily_data,
+    _normalize_symbol,
+    _resolve_dates,
+)
 from bot.smile_curve_screener import (
     SmileScreenReport,
     collect_universe_tickers,
     screen_smile_candidates,
 )
 from bot.stock_db import StockDB, default_db_path
-from bot.utils import get_logger, now_tw
+from bot.utils import get_logger
 
 
 def _print_report(report: SmileScreenReport) -> None:
@@ -63,7 +65,7 @@ def _print_report(report: SmileScreenReport) -> None:
     print(f"SELL_PROFIT_TARGETS={sug['SELL_PROFIT_TARGETS']}")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="微笑曲線複合選股：ETF 共識 + 波動回檔 + 資金可負擔 + 回測驗證",
     )
@@ -89,11 +91,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     root = Path.cwd()
     start, end = _resolve_dates(args.days, args.start, args.end)
 
-    extra: Optional[List[str]] = None
+    extra: list[str] | None = None
     if args.symbols:
         extra = [_normalize_symbol(s) for s in args.symbols.split(",") if s.strip()]
 
-    use_odd_lot: Optional[bool] = None
+    use_odd_lot: bool | None = None
     if args.odd_lot:
         use_odd_lot = True
     elif args.no_odd_lot:

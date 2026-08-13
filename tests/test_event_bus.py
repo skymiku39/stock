@@ -14,7 +14,7 @@ from bot.events import (
     create_event_bus,
     reset_event_bus,
 )
-from bot.events.handlers import JsonlEventRecorder, attach_jsonl_recorder
+from bot.events.handlers import attach_jsonl_recorder
 from bot.events.wiring import get_event_bus, publish_if_bus
 
 

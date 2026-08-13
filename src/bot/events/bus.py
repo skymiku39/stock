@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict
-from typing import Callable, DefaultDict, List, Optional
+from collections.abc import Callable
 
 from bot.events.protocols import EventHandler
 from bot.events.types import DomainEvent
@@ -17,7 +17,7 @@ class InMemoryEventBus:
     """執行緒安全的記憶體內事件匯流排。"""
 
     def __init__(self) -> None:
-        self._handlers: DefaultDict[str, List[EventHandler]] = defaultdict(list)
+        self._handlers: defaultdict[str, list[EventHandler]] = defaultdict(list)
         self._lock = threading.RLock()
 
     def publish(self, event: DomainEvent) -> None:
@@ -73,7 +73,7 @@ class InMemoryEventBus:
         with self._lock:
             self._handlers.clear()
 
-    def handler_count(self, event_type: Optional[type[DomainEvent]] = None) -> int:
+    def handler_count(self, event_type: type[DomainEvent] | None = None) -> int:
         with self._lock:
             if event_type is None:
                 return sum(len(v) for v in self._handlers.values())

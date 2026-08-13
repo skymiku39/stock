@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from bot.cloud_file_cache import read_json_cache, write_json_cache
 from bot.config import Settings
@@ -16,23 +17,22 @@ from bot.fundamentals_fetcher import (
 )
 from bot.utils import get_logger, now_tw
 
-
 QUEUE_FILE = "refresh_queue.json"
 RETRY_MIN_SECONDS = 6 * 3600
 RETRY_MAX_SECONDS = 72 * 3600
 
 
-def _cache_root(root: Optional[Path] = None) -> Path:
+def _cache_root(root: Path | None = None) -> Path:
     base = (root or Path.cwd()) / "data" / "fundamentals"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
 
-def _queue_path(root: Optional[Path] = None) -> Path:
+def _queue_path(root: Path | None = None) -> Path:
     return _cache_root(root) / QUEUE_FILE
 
 
-def _parse_time(value: Any) -> Optional[dt.datetime]:
+def _parse_time(value: Any) -> dt.datetime | None:
     if not value:
         return None
     try:
@@ -48,8 +48,8 @@ def _normalize_symbol(symbol: str) -> str:
     return "".join(ch for ch in str(symbol).strip() if ch.isalnum())
 
 
-def _split_symbols(values: Iterable[str]) -> List[str]:
-    out: List[str] = []
+def _split_symbols(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
     seen: set[str] = set()
     for raw in values:
         for part in str(raw).split(","):
@@ -60,7 +60,7 @@ def _split_symbols(values: Iterable[str]) -> List[str]:
     return out
 
 
-def load_refresh_queue(root: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+def load_refresh_queue(root: Path | None = None) -> dict[str, dict[str, Any]]:
     raw = read_json_cache(_queue_path(root), root=root) or {}
     raw_items = raw.get("items", {}) if isinstance(raw, dict) else {}
     if isinstance(raw_items, dict):
@@ -70,7 +70,7 @@ def load_refresh_queue(root: Optional[Path] = None) -> Dict[str, Dict[str, Any]]
     else:
         items = []
 
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -84,9 +84,9 @@ def load_refresh_queue(root: Optional[Path] = None) -> Dict[str, Dict[str, Any]]
 
 
 def save_refresh_queue(
-    items: Dict[str, Dict[str, Any]],
+    items: dict[str, dict[str, Any]],
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> Path:
     ordered = sorted(
         items.values(),
@@ -102,10 +102,10 @@ def save_refresh_queue(
 def enqueue_refresh(
     symbol: str,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     reason: str = "stale_or_missing_cache",
     delay_minutes: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     symbol = _normalize_symbol(symbol)
     if not symbol:
         raise ValueError("symbol is required")
@@ -127,7 +127,7 @@ def enqueue_refresh(
     return item
 
 
-def _needs_refresh(symbol: str, *, root: Optional[Path], stale_days: int) -> bool:
+def _needs_refresh(symbol: str, *, root: Path | None, stale_days: int) -> bool:
     ticker_dir = _cache_root(root) / symbol
     paths = [
         ticker_dir / "monthly_revenue.json",
@@ -148,7 +148,7 @@ def _needs_refresh(symbol: str, *, root: Optional[Path], stale_days: int) -> boo
 def seed_refresh_queue(
     symbols: Iterable[str],
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     stale_days: int = 30,
     force: bool = False,
     reason: str = "stale_or_missing_cache",
@@ -173,7 +173,7 @@ def seed_refresh_queue(
     return added
 
 
-def _mark_failure(item: Dict[str, Any], error: Exception) -> Dict[str, Any]:
+def _mark_failure(item: dict[str, Any], error: Exception) -> dict[str, Any]:
     attempts = int(item.get("attempts") or 0) + 1
     delay = min(RETRY_MIN_SECONDS * (2 ** max(0, attempts - 1)), RETRY_MAX_SECONDS)
     now = now_tw()
@@ -187,7 +187,7 @@ def _mark_failure(item: Dict[str, Any], error: Exception) -> Dict[str, Any]:
     return item
 
 
-def _due_items(items: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _due_items(items: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     now = now_tw()
     due = []
     for item in items.values():
@@ -202,12 +202,12 @@ def _due_items(items: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def run_refresh_queue(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     limit: int = 3,
     delay_seconds: int = 30,
     dry_run: bool = False,
     logger: Any = None,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     log = logger or get_logger("fundamentals-refresh")
     items = load_refresh_queue(root)
     due = _due_items(items)
@@ -263,7 +263,7 @@ def run_refresh_queue(
     return stats
 
 
-def _known_symbols(settings: Settings, root: Path, explicit: List[str]) -> List[str]:
+def _known_symbols(settings: Settings, root: Path, explicit: list[str]) -> list[str]:
     symbols = _split_symbols(explicit)
     symbols.extend(_split_symbols(settings.symbols))
 
@@ -283,7 +283,7 @@ def _known_symbols(settings: Settings, root: Path, explicit: List[str]) -> List[
     return _split_symbols(symbols)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-fundamentals-refresh",
         description="Run a small batch from the local fundamental refresh queue.",

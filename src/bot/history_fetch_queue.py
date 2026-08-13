@@ -11,7 +11,7 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 
@@ -35,7 +35,7 @@ STATE_DIR_REL = "data/history_fetch"
 STATE_FILE = "state.json"
 
 # 程序內快取：TWSE 若已 403，後續批次直接走 yfinance，省掉無效 HTTP
-_twse_blocked_cache: Optional[bool] = None
+_twse_blocked_cache: bool | None = None
 
 
 @dataclass
@@ -48,7 +48,7 @@ class WorkItem:
 
 @dataclass
 class FetchRunResult:
-    item: Optional[WorkItem]
+    item: WorkItem | None
     ok: bool = False
     rows: int = 0
     http_status: int = 0
@@ -61,12 +61,12 @@ class QueueState:
     version: int = 1
     start_date: str = "2020-01-01"
     end_date: str = ""
-    symbols: List[str] = field(default_factory=list)
+    symbols: list[str] = field(default_factory=list)
     symbol_index: int = 0
     month_index: int = 0
-    months: List[Tuple[int, int]] = field(default_factory=list)
+    months: list[tuple[int, int]] = field(default_factory=list)
     kind: str = "daily"
-    cooldown_until: Dict[str, str] = field(default_factory=dict)
+    cooldown_until: dict[str, str] = field(default_factory=dict)
     stats_ok: int = 0
     stats_fail: int = 0
     stats_rows: int = 0
@@ -74,13 +74,13 @@ class QueueState:
     last_message: str = ""
     updated_at: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["months"] = [[y, m] for y, m in self.months]
         return d
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> QueueState:
+    def from_dict(cls, data: dict[str, Any]) -> QueueState:
         months_raw = data.get("months") or []
         months = [(int(y), int(m)) for y, m in months_raw]
         return cls(
@@ -102,13 +102,13 @@ class QueueState:
         )
 
 
-def state_path(root: Optional[Path] = None) -> Path:
+def state_path(root: Path | None = None) -> Path:
     base = (root or Path.cwd()) / STATE_DIR_REL
     mk_folder(str(base))
     return base / STATE_FILE
 
 
-def load_state(root: Optional[Path] = None) -> QueueState:
+def load_state(root: Path | None = None) -> QueueState:
     path = state_path(root)
     if not path.exists():
         return QueueState()
@@ -119,7 +119,7 @@ def load_state(root: Optional[Path] = None) -> QueueState:
         return QueueState()
 
 
-def save_state(state: QueueState, root: Optional[Path] = None) -> None:
+def save_state(state: QueueState, root: Path | None = None) -> None:
     state.updated_at = now_tw().isoformat(timespec="seconds")
     path = state_path(root)
     path.write_text(
@@ -130,10 +130,10 @@ def save_state(state: QueueState, root: Optional[Path] = None) -> None:
 
 def init_state(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     start_date: str = "2020-01-01",
-    end_date: Optional[str] = None,
-    symbols: Optional[List[str]] = None,
+    end_date: str | None = None,
+    symbols: list[str] | None = None,
     kind: str = "daily",
     lookback_days: int = 5,
 ) -> QueueState:
@@ -185,7 +185,7 @@ def _month_covered(
     return len(bars) >= 10
 
 
-def _in_cooldown(state: QueueState, symbol: str, now: Optional[dt.datetime] = None) -> bool:
+def _in_cooldown(state: QueueState, symbol: str, now: dt.datetime | None = None) -> bool:
     raw = state.cooldown_until.get(symbol)
     if not raw:
         return False
@@ -203,7 +203,7 @@ def _set_cooldown(
     state: QueueState,
     symbol: str,
     minutes: int,
-    now: Optional[dt.datetime] = None,
+    now: dt.datetime | None = None,
 ) -> None:
     until = (now or now_tw()) + dt.timedelta(minutes=minutes)
     state.cooldown_until[symbol] = until.isoformat(timespec="seconds")
@@ -213,8 +213,8 @@ def next_work_item(
     state: QueueState,
     db: StockDB,
     *,
-    now: Optional[dt.datetime] = None,
-) -> Optional[WorkItem]:
+    now: dt.datetime | None = None,
+) -> WorkItem | None:
     if not state.symbols or not state.months:
         return None
     n_sym = len(state.symbols)
@@ -259,7 +259,7 @@ def twse_is_available(session=None, *, force_check: bool = False) -> bool:
 
 def _save_daily_rows(
     symbol: str,
-    rows: List[Dict[str, Any]],
+    rows: list[dict[str, Any]],
     *,
     root: Path,
     db: StockDB,
@@ -298,7 +298,7 @@ def run_one_daily(
     use_yfinance_fallback: bool = True,
 ) -> FetchRunResult:
     market = _resolve_market(item.symbol, root, logger=logger)
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     meta = MonthlyKlineResult(rows=[], http_status=0)
     source = "twse"
     if market == "twse" and not twse_is_available(session):
@@ -345,7 +345,7 @@ def run_one_daily(
 
 def process_batch(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     batch_size: int = 1,
     delay_sec: float = 2.0,
     cooldown_minutes: int = 45,
@@ -353,7 +353,7 @@ def process_batch(
     lookback_days: int = 5,
     use_yfinance_fallback: bool = True,
     logger=None,
-) -> List[FetchRunResult]:
+) -> list[FetchRunResult]:
     """處理最多 batch_size 個工作項目；回傳每筆結果。"""
     log = logger or get_logger("history-fetch")
     root = root or Path.cwd()
@@ -364,7 +364,7 @@ def process_batch(
         log.info("初始化佇列：%d 檔 × %d 月", len(state.symbols), len(state.months))
 
     sess = _session()
-    results: List[FetchRunResult] = []
+    results: list[FetchRunResult] = []
     for _ in range(max(1, batch_size)):
         item = next_work_item(state, db)
         if item is None:
@@ -417,7 +417,7 @@ def process_batch(
     return results
 
 
-def status_summary(root: Optional[Path] = None) -> Dict[str, Any]:
+def status_summary(root: Path | None = None) -> dict[str, Any]:
     root = root or Path.cwd()
     state = load_state(root)
     db = StockDB.open(path=default_db_path(root))

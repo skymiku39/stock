@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.company_info import backfill_stock_info, load_company_map
 from bot.config import Settings
@@ -23,7 +22,7 @@ from bot.stock_db import StockDB, default_db_path
 from bot.utils import get_logger
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:

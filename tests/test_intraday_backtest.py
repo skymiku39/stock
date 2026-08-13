@@ -22,7 +22,7 @@ def _seed_day(db: StockDB, symbol: str, day: str, prev_close: float) -> None:
         PriceBar(symbol=symbol, date=day, close=prev_close, open=prev_close),
     ])
     bars = []
-    for minute in range(0, 30):
+    for minute in range(30):
         t = dt.time(9, minute)
         ts = f"{day} {t.hour:02d}:{t.minute:02d}:00"
         px = prev_close * (1 + 0.02 * minute / 30)

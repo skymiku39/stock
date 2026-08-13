@@ -9,7 +9,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
@@ -39,12 +39,12 @@ DEFAULT_WATCH_SYMBOLS = (
 class PriceBandHeatRow:
     ticker: str
     name: str = ""
-    price: Optional[float] = None
-    pct_chg: Optional[float] = None
+    price: float | None = None
+    pct_chg: float | None = None
     volume: int = 0
     band_rank: int = 0
     market_volume_rank: int = 0
-    tick2_pct: Optional[float] = None
+    tick2_pct: float | None = None
     quote_time: str = ""
     in_watchlist: bool = False
 
@@ -59,10 +59,10 @@ class PriceBandHeatResult:
     band_count: int = 0
     batch_count: int = 0
     duration_sec: float = 0.0
-    rows: List[PriceBandHeatRow] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    rows: list[PriceBandHeatRow] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             **{k: v for k, v in asdict(self).items() if k != "rows"},
             "rows": [asdict(r) for r in self.rows],
@@ -83,16 +83,16 @@ def _is_dr_like(row: MoverRow) -> bool:
 
 def _scan_all_quotes(
     *,
-    root: Optional[Path],
+    root: Path | None,
     exclude_etf: bool,
     batch_size: int,
     batch_pause_sec: float,
     sess: requests.Session,
     logger: logging.Logger,
-) -> tuple[Dict[str, MoverRow], int, int, List[str]]:
+) -> tuple[dict[str, MoverRow], int, int, list[str]]:
     market_map = load_market_map(root=root)
     tickers = list_scan_tickers(root=root, exclude_etf=exclude_etf)
-    errors: List[str] = []
+    errors: list[str] = []
     if not tickers:
         return {}, 0, 0, ["無可掃描代號 (market_map 為空)"]
 
@@ -101,7 +101,7 @@ def _scan_all_quotes(
     except Exception as exc:  # noqa: BLE001
         return {}, len(tickers), 0, [f"MIS session 初始化失敗: {exc}"]
 
-    merged: Dict[str, MoverRow] = {}
+    merged: dict[str, MoverRow] = {}
     batches = [tickers[i: i + batch_size] for i in range(0, len(tickers), batch_size)]
     for idx, batch in enumerate(batches):
         ex_ch = _ex_ch_for_batch(batch, market_map)
@@ -123,17 +123,17 @@ def _scan_all_quotes(
 
 def fetch_price_band_heat(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     price_low: float = DEFAULT_PRICE_LOW,
     price_high: float = DEFAULT_PRICE_HIGH,
     limit: int = 50,
     exclude_etf: bool = True,
     exclude_dr: bool = True,
-    watch_symbols: Optional[List[str]] = None,
+    watch_symbols: list[str] | None = None,
     batch_size: int = 45,
     batch_pause_sec: float = 0.12,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> PriceBandHeatResult:
     """掃描全市場，篩選價格區間並依成交量排名。"""
     log = logger or get_logger("price-band-heat")
@@ -166,11 +166,11 @@ def fetch_price_band_heat(
         key=lambda r: r.volume,
         reverse=True,
     )
-    market_rank: Dict[str, int] = {
+    market_rank: dict[str, int] = {
         row.ticker: idx + 1 for idx, row in enumerate(by_volume)
     }
 
-    band_rows: List[PriceBandHeatRow] = []
+    band_rows: list[PriceBandHeatRow] = []
     for row in merged.values():
         if row.price is None or not (low <= row.price <= high):
             continue

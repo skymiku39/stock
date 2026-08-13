@@ -6,13 +6,16 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.app_bootstrap import get_or_create_bus
 from bot.events import SmileAuditCompleted
 from bot.events.wiring import publish_if_bus
 from bot.smile_curve_backtest_analysis import DEFAULT_SCENARIOS, audit_symbols
-from bot.smile_curve_backtest_cli import _ensure_daily_data, _normalize_symbol, _resolve_dates
+from bot.smile_curve_backtest_cli import (
+    _ensure_daily_data,
+    _normalize_symbol,
+    _resolve_dates,
+)
 from bot.stock_db import StockDB, default_db_path
 from bot.utils import get_logger, mk_folder, now_tw
 
@@ -57,7 +60,7 @@ def _print_audit(reports) -> None:
             print(f"     ※ {note}")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="微笑曲線多情境完整回測審計")
     parser.add_argument("--symbols", required=True, help="逗號分隔，例 2303,2344")
     parser.add_argument("--start", help="覆寫所有情境起始日（可選）")

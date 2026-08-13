@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from bot.market_source import TwsePublicMarketSource
-
 
 SAMPLE_MSG_ARRAY = [
     {

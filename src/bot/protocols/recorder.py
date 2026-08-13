@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -11,11 +11,11 @@ class TradeRecorderProtocol(Protocol):
 
     def record_deal(
         self,
-        msg: Dict[str, Any],
+        msg: dict[str, Any],
         *,
         unit: str = "lot",
         trade_reason: str = "",
-        entry_price: Optional[float] = None,
+        entry_price: float | None = None,
         pnl_pct: float = 0.0,
         pnl_twd: float = 0.0,
     ) -> None: ...

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Literal
 
 from bot.models import QtyUnit
 from bot.trade_cost import (
@@ -66,15 +67,15 @@ class SmileRoundTrip:
 @dataclass
 class SmileCycleState:
     reference: float = 0.0
-    lots: List[SmileLot] = field(default_factory=list)
+    lots: list[SmileLot] = field(default_factory=list)
     tiers_done: set[int] = field(default_factory=set)
     bottom_dca_done_dates: set[str] = field(default_factory=set)
     cycle_index: int = 0
 
 
-def parse_smile_buy_tiers(raw: str) -> List[SmileBuyTier]:
+def parse_smile_buy_tiers(raw: str) -> list[SmileBuyTier]:
     """解析 '1:1,3:2,5:3,8:4' → 跌幅% : 加碼倍數。"""
-    tiers: List[SmileBuyTier] = []
+    tiers: list[SmileBuyTier] = []
     for item in raw.replace(";", ",").split(","):
         part = item.strip()
         if not part:
@@ -97,10 +98,10 @@ def parse_smile_buy_tiers(raw: str) -> List[SmileBuyTier]:
 def resolve_smile_reference(
     symbol: str,
     price: float,
-    settings: "Settings",
+    settings: Settings,
 ) -> float:
     """決定週期標準價：手動指定 > 當日價。"""
-    refs: Dict[str, float] = getattr(settings, "smile_reference_prices", {}) or {}
+    refs: dict[str, float] = getattr(settings, "smile_reference_prices", {}) or {}
     if symbol in refs and refs[symbol] > 0:
         return float(refs[symbol])
     return price
@@ -109,7 +110,7 @@ def resolve_smile_reference(
 class SmileCurveEngine:
     """單檔微笑曲線狀態機（日 K / Tick 共用邏輯）。"""
 
-    def __init__(self, symbol: str, settings: "Settings"):
+    def __init__(self, symbol: str, settings: Settings):
         self.symbol = symbol
         self.settings = settings
         self.state = SmileCycleState()
@@ -118,7 +119,7 @@ class SmileCurveEngine:
         )
         self.base_lot = max(1, int(getattr(settings, "smile_base_lot", 1)))
         self.sell_tax = float(getattr(settings, "smile_regular_tax_rate", 0.003))
-        self.round_trips: List[SmileRoundTrip] = []
+        self.round_trips: list[SmileRoundTrip] = []
         self._cash_used = 0.0
 
     def _fund_remaining(self) -> float:
@@ -205,7 +206,7 @@ class SmileCurveEngine:
         unit: QtyUnit,
         date: str,
         reason: str,
-    ) -> Optional[SmileAction]:
+    ) -> SmileAction | None:
         qty = self._affordable_qty(price, qty, unit)
         if qty <= 0:
             return None
@@ -244,14 +245,14 @@ class SmileCurveEngine:
             reference=self.state.reference,
         )
 
-    def _init_reference(self, price: float, date: str) -> List[SmileAction]:
+    def _init_reference(self, price: float, date: str) -> list[SmileAction]:
         self.state.reference = resolve_smile_reference(self.symbol, price, self.settings)
         return [self._reset_cycle(price, date)]
 
-    def _rebound_sell(self, date: str, price: float) -> List[SmileAction]:
-        actions: List[SmileAction] = []
+    def _rebound_sell(self, date: str, price: float) -> list[SmileAction]:
+        actions: list[SmileAction] = []
         sold_any = False
-        remaining: List[SmileLot] = []
+        remaining: list[SmileLot] = []
         for lot in self.state.lots:
             if self._is_profitable_sell(lot, price):
                 actions.append(self._record_sell(lot, price, date, "rebound"))
@@ -267,8 +268,8 @@ class SmileCurveEngine:
             self.state.bottom_dca_done_dates.clear()
         return actions
 
-    def _dip_buy(self, date: str, price: float) -> List[SmileAction]:
-        actions: List[SmileAction] = []
+    def _dip_buy(self, date: str, price: float) -> list[SmileAction]:
+        actions: list[SmileAction] = []
         drop = self._drop_pct(price)
         unit: QtyUnit = "share" if self.settings.use_odd_lot else "lot"
 
@@ -297,7 +298,7 @@ class SmileCurveEngine:
                 self.state.bottom_dca_done_dates.add(date)
         return actions
 
-    def on_bar(self, date: str, close: float) -> List[SmileAction]:
+    def on_bar(self, date: str, close: float) -> list[SmileAction]:
         """處理單根 K 線收盤價，回傳當日動作序列。"""
         return self.on_bar_ohlc(date, close, close, close, close)
 
@@ -308,9 +309,9 @@ class SmileCurveEngine:
         high: float,
         low: float,
         close: float,
-    ) -> List[SmileAction]:
+    ) -> list[SmileAction]:
         """日 K OHLC：先以當日低點評估加碼，再以高點評估獲利了結。"""
-        actions: List[SmileAction] = []
+        actions: list[SmileAction] = []
         close = float(close)
         high = float(high)
         low = float(low)
@@ -328,7 +329,7 @@ class SmileCurveEngine:
         return actions
 
     @property
-    def open_lots(self) -> List[SmileLot]:
+    def open_lots(self) -> list[SmileLot]:
         return list(self.state.lots)
 
     @property

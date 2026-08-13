@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
@@ -20,7 +19,7 @@ from bot.intraday_pipeline import run_intraday
 from bot.utils import get_logger
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="stock-intraday",
         description="今日當沖戰情室 (主題雷達 → 候選股 → 排序 → LLM 簡報)",

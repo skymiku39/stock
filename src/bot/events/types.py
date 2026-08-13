@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import uuid4
 
 
@@ -14,7 +14,7 @@ class DomainEvent:
 
     event_id: str = field(default_factory=lambda: uuid4().hex)
     occurred_at: str = field(
-        default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat(),
+        default_factory=lambda: dt.datetime.now(dt.UTC).isoformat(),
     )
 
     @property
@@ -36,7 +36,7 @@ class QuantDataFetchCompleted(DomainEvent):
     symbols: tuple[str, ...]
     start: str
     end: str
-    price_bars: Dict[str, int] = field(default_factory=dict)
+    price_bars: dict[str, int] = field(default_factory=dict)
     errors: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -52,7 +52,7 @@ class SmileScreenCompleted(DomainEvent):
 class SmileAuditCompleted(DomainEvent):
     symbols: tuple[str, ...]
     scenario_count: int
-    report_path: Optional[str] = None
+    report_path: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -63,7 +63,7 @@ class TickReceived(DomainEvent):
     price: float
     pct_chg: float = 0.0
     source: str = "shioaji"
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ class TradeBuyFilled(DomainEvent):
     price: float
     quantity: int
     unit: str
-    order_msg: Dict[str, Any]
+    order_msg: dict[str, Any]
     trade_reason: str = "enter"
 
 
@@ -112,7 +112,7 @@ class TradeSellFilled(DomainEvent):
     price: float
     quantity: int
     unit: str
-    order_msg: Dict[str, Any]
+    order_msg: dict[str, Any]
     trade_reason: str
     entry_price: float
     pnl_pct: float = 0.0
@@ -161,7 +161,7 @@ class PipelineCompleted(DomainEvent):
     success: bool
     error_count: int = 0
     duration_sec: float = 0.0
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -182,4 +182,4 @@ class SchedulerJobCompleted(DomainEvent):
     success: bool
     exit_code: int = 0
     dry_run: bool = False
-    log_path: Optional[str] = None
+    log_path: str | None = None

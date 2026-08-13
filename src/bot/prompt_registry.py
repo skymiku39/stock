@@ -14,7 +14,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.utils import get_logger
 
@@ -30,7 +30,7 @@ class PromptInput:
     name: str
     required: bool = True
     desc: str = ""
-    max_chars: Optional[int] = None
+    max_chars: int | None = None
 
 
 @dataclass
@@ -45,8 +45,8 @@ class PromptTemplate:
     max_output_tokens: int = 2048
     temperature: float = 0.2
     output_format: str = "text"
-    inputs: List[PromptInput] = field(default_factory=list)
-    path: Optional[Path] = None
+    inputs: list[PromptInput] = field(default_factory=list)
+    path: Path | None = None
 
     # ------------------------------------------------------------------
     # 渲染
@@ -112,9 +112,9 @@ class PromptTemplate:
 # ----------------------------------------------------------------------
 
 
-def _simple_yaml_parse(text: str) -> Dict[str, Any]:
+def _simple_yaml_parse(text: str) -> dict[str, Any]:
     """非常簡化的 YAML parser：只支援 key: value 與 key: | 多行字串。"""
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -128,9 +128,9 @@ def _simple_yaml_parse(text: str) -> Dict[str, Any]:
             continue
         key, val = m.group(1), m.group(2).strip()
         if val == "|":
-            block: List[str] = []
+            block: list[str] = []
             i += 1
-            indent: Optional[int] = None
+            indent: int | None = None
             while i < len(lines):
                 blk = lines[i]
                 if blk.strip() == "":
@@ -166,7 +166,7 @@ def _simple_yaml_parse(text: str) -> Dict[str, Any]:
     return data
 
 
-def _parse_yaml_file(path: Path) -> Dict[str, Any]:
+def _parse_yaml_file(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     if _HAS_YAML:
         try:
@@ -186,13 +186,13 @@ class PromptRegistry:
 
     def __init__(
         self,
-        prompts_dir: Optional[Path] = None,
-        logger: Optional[logging.Logger] = None,
+        prompts_dir: Path | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.prompts_dir = prompts_dir or (Path.cwd() / "prompts")
         self.logger = logger or get_logger("prompt-registry")
         self._lock = threading.Lock()
-        self._prompts: Dict[str, PromptTemplate] = {}
+        self._prompts: dict[str, PromptTemplate] = {}
         self.reload()
 
     def reload(self) -> int:
@@ -207,7 +207,7 @@ class PromptRegistry:
                     raw = _parse_yaml_file(f)
                     pid = str(raw.get("id") or f.stem)
                     inputs_raw = raw.get("inputs") or []
-                    inputs: List[PromptInput] = []
+                    inputs: list[PromptInput] = []
                     if isinstance(inputs_raw, list):
                         for x in inputs_raw:
                             if isinstance(x, dict):
@@ -242,11 +242,11 @@ class PromptRegistry:
     # 查詢
     # ------------------------------------------------------------------
 
-    def list_ids(self) -> List[str]:
+    def list_ids(self) -> list[str]:
         with self._lock:
             return sorted(self._prompts.keys())
 
-    def get(self, prompt_id: str) -> Optional[PromptTemplate]:
+    def get(self, prompt_id: str) -> PromptTemplate | None:
         with self._lock:
             return self._prompts.get(prompt_id)
 
@@ -272,11 +272,11 @@ class PromptRegistry:
 # Singleton 工具
 # ----------------------------------------------------------------------
 
-_registry: Optional[PromptRegistry] = None
+_registry: PromptRegistry | None = None
 _registry_lock = threading.Lock()
 
 
-def get_registry(prompts_dir: Optional[Path] = None) -> PromptRegistry:
+def get_registry(prompts_dir: Path | None = None) -> PromptRegistry:
     global _registry
     with _registry_lock:
         if _registry is None:

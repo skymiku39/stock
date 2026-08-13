@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.cloud_file_cache import restore_file_from_cloud, restore_tree_from_cloud
 
 
-def macro_summary_text(macro: Dict[str, Any]) -> str:
-    bits: List[str] = []
+def macro_summary_text(macro: dict[str, Any]) -> str:
+    bits: list[str] = []
     idx = macro.get("indices") or {}
     for sym, label in [
         ("^GSPC", "S&P"), ("^IXIC", "NASDAQ"),
@@ -34,7 +34,7 @@ def macro_summary_text(macro: Dict[str, Any]) -> str:
     return "; ".join(bits) or "(無 macro)"
 
 
-def parse_json_blob(text: str) -> Optional[Dict[str, Any]]:
+def parse_json_blob(text: str) -> dict[str, Any] | None:
     """robust JSON 解析 (處理 LLM 偶爾帶 ```json fence)。"""
     t = (text or "").strip()
     if t.startswith("```"):
@@ -54,7 +54,7 @@ def parse_json_blob(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def consensus_tickers_today(root: Path) -> List[str]:
+def consensus_tickers_today(root: Path) -> list[str]:
     """從最近一次 pipeline run 取共識 top tickers。"""
     base = root / "data" / "pipeline_runs"
     restore_tree_from_cloud(base, root=root)
@@ -69,7 +69,7 @@ def consensus_tickers_today(root: Path) -> List[str]:
         return []
     try:
         data = json.loads(rj.read_text(encoding="utf-8"))
-        tickers: List[str] = []
+        tickers: list[str] = []
         for item in (data.get("consensus_top") or []):
             t = str(item.get("ticker", "")).strip()
             if t and t.isdigit() and t not in tickers:
@@ -79,7 +79,7 @@ def consensus_tickers_today(root: Path) -> List[str]:
         return []
 
 
-def intraday_report_to_dict(report: Any) -> Dict[str, Any]:
+def intraday_report_to_dict(report: Any) -> dict[str, Any]:
     """將 IntradayReport（或同欄位 dataclass）轉為 JSON 可序列化 dict。"""
     rankings = report.rankings
     if rankings and hasattr(rankings[0], "__dataclass_fields__"):

@@ -36,12 +36,12 @@ import re
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import requests
-
 
 # ----------------------------------------------------------------------
 # 結果模型
@@ -58,9 +58,9 @@ class CheckResult:
     error: str = ""
     note: str = ""
     needs_credentials: bool = False
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "layer": self.layer,
@@ -158,7 +158,7 @@ def check_quarterly(root: Path) -> CheckResult:
 _MIN_WEIGHT_TOKENS = 8
 
 
-def check_etf_urls(root: Path) -> List[CheckResult]:
+def check_etf_urls(root: Path) -> list[CheckResult]:
     """逐檔 ETF：HTTP 200 (layer=http) + 來源頁是否含持股明細 (layer=parse 的非 LLM 近似)。
 
     layer=parse 僅近似 (數權重百分比 token)；真正的持股 CSV 由 LLM 抓取流程產生。
@@ -166,7 +166,7 @@ def check_etf_urls(root: Path) -> List[CheckResult]:
     from bot.active_etf import load_active_etfs
     from bot.etf_holdings_fetcher import _html_to_text  # type: ignore
 
-    out: List[CheckResult] = []
+    out: list[CheckResult] = []
     sess = _session()
     etfs = load_active_etfs(root)
     for e in etfs:
@@ -344,7 +344,7 @@ def check_macro(root: Path) -> CheckResult:
 
 def check_futures_basis(root: Path) -> CheckResult:
     """期貨領先指標：台指期近月 + 正逆價差 (TAIFEX)。"""
-    from bot.market_macro import fetch_tx_futures_basis, fetch_macro_snapshot
+    from bot.market_macro import fetch_macro_snapshot, fetch_tx_futures_basis
     r = CheckResult(name="期貨領先指標/台指期正逆價差 (TAIFEX)", layer="parse")
     try:
         spot = 0.0
@@ -382,7 +382,7 @@ def check_futures_basis(root: Path) -> CheckResult:
 # ----------------------------------------------------------------------
 
 
-def check_shioaji(attempt_login: bool) -> List[CheckResult]:
+def check_shioaji(attempt_login: bool) -> list[CheckResult]:
     """Shioaji 分段驗證：憑證存在 / 登入 / contract / snapshot。
 
     預設只回報「憑證是否存在」(不印金鑰)。加 --shioaji 才會嘗試登入。
@@ -522,17 +522,17 @@ def check_cloud(live: bool) -> CheckResult:
 
 def run_all(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     attempt_shioaji: bool = False,
     mis_seconds: int = 0,
     cloud_live: bool = False,
-) -> List[CheckResult]:
+) -> list[CheckResult]:
     """跑全部 read-only 檢查 (寫入導向暫存 root)。"""
     tmp = Path(tempfile.mkdtemp(prefix="validate_sources_"))
     root = root or tmp
-    results: List[CheckResult] = []
+    results: list[CheckResult] = []
 
-    public_checks: List[Callable[[], CheckResult]] = [
+    public_checks: list[Callable[[], CheckResult]] = [
         lambda: check_monthly_revenue(root),
         lambda: check_valuation(root),
         lambda: check_dividends(root),
@@ -566,7 +566,7 @@ def run_all(
     return results
 
 
-def summarize(results: List[CheckResult]) -> Dict[str, Any]:
+def summarize(results: list[CheckResult]) -> dict[str, Any]:
     ok = sum(1 for r in results if r.ok)
     fail = sum(1 for r in results if not r.ok and not r.note)
     warn = sum(1 for r in results if not r.ok and r.note)
@@ -580,7 +580,7 @@ def summarize(results: List[CheckResult]) -> Dict[str, Any]:
     }
 
 
-def to_markdown(summary: Dict[str, Any]) -> str:
+def to_markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# 資料源驗證報告",
         "",
@@ -605,7 +605,7 @@ def to_markdown(summary: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="資料源只讀健康度 smoke test")
     parser.add_argument("--json", dest="json_path", default="", help="另存 JSON 報告路徑")
     parser.add_argument("--md", dest="md_path", default="", help="另存 Markdown 報告路徑")

@@ -20,17 +20,16 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
 
 from bot.history_fetch_queue import (
     init_state,
     process_batch,
     status_summary,
 )
-from bot.utils import get_logger, now_tw
+from bot.utils import get_logger
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="慢速補齊歷史日 K")
     parser.add_argument("--init", action="store_true", help="重建待補佇列")
     parser.add_argument("--status", action="store_true", help="顯示進度")

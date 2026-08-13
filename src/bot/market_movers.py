@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 import requests
 
@@ -31,9 +31,9 @@ Direction = Literal["gainers", "losers", "abs"]
 class MoverRow:
     ticker: str
     name: str = ""
-    price: Optional[float] = None
+    price: float | None = None
     prev_close: float = 0.0
-    pct_chg: Optional[float] = None
+    pct_chg: float | None = None
     volume: int = 0
     exchange: str = ""
     quote_time: str = ""
@@ -50,10 +50,10 @@ class MarketMoversResult:
     quoted: int = 0
     batch_count: int = 0
     duration_sec: float = 0.0
-    rows: List[MoverRow] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    rows: list[MoverRow] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             **{k: v for k, v in asdict(self).items() if k != "rows"},
             "rows": [asdict(r) for r in self.rows],
@@ -72,7 +72,7 @@ def _session() -> requests.Session:
     return s
 
 
-def _parse_float(value: Any) -> Optional[float]:
+def _parse_float(value: Any) -> float | None:
     try:
         text = str(value or "").replace(",", "").strip()
         if not text or text == "-":
@@ -92,14 +92,14 @@ def _parse_int(value: Any) -> int:
         return 0
 
 
-def _first_book_price(value: Any) -> Optional[float]:
+def _first_book_price(value: Any) -> float | None:
     text = str(value or "").strip()
     if not text or text == "-":
         return None
     return _parse_float(text.split("_", 1)[0])
 
 
-def _resolve_price(item: Dict[str, Any]) -> tuple[Optional[float], str]:
+def _resolve_price(item: dict[str, Any]) -> tuple[float | None, str]:
     z_str = item.get("z", "-")
     pz_str = item.get("pz", "-")
     last_trade = _parse_float(z_str)
@@ -120,10 +120,10 @@ def _resolve_price(item: Dict[str, Any]) -> tuple[Optional[float], str]:
 
 
 def _ex_ch_for_batch(
-    tickers: List[str],
-    market_map: Dict[str, str],
+    tickers: list[str],
+    market_map: dict[str, str],
 ) -> str:
-    parts: List[str] = []
+    parts: list[str] = []
     for ticker in tickers:
         market = market_map.get(ticker, "twse")
         ex = "tse" if market == "twse" else "otc"
@@ -131,15 +131,15 @@ def _ex_ch_for_batch(
     return "|".join(parts)
 
 
-def _parse_mis_items(items: List[dict]) -> Dict[str, MoverRow]:
-    out: Dict[str, MoverRow] = {}
+def _parse_mis_items(items: list[dict]) -> dict[str, MoverRow]:
+    out: dict[str, MoverRow] = {}
     for item in items:
         code = str(item.get("c") or "").strip()
         if not code:
             continue
         price, basis = _resolve_price(item)
         prev_close = _parse_float(item.get("y")) or 0.0
-        pct_chg: Optional[float] = None
+        pct_chg: float | None = None
         if price is not None and prev_close > 0:
             pct_chg = round(100 * (price - prev_close) / prev_close, 2)
         raw_date = str(item.get("d") or "")
@@ -163,14 +163,14 @@ def _parse_mis_items(items: List[dict]) -> Dict[str, MoverRow]:
 
 def list_scan_tickers(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     exclude_etf: bool = True,
-    markets: Optional[List[str]] = None,
-) -> List[str]:
+    markets: list[str] | None = None,
+) -> list[str]:
     """回傳可掃描的代號清單 (上市+上櫃一般股)。"""
     market_map = load_market_map(root=root)
     allowed = set(markets or ["twse", "tpex"])
-    tickers: List[str] = []
+    tickers: list[str] = []
     for code, market in market_map.items():
         if market not in allowed:
             continue
@@ -184,14 +184,14 @@ def list_scan_tickers(
 
 def fetch_market_movers(
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     limit: int = 50,
     direction: Direction = "gainers",
     exclude_etf: bool = True,
     batch_size: int = 45,
     batch_pause_sec: float = 0.15,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
 ) -> MarketMoversResult:
     """掃描全市場 MIS 報價並回傳漲跌幅排行。"""
     log = logger or get_logger("market-movers")
@@ -217,7 +217,7 @@ def fetch_market_movers(
         result.duration_sec = round(time.time() - t0, 2)
         return result
 
-    merged: Dict[str, MoverRow] = {}
+    merged: dict[str, MoverRow] = {}
     batches = [
         tickers[i: i + batch_size]
         for i in range(0, len(tickers), batch_size)

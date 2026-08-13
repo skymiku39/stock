@@ -23,16 +23,17 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
 from bot.cloud_file_cache import (
     read_json_cache as _read_cloud_json_cache,
+)
+from bot.cloud_file_cache import (
     write_json_cache as _write_cloud_json_cache,
 )
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 # ----------------------------------------------------------------------
 # Endpoint 集中表
@@ -136,8 +137,8 @@ class DividendRecord:
     ex_dividend_date: str = ""       # 除息日
     ex_right_date: str = ""          # 除權日
     fill_date: str = ""              # 填息日
-    fill_days: Optional[int] = None  # 填息所花天數
-    payout_ratio: Optional[float] = None  # 盈餘分配率 %
+    fill_days: int | None = None  # 填息所花天數
+    payout_ratio: float | None = None  # 盈餘分配率 %
 
 
 @dataclass
@@ -154,7 +155,7 @@ class QuarterlyFinancials:
     revenue: float = 0.0
     operating_income: float = 0.0
     net_income: float = 0.0
-    roe: Optional[float] = None
+    roe: float | None = None
     note: str = ""
 
 
@@ -165,10 +166,10 @@ class FundamentalSnapshot:
     ticker: str
     name: str = ""
     fetched_at: str = ""
-    valuation: Optional[ValuationDaily] = None
-    revenues: List[MonthlyRevenue] = field(default_factory=list)
-    dividends: List[DividendRecord] = field(default_factory=list)
-    quarterlies: List[QuarterlyFinancials] = field(default_factory=list)
+    valuation: ValuationDaily | None = None
+    revenues: list[MonthlyRevenue] = field(default_factory=list)
+    dividends: list[DividendRecord] = field(default_factory=list)
+    quarterlies: list[QuarterlyFinancials] = field(default_factory=list)
 
     @property
     def has_data(self) -> bool:
@@ -180,7 +181,7 @@ class FundamentalSnapshot:
         )
 
     # --------- 摘要式衍生指標 ---------
-    def latest_revenue(self) -> Optional[MonthlyRevenue]:
+    def latest_revenue(self) -> MonthlyRevenue | None:
         if not self.revenues:
             return None
         return sorted(self.revenues, key=lambda r: (r.year, r.month))[-1]
@@ -196,14 +197,14 @@ class FundamentalSnapshot:
                 break
         return streak
 
-    def avg_payout_ratio(self, lookback: int = 5) -> Optional[float]:
+    def avg_payout_ratio(self, lookback: int = 5) -> float | None:
         ratios = [d.payout_ratio for d in self.dividends if d.payout_ratio is not None]
         ratios = ratios[-lookback:]
         if not ratios:
             return None
         return sum(ratios) / len(ratios)
 
-    def rolling_eps_progress(self) -> Dict[str, Any]:
+    def rolling_eps_progress(self) -> dict[str, Any]:
         """以目前已公布的最新年度，回傳「該年度逐季累計 EPS」進度。"""
         if not self.quarterlies:
             return {}
@@ -251,13 +252,13 @@ def _session() -> requests.Session:
     return s
 
 
-def _cache_root(root: Optional[Path] = None) -> Path:
+def _cache_root(root: Path | None = None) -> Path:
     base = (root or Path.cwd()) / "data" / "fundamentals"
     mk_folder(str(base))
     return base
 
 
-def _read_json_cache(path: Path, ttl_seconds: Optional[int] = None) -> Optional[Any]:
+def _read_json_cache(path: Path, ttl_seconds: int | None = None) -> Any | None:
     return _read_cloud_json_cache(path, ttl_seconds=ttl_seconds)
 
 
@@ -265,7 +266,7 @@ def _write_json_cache(path: Path, data: Any) -> None:
     _write_cloud_json_cache(path, data, indent=2)
 
 
-def _parse_tw_datetime(value: Any) -> Optional[dt.datetime]:
+def _parse_tw_datetime(value: Any) -> dt.datetime | None:
     if not value:
         return None
     try:
@@ -277,31 +278,31 @@ def _parse_tw_datetime(value: Any) -> Optional[dt.datetime]:
     return parsed
 
 
-def _dividend_source_state_path(root: Optional[Path] = None) -> Path:
+def _dividend_source_state_path(root: Path | None = None) -> Path:
     return _cache_root(root) / _DIVIDEND_SOURCE_STATE_FILE
 
 
-def _read_dividend_source_state(root: Optional[Path] = None) -> Dict[str, Any]:
+def _read_dividend_source_state(root: Path | None = None) -> dict[str, Any]:
     data = _read_json_cache(_dividend_source_state_path(root))
     return data if isinstance(data, dict) else {}
 
 
 def _write_dividend_source_state(
-    root: Optional[Path],
-    state: Dict[str, Any],
+    root: Path | None,
+    state: dict[str, Any],
 ) -> None:
     _write_json_cache(_dividend_source_state_path(root), state)
 
 
 def _dividend_fetch_deferred(
-    state: Dict[str, Any],
-    now: Optional[dt.datetime] = None,
+    state: dict[str, Any],
+    now: dt.datetime | None = None,
 ) -> bool:
     next_attempt = _parse_tw_datetime(state.get("next_attempt_at"))
     return bool(next_attempt and next_attempt > (now or now_tw()))
 
 
-def _record_dividend_fetch_success(root: Optional[Path]) -> None:
+def _record_dividend_fetch_success(root: Path | None) -> None:
     now_iso = now_tw().isoformat(timespec="seconds")
     prev = _read_dividend_source_state(root)
     _write_dividend_source_state(root, {
@@ -317,11 +318,11 @@ def _record_dividend_fetch_success(root: Optional[Path]) -> None:
 
 
 def _record_dividend_fetch_failure(
-    root: Optional[Path],
-    errors: List[str],
+    root: Path | None,
+    errors: list[str],
     *,
     partial: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     prev = _read_dividend_source_state(root)
     now = now_tw()
     fail_count = int(prev.get("fail_count") or 0) + 1
@@ -369,12 +370,12 @@ def _to_float(x: Any) -> float:
 
 def fetch_monthly_revenue_all(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = 6 * 3600,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓 TWSE OpenAPI 全市場最新月營收 (回傳原始 list[dict])。"""
     log = logger or get_logger("fundamentals")
     sess = session or _session()
@@ -383,7 +384,7 @@ def fetch_monthly_revenue_all(
         cached = _read_json_cache(cache, ttl_seconds=cache_ttl)
         if cached is not None:
             return cached
-    combined: List[Dict[str, Any]] = []
+    combined: list[dict[str, Any]] = []
     for label, url in (("上市", URL_MONTHLY_REVENUE), ("上櫃", URL_TPEX_MONTHLY_REVENUE)):
         try:
             resp = sess.get(url, timeout=20)
@@ -400,7 +401,7 @@ def fetch_monthly_revenue_all(
     return combined
 
 
-def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
+def _parse_one_revenue(raw: dict[str, Any]) -> MonthlyRevenue | None:
     """欄位名稱會偶爾調整；採容錯抽取。"""
     if not isinstance(raw, dict):
         return None
@@ -414,7 +415,7 @@ def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
     cum_keys = ["營業收入-當月累計營收", "累計營業收入-當月累計營收", "當月累計營收"]
     cum_yoy_keys = ["營業收入-前期比較增減(%)", "累計營業收入-前期比較增減(%)", "前期比較增減(%)"]
 
-    def pick(keys: List[str]) -> Any:
+    def pick(keys: list[str]) -> Any:
         for k in keys:
             if k in raw:
                 return raw[k]
@@ -451,10 +452,10 @@ def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
 def fetch_monthly_revenue(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[MonthlyRevenue]:
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[MonthlyRevenue]:
     """傳回個股已快取的所有月營收紀錄 (依檔案內 manual 累積)。
 
     流程：
@@ -480,7 +481,7 @@ def fetch_monthly_revenue(
     ticker_dir = _cache_root(root) / ticker
     mk_folder(str(ticker_dir))
     history_path = ticker_dir / "monthly_revenue.json"
-    history: List[Dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
     if history_path.exists():
         try:
             history = json.loads(history_path.read_text(encoding="utf-8"))
@@ -494,7 +495,7 @@ def fetch_monthly_revenue(
         history.sort(key=lambda r: (r.get("year", 0), r.get("month", 0)))
         _write_json_cache(history_path, history)
 
-    out: List[MonthlyRevenue] = []
+    out: list[MonthlyRevenue] = []
     for h in history:
         try:
             out.append(MonthlyRevenue(**h))
@@ -510,12 +511,12 @@ def fetch_monthly_revenue(
 
 def fetch_valuation_all(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = 6 * 3600,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓 TWSE OpenAPI 全市場最新 PER/PBR/殖利率 (回傳原始 list[dict])。"""
     log = logger or get_logger("fundamentals")
     sess = session or _session()
@@ -524,7 +525,7 @@ def fetch_valuation_all(
         cached = _read_json_cache(cache, ttl_seconds=cache_ttl)
         if cached is not None:
             return cached
-    combined: List[Dict[str, Any]] = []
+    combined: list[dict[str, Any]] = []
     # 上市 BWIBBU
     try:
         resp = sess.get(URL_BWIBBU_ALL, timeout=20)
@@ -557,7 +558,7 @@ def fetch_valuation_all(
     return combined
 
 
-def _parse_valuation(raw: Dict[str, Any]) -> Optional[ValuationDaily]:
+def _parse_valuation(raw: dict[str, Any]) -> ValuationDaily | None:
     if not isinstance(raw, dict):
         return None
     code = str(raw.get("Code") or raw.get("證券代號") or "").strip()
@@ -577,10 +578,10 @@ def _parse_valuation(raw: Dict[str, Any]) -> Optional[ValuationDaily]:
 def fetch_valuation(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[ValuationDaily]:
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> ValuationDaily | None:
     """個股當日估值。"""
     rows = fetch_valuation_all(root=root, session=session, logger=logger)
     for raw in rows:
@@ -604,9 +605,9 @@ def fetch_valuation(
 # ----------------------------------------------------------------------
 
 
-def _parse_tpex_dividend_csv(text: str) -> List[Dict[str, Any]]:
+def _parse_tpex_dividend_csv(text: str) -> list[dict[str, Any]]:
     """把上櫃 t187ap45_O.csv 解析成與上市 JSON 相容的 list[dict]。"""
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     try:
         reader = csv.DictReader(io.StringIO(text))
         for row in reader:
@@ -619,12 +620,12 @@ def _parse_tpex_dividend_csv(text: str) -> List[Dict[str, Any]]:
 
 def fetch_dividend_all(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = 24 * 3600,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓全市場股利分派情形 (上市 JSON + 上櫃 CSV，合併原始 list[dict])。"""
     return _fetch_dividend_all_resilient(
         root=root,
@@ -638,12 +639,12 @@ def fetch_dividend_all(
 # t187ap45_L / t187ap45_O 的現金/股票股利各構成欄位 (盈餘 + 法定盈餘公積 + 資本公積)
 def _fetch_dividend_all_resilient(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = 24 * 3600,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     log = logger or get_logger("fundamentals")
     sess = session or _session()
     cache = _cache_root(root) / "dividends_all.json"
@@ -668,8 +669,8 @@ def _fetch_dividend_all_resilient(
             )
             return []
 
-    combined: List[Dict[str, Any]] = []
-    failures: List[str] = []
+    combined: list[dict[str, Any]] = []
+    failures: list[str] = []
     source_ok = 0
 
     try:
@@ -748,7 +749,7 @@ _DIV_STOCK_KEYS = [
 ]
 
 
-def _parse_dividend(raw: Dict[str, Any], ticker: str) -> Optional[DividendRecord]:
+def _parse_dividend(raw: dict[str, Any], ticker: str) -> DividendRecord | None:
     """解析單筆 t187ap45 股利分派。
 
     新端點不含除息/除權日，僅有現金/股票股利各構成欄位；現金與股票股利分別
@@ -789,10 +790,10 @@ def _parse_dividend(raw: Dict[str, Any], ticker: str) -> Optional[DividendRecord
 def fetch_dividends(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[DividendRecord]:
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[DividendRecord]:
     """個股歷年股利紀錄。
 
     t187ap45 為「現行決議」快照，同一股利年度可能有多筆 (季配/半年配/年度)，
@@ -802,7 +803,7 @@ def fetch_dividends(
     rows = fetch_dividend_all(root=root, session=session, logger=log)
 
     # 依股利年度彙總本次抓到的多筆 (季配/年度) → 單一年度合計
-    by_year: Dict[int, DividendRecord] = {}
+    by_year: dict[int, DividendRecord] = {}
     for raw in rows:
         rec = _parse_dividend(raw, ticker)
         if not rec:
@@ -823,7 +824,7 @@ def fetch_dividends(
     ticker_dir = _cache_root(root) / ticker
     mk_folder(str(ticker_dir))
     history_path = ticker_dir / "dividends.json"
-    history: List[Dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
     if history_path.exists():
         try:
             history = json.loads(history_path.read_text(encoding="utf-8"))
@@ -836,7 +837,7 @@ def fetch_dividends(
     history.sort(key=lambda x: x.get("year", 0))
     _write_json_cache(history_path, history)
 
-    out: List[DividendRecord] = []
+    out: list[DividendRecord] = []
     for h in history:
         try:
             out.append(DividendRecord(**h))
@@ -853,8 +854,8 @@ def fetch_dividends(
 def load_manual_quarterlies(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-) -> List[QuarterlyFinancials]:
+    root: Path | None = None,
+) -> list[QuarterlyFinancials]:
     """從 data/fundamentals_manual/<ticker>.json 載入使用者手動匯入的季報。
 
     手動匯入 JSON 格式：
@@ -875,7 +876,7 @@ def load_manual_quarterlies(
     if not raw:
         return []
     items = raw.get("quarterlies", [])
-    out: List[QuarterlyFinancials] = []
+    out: list[QuarterlyFinancials] = []
     for it in items:
         try:
             out.append(QuarterlyFinancials(
@@ -899,9 +900,9 @@ def load_manual_quarterlies(
 
 def save_manual_quarterlies(
     ticker: str,
-    quarterlies: List[QuarterlyFinancials],
+    quarterlies: list[QuarterlyFinancials],
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
 ) -> Path:
     base = (root or Path.cwd()) / "data" / "fundamentals_manual"
     mk_folder(str(base))
@@ -922,12 +923,12 @@ def save_manual_quarterlies(
 
 def fetch_quarterly_financials_all(
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
     use_cache: bool = True,
     cache_ttl: int = 6 * 3600,
-    logger: Optional[logging.Logger] = None,
-) -> List[Dict[str, Any]]:
+    logger: logging.Logger | None = None,
+) -> list[dict[str, Any]]:
     """抓 TWSE 全市場「最近一季」綜合損益表 (合併各產業別 endpoint)。
 
     回傳原始 list[dict]，每筆額外帶一個 `_sector` 標記其來源產業別。
@@ -940,7 +941,7 @@ def fetch_quarterly_financials_all(
         if cached is not None:
             return cached
 
-    combined: List[Dict[str, Any]] = []
+    combined: list[dict[str, Any]] = []
     endpoints = [(m, s, u) for m, mp in (("twse", QUARTERLY_ENDPOINTS), ("tpex", QUARTERLY_ENDPOINTS_TPEX))
                  for s, u in mp.items()]
     for market, sector, url in endpoints:
@@ -965,16 +966,16 @@ def fetch_quarterly_financials_all(
     return combined
 
 
-def _pick_key(raw: Dict[str, Any], includes: List[str], excludes: Optional[List[str]] = None) -> Any:
+def _pick_key(raw: dict[str, Any], includes: list[str], excludes: list[str] | None = None) -> Any:
     """回傳第一個 key 同時包含 includes 任一關鍵字、且不含 excludes 任一關鍵字的值。"""
     excludes = excludes or []
-    for k in raw.keys():
+    for k in raw:
         if any(inc in k for inc in includes) and not any(exc in k for exc in excludes):
             return raw[k]
     return None
 
 
-def _parse_quarterly_raw(raw: Dict[str, Any], ticker: str) -> Optional[Dict[str, Any]]:
+def _parse_quarterly_raw(raw: dict[str, Any], ticker: str) -> dict[str, Any] | None:
     """把一筆綜合損益表轉成累計 (cumulative) 原始值 dict。
 
     識別欄位同時相容上市 (公司代號/年度/季別) 與上櫃 (SecuritiesCompanyCode/Year/Season)。
@@ -1019,18 +1020,18 @@ def _parse_quarterly_raw(raw: Dict[str, Any], ticker: str) -> Optional[Dict[str,
 
 def _decumulate_quarterlies(
     ticker: str,
-    raw_records: List[Dict[str, Any]],
-) -> List[QuarterlyFinancials]:
+    raw_records: list[dict[str, Any]],
+) -> list[QuarterlyFinancials]:
     """把年度累計的季報轉成「單季」QuarterlyFinancials，並計算三率。
 
     台股季報損益為年度累計：Q2=上半年、Q3=前三季、Q4=全年。
     單季值 = 本季累計 - 上一季累計 (同年度且上一季存在時)；Q1 直接採用。
     """
-    by_year: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    by_year: dict[int, dict[int, dict[str, Any]]] = {}
     for r in raw_records:
         by_year.setdefault(int(r["year"]), {})[int(r["quarter"])] = r
 
-    out: List[QuarterlyFinancials] = []
+    out: list[QuarterlyFinancials] = []
     for year, quarters in by_year.items():
         for q, rec in quarters.items():
             prev = quarters.get(q - 1) if q > 1 else None
@@ -1074,10 +1075,10 @@ def _decumulate_quarterlies(
 def fetch_quarterly_financials(
     ticker: str,
     *,
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[QuarterlyFinancials]:
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> list[QuarterlyFinancials]:
     """個股季報 EPS / 三率。
 
     TWSE OpenAPI 只提供「最近一季」全市場資料，因此本函式採滾動累積：
@@ -1087,7 +1088,7 @@ def fetch_quarterly_financials(
     log = logger or get_logger("fundamentals")
     rows = fetch_quarterly_financials_all(root=root, session=session, logger=log)
 
-    new_raw: List[Dict[str, Any]] = []
+    new_raw: list[dict[str, Any]] = []
     for raw in rows:
         try:
             parsed = _parse_quarterly_raw(raw, ticker)
@@ -1099,7 +1100,7 @@ def fetch_quarterly_financials(
     ticker_dir = _cache_root(root) / ticker
     mk_folder(str(ticker_dir))
     raw_path = ticker_dir / "quarterlies_raw.json"
-    history: List[Dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
     if raw_path.exists():
         try:
             history = json.loads(raw_path.read_text(encoding="utf-8"))
@@ -1126,9 +1127,9 @@ def build_fundamental_snapshot(
     ticker: str,
     *,
     name_hint: str = "",
-    root: Optional[Path] = None,
-    session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
     refresh: bool = True,
 ) -> FundamentalSnapshot:
     """組合單一個股的基本面 snapshot。
@@ -1139,10 +1140,10 @@ def build_fundamental_snapshot(
     """
     log = logger or get_logger("fundamentals")
     sess = session or _session() if refresh else None
-    revs: List[MonthlyRevenue] = []
-    val: Optional[ValuationDaily] = None
-    divs: List[DividendRecord] = []
-    auto_quarterlies: List[QuarterlyFinancials] = []
+    revs: list[MonthlyRevenue] = []
+    val: ValuationDaily | None = None
+    divs: list[DividendRecord] = []
+    auto_quarterlies: list[QuarterlyFinancials] = []
     name = name_hint
 
     if refresh:
@@ -1212,11 +1213,11 @@ def build_fundamental_snapshot(
 
 
 def _merge_quarterlies(
-    auto: List[QuarterlyFinancials],
-    manual: List[QuarterlyFinancials],
-) -> List[QuarterlyFinancials]:
+    auto: list[QuarterlyFinancials],
+    manual: list[QuarterlyFinancials],
+) -> list[QuarterlyFinancials]:
     """合併自動抓取與手動匯入的季報；相同 (年, 季) 以手動匯入為準。"""
-    merged: Dict[tuple, QuarterlyFinancials] = {}
+    merged: dict[tuple, QuarterlyFinancials] = {}
     for q in auto:
         merged[(q.year, q.quarter)] = q
     for q in manual:
@@ -1225,13 +1226,13 @@ def _merge_quarterlies(
 
 
 def _enrich_dividends_with_payout(
-    divs: List[DividendRecord],
-    quarterlies: List[QuarterlyFinancials],
-) -> List[DividendRecord]:
+    divs: list[DividendRecord],
+    quarterlies: list[QuarterlyFinancials],
+) -> list[DividendRecord]:
     """以該年度 4 季 EPS 估算 payout_ratio (簡易版)。"""
     if not divs:
         return divs
-    eps_by_year: Dict[int, float] = {}
+    eps_by_year: dict[int, float] = {}
     for q in quarterlies:
         eps_by_year[q.year] = eps_by_year.get(q.year, 0.0) + q.eps
     for d in divs:
@@ -1243,11 +1244,11 @@ def _enrich_dividends_with_payout(
 
 def _enrich_dividends_with_fill_days(
     ticker: str,
-    divs: List[DividendRecord],
+    divs: list[DividendRecord],
     *,
-    root: Optional[Path] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[DividendRecord]:
+    root: Path | None = None,
+    logger: logging.Logger | None = None,
+) -> list[DividendRecord]:
     """以快取日 K 計算各除息年度的「填息日」與「填息天數」。
 
     定義：除息日後第一個「收盤價 >= 除息前一交易日收盤價」的交易日即填息完成；
@@ -1265,7 +1266,7 @@ def _enrich_dividends_with_fill_days(
         return divs
 
     try:
-        from bot.technicals import load_kline_from_db, get_kline_coverage
+        from bot.technicals import get_kline_coverage, load_kline_from_db
     except Exception:
         return divs
 
@@ -1320,7 +1321,7 @@ def _enrich_dividends_with_fill_days(
     return divs
 
 
-def _parse_iso_date(s: str) -> Optional[dt.date]:
+def _parse_iso_date(s: str) -> dt.date | None:
     """容錯解析日期：支援 'YYYY-MM-DD'、'YYYYMMDD'、民國 'YYYMMDD'。"""
     s = (s or "").strip()
     if not s:
@@ -1338,7 +1339,7 @@ def _parse_iso_date(s: str) -> Optional[dt.date]:
     return None
 
 
-def snapshot_to_dict(s: FundamentalSnapshot) -> Dict[str, Any]:
+def snapshot_to_dict(s: FundamentalSnapshot) -> dict[str, Any]:
     return {
         "ticker": s.ticker,
         "name": s.name,

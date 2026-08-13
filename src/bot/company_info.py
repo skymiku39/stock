@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
 
 import requests
 
@@ -36,7 +35,7 @@ URL_TWSE_COMPANY = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
 URL_TPEX_COMPANY = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
 
 # 上市/上櫃「產業別」代碼 → 中文 (MOPS t187ap03 分類，TWSE 與 TPEx 共用同一套)。
-INDUSTRY_CODE_MAP: Dict[str, str] = {
+INDUSTRY_CODE_MAP: dict[str, str] = {
     "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維",
     "05": "電機機械", "06": "電器電纜", "07": "化學生技醫療", "08": "玻璃陶瓷",
     "09": "造紙工業", "10": "鋼鐵工業", "11": "橡膠工業", "12": "汽車工業",
@@ -50,7 +49,7 @@ INDUSTRY_CODE_MAP: Dict[str, str] = {
 }
 
 # 程序內快取：{symbol: StockInfo}
-_COMPANY_MAP: Optional[Dict[str, StockInfo]] = None
+_COMPANY_MAP: dict[str, StockInfo] | None = None
 
 
 def industry_label(code: str) -> str:
@@ -93,14 +92,14 @@ def _date_to_iso(raw: str) -> str:
     return f"{y:04d}-{m:02d}-{d:02d}"
 
 
-def _map_path(root: Optional[Path]) -> Path:
+def _map_path(root: Path | None) -> Path:
     base = (root or Path.cwd()) / "data" / "meta"
     mk_folder(str(base))
     return base / "company_info.json"
 
 
-def _parse_twse(rows: list) -> Dict[str, StockInfo]:
-    out: Dict[str, StockInfo] = {}
+def _parse_twse(rows: list) -> dict[str, StockInfo]:
+    out: dict[str, StockInfo] = {}
     for r in rows or []:
         code = str(r.get("公司代號") or "").strip()
         if not code:
@@ -116,8 +115,8 @@ def _parse_twse(rows: list) -> Dict[str, StockInfo]:
     return out
 
 
-def _parse_tpex(rows: list) -> Dict[str, StockInfo]:
-    out: Dict[str, StockInfo] = {}
+def _parse_tpex(rows: list) -> dict[str, StockInfo]:
+    out: dict[str, StockInfo] = {}
     for r in rows or []:
         code = str(r.get("SecuritiesCompanyCode") or r.get("Symbol") or "").strip()
         if not code:
@@ -134,12 +133,12 @@ def _parse_tpex(rows: list) -> Dict[str, StockInfo]:
 
 
 def _build_company_map(
-    *, session: Optional[requests.Session] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, StockInfo]:
+    *, session: requests.Session | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, StockInfo]:
     log = logger or get_logger("company-info")
     sess = session or _session()
-    out: Dict[str, StockInfo] = {}
+    out: dict[str, StockInfo] = {}
     try:
         r = sess.get(URL_TWSE_COMPANY, timeout=30)
         if r.status_code == 200:
@@ -157,10 +156,10 @@ def _build_company_map(
 
 
 def load_company_map(
-    *, root: Optional[Path] = None,
+    *, root: Path | None = None,
     force_refresh: bool = False,
-    logger: Optional[logging.Logger] = None,
-) -> Dict[str, StockInfo]:
+    logger: logging.Logger | None = None,
+) -> dict[str, StockInfo]:
     """載入 (或建立) 全市場公司基本資料對照表，每日快取一次。"""
     global _COMPANY_MAP
     if _COMPANY_MAP is not None and not force_refresh:
@@ -215,9 +214,9 @@ def load_company_map(
 
 
 def lookup_company_info(
-    symbol: str, *, root: Optional[Path] = None,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[StockInfo]:
+    symbol: str, *, root: Path | None = None,
+    logger: logging.Logger | None = None,
+) -> StockInfo | None:
     """查單一代號的公司基本資料 (名稱/簡稱/產業/市場/上市日)。查無回 None。"""
     symbol = str(symbol).strip()
     if not symbol:
@@ -234,9 +233,9 @@ def lookup_company_info(
 
 
 def backfill_stock_info(
-    db, *, root: Optional[Path] = None,
+    db, *, root: Path | None = None,
     only_missing: bool = True,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> int:
     """把全市場公司基本資料補進 stock_info。
 
@@ -268,7 +267,7 @@ def backfill_stock_info(
     return count
 
 
-def _merge(existing: Optional[StockInfo], fetched: StockInfo) -> StockInfo:
+def _merge(existing: StockInfo | None, fetched: StockInfo) -> StockInfo:
     """保留既有非空欄位 (人工資料優先)，缺的用官方資料補。"""
     if existing is None:
         return fetched
@@ -289,8 +288,8 @@ def _merge(existing: Optional[StockInfo], fetched: StockInfo) -> StockInfo:
 
 __all__ = [
     "INDUSTRY_CODE_MAP",
-    "URL_TWSE_COMPANY",
     "URL_TPEX_COMPANY",
+    "URL_TWSE_COMPANY",
     "backfill_stock_info",
     "industry_label",
     "load_company_map",

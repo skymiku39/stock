@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -19,9 +20,9 @@ class BrokerProtocol(Protocol):
 
     def unsubscribe(self, symbol: str) -> None: ...
 
-    def get_snapshots(self, symbols: List[str]) -> Dict[str, float]: ...
+    def get_snapshots(self, symbols: list[str]) -> dict[str, float]: ...
 
-    def get_available_balance(self) -> Optional[float]: ...
+    def get_available_balance(self) -> float | None: ...
 
     def place_order(
         self,

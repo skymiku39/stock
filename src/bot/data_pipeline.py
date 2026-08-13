@@ -12,24 +12,26 @@
 
 from __future__ import annotations
 
-import dataclasses
-import datetime as dt
 import json
 import logging
 import time
-import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.active_etf import (
-    ActiveEtf,
     HoldingsSnapshot,
     list_holdings_dates,
     load_active_etfs,
     load_holdings,
 )
-from bot.chips_fetcher import ChipSummary, build_chip_summary, summary_to_chips_context, summary_to_dict
+from bot.chips_fetcher import (
+    ChipSummary,
+    build_chip_summary,
+    summary_to_chips_context,
+    summary_to_dict,
+)
+from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.etf_consensus import (
     ConsensusHolding,
     FollowSignal,
@@ -38,20 +40,17 @@ from bot.etf_consensus import (
     consensus_new_builds,
     diff_snapshots,
 )
-from bot.etf_holdings_fetcher import FetchResult, fetch_all_active_etfs
+from bot.etf_holdings_fetcher import fetch_all_active_etfs
+from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.llm_analyzer import (
     GeminiClient,
     LogicCheckResult,
     PresentationAnalysis,
     analyze_presentation,
-    extract_json,
     gemini_call,
     logic_check,
 )
-from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
-from bot.events.pipeline_helpers import publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 # ----------------------------------------------------------------------
 # 資料模型
@@ -73,7 +72,7 @@ class PipelineConfig:
     project_root: Path
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-    focus_tickers: List[str] = field(default_factory=list)
+    focus_tickers: list[str] = field(default_factory=list)
     chip_lookback_days: int = 5
     fetch_etf_holdings: bool = True
     fetch_chips: bool = True
@@ -85,7 +84,7 @@ class PipelineConfig:
     generate_brief: bool = True
     generate_us_brief: bool = True
     min_consensus_for_focus: int = 2
-    presentation_inputs: List[PresentationInput] = field(default_factory=list)
+    presentation_inputs: list[PresentationInput] = field(default_factory=list)
 
 
 @dataclass
@@ -96,27 +95,27 @@ class PipelineRun:
     started_at: str
     ended_at: str = ""
     duration_sec: float = 0.0
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
 
-    calendar_summary: Dict[str, Any] = field(default_factory=dict)
-    auto_research_summary: List[Dict[str, Any]] = field(default_factory=list)
+    calendar_summary: dict[str, Any] = field(default_factory=dict)
+    auto_research_summary: list[dict[str, Any]] = field(default_factory=list)
 
-    etf_fetch_summary: Dict[str, Any] = field(default_factory=dict)
-    consensus_top: List[Dict[str, Any]] = field(default_factory=list)
-    new_build_signals: List[Dict[str, Any]] = field(default_factory=list)
-    add_signals: List[Dict[str, Any]] = field(default_factory=list)
-    focus_tickers: List[str] = field(default_factory=list)
-    chip_summaries: List[Dict[str, Any]] = field(default_factory=list)
-    presentation_analyses: List[Dict[str, Any]] = field(default_factory=list)
-    logic_checks: List[Dict[str, Any]] = field(default_factory=list)
+    etf_fetch_summary: dict[str, Any] = field(default_factory=dict)
+    consensus_top: list[dict[str, Any]] = field(default_factory=list)
+    new_build_signals: list[dict[str, Any]] = field(default_factory=list)
+    add_signals: list[dict[str, Any]] = field(default_factory=list)
+    focus_tickers: list[str] = field(default_factory=list)
+    chip_summaries: list[dict[str, Any]] = field(default_factory=list)
+    presentation_analyses: list[dict[str, Any]] = field(default_factory=list)
+    logic_checks: list[dict[str, Any]] = field(default_factory=list)
     daily_brief_md: str = ""
     daily_brief_prompt_id: str = ""
     daily_brief_prompt_version: str = ""
     us_brief_md: str = ""
     us_brief_prompt_id: str = ""
     us_brief_prompt_version: str = ""
-    macro_summary: Dict[str, Any] = field(default_factory=dict)
-    errors: List[str] = field(default_factory=list)
+    macro_summary: dict[str, Any] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
     output_dir: str = ""
 
 
@@ -127,7 +126,7 @@ class PipelineRun:
 
 def run_full_pipeline(
     config: PipelineConfig,
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
     publisher=None,
 ) -> PipelineRun:
     """一鍵跑完整個自動化研究流程。"""
@@ -168,14 +167,18 @@ def run_full_pipeline(
     today = started.date()
 
     # ---- 0. 法說會行事曆自動更新 (含上月 / 本月 / 下月 / +2 月) ----
-    upcoming_calendar_tickers: List[str] = []
+    upcoming_calendar_tickers: list[str] = []
     if config.update_calendar:
         log.info("[0/6] 自動更新 MOPS 法說會行事曆 …")
         try:
             from bot.conference_calendar import (
-                update_calendar as _update_cal,
                 upcoming_conferences,
+            )
+            from bot.conference_calendar import (
                 upcoming_tickers as _upcoming_tickers,
+            )
+            from bot.conference_calendar import (
+                update_calendar as _update_cal,
             )
             from bot.global_event_calendar import (
                 upcoming_global_events,
@@ -268,8 +271,8 @@ def run_full_pipeline(
     etfs = load_active_etfs(config.project_root)
     etf_meta = {e.symbol: e for e in etfs}
 
-    latest: Dict[str, HoldingsSnapshot] = {}
-    prev: Dict[str, HoldingsSnapshot] = {}
+    latest: dict[str, HoldingsSnapshot] = {}
+    prev: dict[str, HoldingsSnapshot] = {}
     for e in etfs:
         dates = list_holdings_dates(e.symbol, config.project_root)
         if not dates:
@@ -282,7 +285,7 @@ def run_full_pipeline(
             if p:
                 prev[e.symbol] = p
 
-    consensus: List[ConsensusHolding] = build_consensus(
+    consensus: list[ConsensusHolding] = build_consensus(
         latest, etf_meta, min_etf_count=1,
     )
     run.consensus_top = [
@@ -323,7 +326,7 @@ def run_full_pipeline(
     )
 
     # ---- 4. 籌碼面 ----
-    chip_map: Dict[str, ChipSummary] = {}
+    chip_map: dict[str, ChipSummary] = {}
     if config.fetch_chips and focus_list:
         log.info("[4/6] 自動抓籌碼面 (近 %d 日) …", config.chip_lookback_days)
         for t in focus_list:
@@ -343,8 +346,8 @@ def run_full_pipeline(
         log.info("[4/6] (略) 籌碼面抓取已關閉")
 
     # ---- 5. 法說會 LLM 分析 + 言行反查 ----
-    analyses: List[PresentationAnalysis] = []
-    logic_results: List[LogicCheckResult] = []
+    analyses: list[PresentationAnalysis] = []
+    logic_results: list[LogicCheckResult] = []
     if config.run_llm_analysis and config.presentation_inputs:
         log.info("[5/6] 用 Gemini 解析 %d 場法說會 …", len(config.presentation_inputs))
         for pi in config.presentation_inputs:
@@ -418,7 +421,7 @@ def run_full_pipeline(
         log.info("[5a/6] (略) 自動研究未啟用或 LLM 未啟用")
 
     # ---- 5b. 美股 / 跨市場資料 ----
-    macro_snap_dict: Dict[str, Any] = {}
+    macro_snap_dict: dict[str, Any] = {}
     if config.fetch_macro:
         log.info("[5b/6] 抓 macro (yfinance: US 指數 + 重點美股 + ADR 溢價) …")
         try:
@@ -585,12 +588,12 @@ def _append_manifest(run: PipelineRun, root: Path, log: logging.Logger) -> None:
         log.exception("manifest 寫入失敗")
 
 
-def list_pipeline_runs(root: Path) -> List[Dict[str, Any]]:
+def list_pipeline_runs(root: Path) -> list[dict[str, Any]]:
     manifest = root / "data" / "pipeline_runs" / "manifest.jsonl"
     restore_file_from_cloud(manifest, root=root)
     if not manifest.exists():
         return []
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     with manifest.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -604,7 +607,7 @@ def list_pipeline_runs(root: Path) -> List[Dict[str, Any]]:
     return out
 
 
-def load_pipeline_run(root: Path, run_id: str) -> Optional[PipelineRun]:
+def load_pipeline_run(root: Path, run_id: str) -> PipelineRun | None:
     p = root / "data" / "pipeline_runs" / run_id / "run.json"
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -627,7 +630,7 @@ def load_pipeline_run(root: Path, run_id: str) -> Optional[PipelineRun]:
 # ----------------------------------------------------------------------
 
 
-def _pipeline_macro_text(macro_dict: Dict[str, Any]) -> str:
+def _pipeline_macro_text(macro_dict: dict[str, Any]) -> str:
     """組合給 daily_brief 用的「總經 + 期貨領先指標」摘要文字。"""
     if not macro_dict:
         return "(無 macro 資料)"
@@ -638,7 +641,7 @@ def _pipeline_macro_text(macro_dict: Dict[str, Any]) -> str:
         return "(macro 摘要產生失敗)"
 
 
-def _top_movers(macro_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _top_movers(macro_dict: dict[str, Any]) -> list[dict[str, Any]]:
     """從 macro_snapshot 取美股漲跌前 5 名，給 manifest 用。"""
     stocks = macro_dict.get("stocks") or {}
     items = [
@@ -649,7 +652,7 @@ def _top_movers(macro_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
     return items[:8]
 
 
-def _signal_dict(s: FollowSignal) -> Dict[str, Any]:
+def _signal_dict(s: FollowSignal) -> dict[str, Any]:
     return {
         "ticker": s.ticker,
         "name": s.name,
@@ -661,7 +664,7 @@ def _signal_dict(s: FollowSignal) -> Dict[str, Any]:
     }
 
 
-def _analysis_dict(a: PresentationAnalysis, src: PresentationInput) -> Dict[str, Any]:
+def _analysis_dict(a: PresentationAnalysis, src: PresentationInput) -> dict[str, Any]:
     return {
         "ticker": a.ticker,
         "source": src.source,

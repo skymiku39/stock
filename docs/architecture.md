@@ -280,3 +280,67 @@ python-dotenv    1.x     .env 讀取
 pandas           3.x     資料匯出
 requests         2.x     Telegram API (shioaji 已附帶)
 ```
+
+## LLM 架構（雙閘道容錯鏈）
+
+### 設計原則
+
+- **不依賴付費 API Key**：優先使用本機閘道（Gemini 瀏覽器閘道、Cursor CLI 閘道）
+- **依賴反轉**：所有管線依賴 `protocols/llm.LlmClient` 協定
+- **容錯鏈**：`ChainedLlmClient` 依序嘗試多個後端，第一個成功即回傳
+
+### 架構圖
+
+```
+LLM_PROVIDER=chain (預設)
+
+create_llm_client(settings)
+        │
+        ▼
+┌─── ChainedLlmClient ───┐
+│                         │
+│  1. GeminiGatewayClient │ ─── HTTP ──→ 蹭google的geminiAI (port 8816)
+│  2. CursorGatewayClient │ ─── HTTP ──→ 蹭cursor的AI (port 8815)
+│  3. GeminiClient (SDK)  │ ─── API ──→ Google Gemini (需 API Key)
+│                         │
+└─────────────────────────┘
+        │
+        ▼ (text, metadata)
+```
+
+### 相關模組
+
+| 模組 | 職責 |
+|------|------|
+| `protocols/llm.py` | `LlmClient` Protocol |
+| `gemini_gateway.py` | Gemini 瀏覽器閘道 HTTP 客戶端 |
+| `cursor_llm.py` | Cursor CLI 閘道 HTTP 客戶端 |
+| `chained_llm.py` | 容錯鏈（依序嘗試多個後端） |
+| `llm_analyzer.py` | 工廠 `create_llm_client()` + 統一 `llm_call()` + Gemini SDK |
+| `llm_smoke.py` | 統一連線煙霧測試 CLI |
+| `prompt_registry.py` | Prompt YAML 載入/渲染 |
+| `llm_log.py` | 呼叫 JSONL 稽核日誌 |
+
+### 啟動前提
+
+```powershell
+# 1. 啟動 Gemini 閘道（需已登入 Google 帳號）
+cd D:\skymiku\蹭google的geminiAI && uv run gemini-gateway
+
+# 2. 啟動 Cursor 閘道（需 Cursor 訂閱）
+cd D:\skymiku\蹭cursor的AI && uv run cursor-gateway
+
+# 3. 或用一鍵腳本
+.\scripts\start_full_auto.ps1
+```
+
+### 自動化排程
+
+`stock-scheduler` 常駐背景，定時執行所有研究/分析管線。
+所有 LLM 呼叫自動走容錯鏈，無需手動切換後端。
+
+Windows Task Scheduler 設定：
+```powershell
+.\scripts\setup_win_scheduler.ps1     # 安裝
+.\scripts\setup_win_scheduler.ps1 -Remove  # 移除
+```

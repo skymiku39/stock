@@ -9,16 +9,14 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
 
 from bot.active_etf import (
     ActiveEtf,
     HoldingsSnapshot,
     list_holdings_dates,
-    load_holdings,
 )
-
 
 # ----------------------------------------------------------------------
 # 共識持股
@@ -40,7 +38,7 @@ class ConsensusHolding:
 
     ticker: str
     name: str
-    held_by: List[EtfWeight] = field(default_factory=list)
+    held_by: list[EtfWeight] = field(default_factory=list)
 
     @property
     def etf_count(self) -> int:
@@ -60,12 +58,12 @@ class ConsensusHolding:
 
 
 def build_consensus(
-    snapshots: Dict[str, HoldingsSnapshot],
-    etf_meta: Dict[str, ActiveEtf],
+    snapshots: dict[str, HoldingsSnapshot],
+    etf_meta: dict[str, ActiveEtf],
     min_etf_count: int = 1,
-) -> List[ConsensusHolding]:
+) -> list[ConsensusHolding]:
     """跨多檔 ETF 彙總每檔個股的持有資訊，依被持有 ETF 數量遞減排序。"""
-    by_ticker: Dict[str, ConsensusHolding] = {}
+    by_ticker: dict[str, ConsensusHolding] = {}
     for etf_symbol, snap in snapshots.items():
         meta = etf_meta.get(etf_symbol)
         etf_name = meta.name if meta else etf_symbol
@@ -130,13 +128,13 @@ class HoldingChange:
 def diff_snapshots(
     before: HoldingsSnapshot,
     after: HoldingsSnapshot,
-) -> List[HoldingChange]:
+) -> list[HoldingChange]:
     """比較同一 ETF 兩個日期的持股，回傳所有非持平變動。"""
     assert before.symbol == after.symbol
     b_map = before.by_ticker()
     a_map = after.by_ticker()
     tickers = set(b_map) | set(a_map)
-    changes: List[HoldingChange] = []
+    changes: list[HoldingChange] = []
     for t in tickers:
         b = b_map.get(t)
         a = a_map.get(t)
@@ -157,8 +155,8 @@ def diff_snapshots(
 
 def latest_two_dates(
     symbol: str,
-    root: Optional["object"] = None,
-) -> Optional[tuple]:
+    root: object | None = None,
+) -> tuple | None:
     """取得指定 ETF 最近兩個持股快照日期，不足兩日則回 None。"""
     dates = list_holdings_dates(symbol, root)
     if len(dates) < 2:
@@ -167,14 +165,14 @@ def latest_two_dates(
 
 
 def detect_changes_across_etfs(
-    snapshots_by_date: Dict[dt.date, Dict[str, HoldingsSnapshot]],
+    snapshots_by_date: dict[dt.date, dict[str, HoldingsSnapshot]],
     latest_date: dt.date,
     previous_date: dt.date,
-) -> List[HoldingChange]:
+) -> list[HoldingChange]:
     """在指定的兩個快照日期之間，跨所有 ETF 彙整出所有持股變動。"""
     latest = snapshots_by_date.get(latest_date, {})
     previous = snapshots_by_date.get(previous_date, {})
-    all_changes: List[HoldingChange] = []
+    all_changes: list[HoldingChange] = []
     for sym, snap_after in latest.items():
         snap_before = previous.get(sym)
         if snap_before is None:
@@ -198,19 +196,19 @@ class FollowSignal:
     etf_count: int
     total_weight_delta: float
     note: str = ""
-    related_etfs: List[str] = field(default_factory=list)
+    related_etfs: list[str] = field(default_factory=list)
 
 
 def consensus_new_builds(
     changes: Iterable[HoldingChange],
     min_etfs: int = 2,
-) -> List[FollowSignal]:
+) -> list[FollowSignal]:
     """新建倉共識：若同一個股在最近一次更新中被 >= N 檔 ETF 同步新建倉 → 強烈訊號。"""
-    by_ticker: Dict[str, List[HoldingChange]] = {}
+    by_ticker: dict[str, list[HoldingChange]] = {}
     for c in changes:
         if c.change_type == "新建倉":
             by_ticker.setdefault(c.ticker, []).append(c)
-    signals: List[FollowSignal] = []
+    signals: list[FollowSignal] = []
     for ticker, items in by_ticker.items():
         if len(items) >= min_etfs:
             signals.append(FollowSignal(
@@ -230,13 +228,13 @@ def consensus_additions(
     changes: Iterable[HoldingChange],
     min_etfs: int = 3,
     min_weight_delta: float = 0.1,
-) -> List[FollowSignal]:
+) -> list[FollowSignal]:
     """共識加碼：>= N 檔 ETF 同步加碼且累計權重增幅達門檻。"""
-    by_ticker: Dict[str, List[HoldingChange]] = {}
+    by_ticker: dict[str, list[HoldingChange]] = {}
     for c in changes:
         if c.change_type == "加碼":
             by_ticker.setdefault(c.ticker, []).append(c)
-    signals: List[FollowSignal] = []
+    signals: list[FollowSignal] = []
     for ticker, items in by_ticker.items():
         if len(items) < min_etfs:
             continue
@@ -257,11 +255,11 @@ def consensus_additions(
 
 
 def elevator_candidates(
-    consensus: List[ConsensusHolding],
-    market_cap_provider: Dict[str, float],
+    consensus: list[ConsensusHolding],
+    market_cap_provider: dict[str, float],
     threshold_rank: int = 50,
     window: int = 50,
-) -> List[FollowSignal]:
+) -> list[FollowSignal]:
     """抬轎候選：個股當前市值排名落在 (threshold_rank, threshold_rank + window]
     區間，且被多檔主動 ETF 持有 → 可能在未來指數調整時被被動 ETF 強制納入。
 
@@ -272,9 +270,9 @@ def elevator_candidates(
     sorted_by_cap = sorted(
         market_cap_provider.items(), key=lambda x: x[1], reverse=True,
     )
-    rank_map: Dict[str, int] = {t: i + 1 for i, (t, _) in enumerate(sorted_by_cap)}
+    rank_map: dict[str, int] = {t: i + 1 for i, (t, _) in enumerate(sorted_by_cap)}
 
-    signals: List[FollowSignal] = []
+    signals: list[FollowSignal] = []
     for c in consensus:
         rank = rank_map.get(c.ticker)
         if rank is None:

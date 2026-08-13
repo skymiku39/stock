@@ -13,13 +13,12 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 ENV_CACHE_DIR = "GOOGLE_CACHE_DIR"
 
 
-def cloud_cache_root(root: Optional[Path] = None) -> Optional[Path]:
+def cloud_cache_root(root: Path | None = None) -> Path | None:
     """Return the configured Google cache directory, if enabled."""
     value = (os.getenv(ENV_CACHE_DIR) or "").strip().strip('"').strip("'")
     if not value:
@@ -33,7 +32,7 @@ def cloud_cache_root(root: Optional[Path] = None) -> Optional[Path]:
     return p
 
 
-def cloud_path_for(local_path: Path, root: Optional[Path] = None) -> Optional[Path]:
+def cloud_path_for(local_path: Path, root: Path | None = None) -> Path | None:
     """Map a local project path to its cloud-cache mirror path."""
     cloud_root = cloud_cache_root(root=root)
     if cloud_root is None:
@@ -50,7 +49,7 @@ def cloud_path_for(local_path: Path, root: Optional[Path] = None) -> Optional[Pa
 def restore_file_from_cloud(
     local_path: Path,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     prefer_newer: bool = True,
 ) -> bool:
     """Copy a mirrored file back to local storage when missing or newer."""
@@ -74,7 +73,7 @@ def restore_file_from_cloud(
 def restore_tree_from_cloud(
     local_dir: Path,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     prefer_newer: bool = True,
 ) -> int:
     """Restore all files from a mirrored cloud directory."""
@@ -102,7 +101,7 @@ def restore_tree_from_cloud(
     return copied
 
 
-def mirror_file_to_cloud(local_path: Path, *, root: Optional[Path] = None) -> bool:
+def mirror_file_to_cloud(local_path: Path, *, root: Path | None = None) -> bool:
     """Copy a local file into the configured Google cache directory."""
     local = Path(local_path)
     if not local.exists() or local.is_dir():
@@ -118,9 +117,9 @@ def mirror_file_to_cloud(local_path: Path, *, root: Optional[Path] = None) -> bo
 def read_json_cache(
     path: Path,
     *,
-    root: Optional[Path] = None,
-    ttl_seconds: Optional[int] = None,
-) -> Optional[Any]:
+    root: Path | None = None,
+    ttl_seconds: int | None = None,
+) -> Any | None:
     """Read a JSON cache, restoring from the cloud mirror first when useful."""
     p = Path(path)
     restore_file_from_cloud(p, root=root)
@@ -142,8 +141,8 @@ def write_json_cache(
     path: Path,
     data: Any,
     *,
-    root: Optional[Path] = None,
-    indent: Optional[int] = None,
+    root: Path | None = None,
+    indent: int | None = None,
 ) -> Path:
     """Write JSON locally and mirror it to the cloud cache when configured."""
     p = Path(path)
@@ -156,7 +155,7 @@ def write_json_cache(
     return p
 
 
-def _dotenv_value(key: str, *, root: Optional[Path] = None) -> str:
+def _dotenv_value(key: str, *, root: Path | None = None) -> str:
     path = _project_root(root) / ".env"
     if not path.exists():
         return ""
@@ -173,11 +172,11 @@ def _dotenv_value(key: str, *, root: Optional[Path] = None) -> str:
     return ""
 
 
-def _project_root(root: Optional[Path] = None) -> Path:
+def _project_root(root: Path | None = None) -> Path:
     return Path(root or Path.cwd()).resolve()
 
 
-def _base_for(local_path: Path, *, root: Optional[Path] = None) -> Path:
+def _base_for(local_path: Path, *, root: Path | None = None) -> Path:
     if root is not None:
         return Path(root).resolve()
     try:

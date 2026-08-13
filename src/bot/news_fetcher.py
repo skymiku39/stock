@@ -25,13 +25,12 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.utils import get_logger, mk_folder, now_tw
-
 
 CNYES_TW_STOCK = "https://api.cnyes.com/media/api/v1/newslist/category/tw_stock"
 CNYES_TW_HEADLINE = "https://api.cnyes.com/media/api/v1/newslist/category/headline"
@@ -60,8 +59,8 @@ class NewsItem:
     source: str = "cnyes"
     category: str = ""
     published_at: str = ""        # ISO 8601
-    keywords: List[str] = field(default_factory=list)
-    related_tickers: List[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    related_tickers: list[str] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------
@@ -81,12 +80,12 @@ def _clean_html(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _extract_tickers(text: str) -> List[str]:
+def _extract_tickers(text: str) -> list[str]:
     """從新聞標題/摘要找出疑似 4-6 位數股票代號。
 
     優先抓 `(2330-TW)` 這種有明確 marker 的；再 fallback 全文 4-6 位數。
     """
-    out: List[str] = []
+    out: list[str] = []
     for m in _TICKER_RE.finditer(text or ""):
         t = m.group(1)
         if t not in out:
@@ -102,7 +101,7 @@ def _extract_tickers(text: str) -> List[str]:
     return out[:5]
 
 
-def _parse_cnyes_item(d: Dict[str, Any]) -> Optional[NewsItem]:
+def _parse_cnyes_item(d: dict[str, Any]) -> NewsItem | None:
     title = _clean_html(d.get("title") or "")
     if not title:
         return None
@@ -111,7 +110,7 @@ def _parse_cnyes_item(d: Dict[str, Any]) -> Optional[NewsItem]:
         summary = summary[:297] + "…"
     pub_ts = d.get("publishAt") or d.get("publish_at") or 0
     try:
-        pub_iso = dt.datetime.fromtimestamp(int(pub_ts), tz=dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+        pub_iso = dt.datetime.fromtimestamp(int(pub_ts), tz=dt.UTC).astimezone().isoformat(timespec="seconds")
     except Exception:
         pub_iso = ""
     news_id = str(d.get("newsId") or d.get("id") or "")
@@ -135,10 +134,10 @@ def fetch_cnyes(
     *,
     limit: int = 100,
     timeout: int = 12,
-    logger: Optional[logging.Logger] = None,
-) -> List[NewsItem]:
+    logger: logging.Logger | None = None,
+) -> list[NewsItem]:
     log = logger or get_logger("news")
-    out: List[NewsItem] = []
+    out: list[NewsItem] = []
     per_page = min(50, limit)
     pages = (limit + per_page - 1) // per_page
     for p in range(1, pages + 1):
@@ -174,11 +173,11 @@ def fetch_cnyes(
 # ----------------------------------------------------------------------
 
 
-def _cache_path(date: dt.date, root: Optional[Path]) -> Path:
+def _cache_path(date: dt.date, root: Path | None) -> Path:
     return (root or Path.cwd()) / "data" / "news" / f"news_{date.isoformat()}.json"
 
 
-def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[List[NewsItem]]:
+def _load_cache(date: dt.date, root: Path | None) -> list[NewsItem] | None:
     p = _cache_path(date, root)
     restore_file_from_cloud(p, root=root)
     if not p.exists():
@@ -190,7 +189,7 @@ def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[List[NewsItem]]
         return None
 
 
-def _save_cache(items: List[NewsItem], date: dt.date, root: Optional[Path]) -> Path:
+def _save_cache(items: list[NewsItem], date: dt.date, root: Path | None) -> Path:
     p = _cache_path(date, root)
     mk_folder(str(p.parent))
     p.write_text(json.dumps(
@@ -206,9 +205,9 @@ def fetch_today_news(
     limit: int = 150,
     use_cache: bool = True,
     force_refresh: bool = False,
-    root: Optional[Path] = None,
-    logger: Optional[logging.Logger] = None,
-) -> List[NewsItem]:
+    root: Path | None = None,
+    logger: logging.Logger | None = None,
+) -> list[NewsItem]:
     """主要入口：抓今天的台股新聞 (有日快取)。"""
     log = logger or get_logger("news")
     today = now_tw().date()
@@ -226,9 +225,9 @@ def fetch_today_news(
     return items
 
 
-def news_to_compact_text(items: List[NewsItem], max_chars: int = 8000) -> str:
+def news_to_compact_text(items: list[NewsItem], max_chars: int = 8000) -> str:
     """壓成緊湊文字，給 LLM 當 prompt input。"""
-    lines: List[str] = []
+    lines: list[str] = []
     total = 0
     for i, it in enumerate(items, 1):
         line = f"{i:03d}. [{it.category}] {it.title}"

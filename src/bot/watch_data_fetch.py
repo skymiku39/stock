@@ -13,12 +13,9 @@
 from __future__ import annotations
 
 import argparse
-import json
-import sys
-from pathlib import Path
-from typing import List, Optional
-
 import datetime as dt
+import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -38,10 +35,10 @@ MIN_DAILY_BARS = 400
 
 
 def resolve_symbols(
-    raw: Optional[str] = None,
+    raw: str | None = None,
     *,
-    root: Optional[Path] = None,
-) -> List[str]:
+    root: Path | None = None,
+) -> list[str]:
     if raw:
         parts = [_normalize_symbol(s) for s in raw.split(",") if s.strip()]
         return list(dict.fromkeys(parts))
@@ -139,8 +136,8 @@ def _backfill_yfinance_if_sparse(
 
 
 def _publish_kline_events(
-    publisher: Optional[EventPublisher],
-    symbols: List[str],
+    publisher: EventPublisher | None,
+    symbols: list[str],
     *,
     start: str,
     end: str,
@@ -159,17 +156,17 @@ def _publish_kline_events(
 
 
 def fetch_watch_quant_data(
-    symbols: List[str],
+    symbols: list[str],
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     start: str = "2023-01-01",
-    end: Optional[str] = None,
+    end: str | None = None,
     chip_days: int = 10,
     skip_company: bool = False,
     skip_macro: bool = False,
     fundamentals_delay: int = 8,
     logger=None,
-    publisher: Optional[EventPublisher] = None,
+    publisher: EventPublisher | None = None,
 ) -> dict:
     """補齊監控池的量化 / 微笑曲線樣本資料。"""
     log = logger or get_logger("watch-data-fetch")
@@ -213,7 +210,7 @@ def fetch_watch_quant_data(
         _publish_kline_events(
             publisher, symbols, start=start, end=end_s, price_bars=summary["price_bars"],
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         msg = f"daily_k: {exc}"
         log.exception(msg)
         summary["errors"].append(msg)
@@ -287,7 +284,7 @@ def fetch_watch_quant_data(
     return summary
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="補齊監控池量化交易 / 微笑曲線樣本資料",
     )

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set
 
-from bot.active_etf import HoldingsSnapshot, load_active_etfs, list_holdings_dates, load_holdings
+from bot.active_etf import (
+    HoldingsSnapshot,
+    list_holdings_dates,
+    load_active_etfs,
+    load_holdings,
+)
 from bot.config import Settings
 from bot.etf_consensus import (
     ConsensusHolding,
@@ -82,8 +86,8 @@ class SmileScreenCandidate:
 
 @dataclass
 class SmileScreenReport:
-    candidates: List[SmileScreenCandidate] = field(default_factory=list)
-    selected: List[SmileScreenCandidate] = field(default_factory=list)
+    candidates: list[SmileScreenCandidate] = field(default_factory=list)
+    selected: list[SmileScreenCandidate] = field(default_factory=list)
     universe_size: int = 0
     filtered_size: int = 0
     start: str = ""
@@ -91,7 +95,7 @@ class SmileScreenReport:
     total_fund: float = 0.0
     fund_per_symbol: float = 0.0
     top_n: int = 5
-    notes: List[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def settings_suggestion(self) -> dict:
@@ -112,9 +116,9 @@ class SmileScreenReport:
         }
 
 
-def load_latest_etf_snapshots(root: Optional[Path] = None) -> Dict[str, HoldingsSnapshot]:
+def load_latest_etf_snapshots(root: Path | None = None) -> dict[str, HoldingsSnapshot]:
     root = root or Path.cwd()
-    out: Dict[str, HoldingsSnapshot] = {}
+    out: dict[str, HoldingsSnapshot] = {}
     for etf in load_active_etfs(root):
         dates = list_holdings_dates(etf.symbol, root)
         if not dates:
@@ -125,9 +129,9 @@ def load_latest_etf_snapshots(root: Optional[Path] = None) -> Dict[str, Holdings
     return out
 
 
-def load_prev_etf_snapshots(root: Optional[Path] = None) -> Dict[str, HoldingsSnapshot]:
+def load_prev_etf_snapshots(root: Path | None = None) -> dict[str, HoldingsSnapshot]:
     root = root or Path.cwd()
-    out: Dict[str, HoldingsSnapshot] = {}
+    out: dict[str, HoldingsSnapshot] = {}
     for etf in load_active_etfs(root):
         dates = list_holdings_dates(etf.symbol, root)
         if len(dates) < 2:
@@ -138,7 +142,7 @@ def load_prev_etf_snapshots(root: Optional[Path] = None) -> Dict[str, HoldingsSn
     return out
 
 
-def _consensus_add_tickers(root: Path, min_add: int = 3) -> Set[str]:
+def _consensus_add_tickers(root: Path, min_add: int = 3) -> set[str]:
     latest = load_latest_etf_snapshots(root)
     prev = load_prev_etf_snapshots(root)
     if not latest or not prev:
@@ -242,16 +246,16 @@ def _composite_score(
 
 
 def collect_universe_tickers(
-    root: Optional[Path] = None,
+    root: Path | None = None,
     *,
     min_etf_count: int = 2,
     universe_limit: int = 30,
-    extra_symbols: Optional[Sequence[str]] = None,
-) -> List[str]:
+    extra_symbols: Sequence[str] | None = None,
+) -> list[str]:
     """取得待分析代號清單（共識池 + 額外指定）。"""
     root = root or Path.cwd()
     latest = load_latest_etf_snapshots(root)
-    tickers: List[str] = []
+    tickers: list[str] = []
     if latest:
         etf_meta = {e.symbol: e for e in load_active_etfs(root)}
         consensus_list = build_consensus(latest, etf_meta, min_etf_count=min_etf_count)
@@ -270,7 +274,7 @@ def collect_universe_tickers(
 def screen_smile_candidates(
     db,
     *,
-    root: Optional[Path] = None,
+    root: Path | None = None,
     start: str,
     end: str,
     total_fund: float = 300_000,
@@ -279,11 +283,11 @@ def screen_smile_candidates(
     max_price: float = 300.0,
     min_ann_vol: float = 35.0,
     min_add_etfs: int = 3,
-    use_odd_lot: Optional[bool] = None,
+    use_odd_lot: bool | None = None,
     universe_limit: int = 30,
-    extra_symbols: Optional[Sequence[str]] = None,
-    settings: Optional[Settings] = None,
-    publisher: Optional[EventPublisher] = None,
+    extra_symbols: Sequence[str] | None = None,
+    settings: Settings | None = None,
+    publisher: EventPublisher | None = None,
 ) -> SmileScreenReport:
     """複合篩選：ETF 共識 → 價格/波動 → 微笑曲線回測 → 排序取 Top N。"""
     root = root or Path.cwd()
@@ -313,7 +317,7 @@ def screen_smile_candidates(
     report.universe_size = len(consensus_list)
 
     add_tickers = _consensus_add_tickers(root, min_add=min_add_etfs)
-    filtered: List[ConsensusHolding] = []
+    filtered: list[ConsensusHolding] = []
     if extra_symbols:
         for sym in extra_symbols:
             if sym in consensus_by_ticker:
@@ -331,7 +335,7 @@ def screen_smile_candidates(
     )
     backtester = SmileCurveBacktester(bt_settings)
 
-    candidates: List[SmileScreenCandidate] = []
+    candidates: list[SmileScreenCandidate] = []
     for holding in filtered:
         bars = db.get_price_history(holding.ticker, start=start, end=end, ascending=True)
         metrics = compute_price_metrics(bars, budget_per_symbol=fund_per_symbol)

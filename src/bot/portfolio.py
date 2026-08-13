@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 from bot.ownership import BOT_OWNER_TAG, infer_owner_tag, is_bot_owner
-
 
 LOT_SIZE = 1000.0
 
@@ -50,7 +50,7 @@ class PositionLot:
 class PortfolioPosition:
     symbol: str
     qty: float = 0.0
-    lots: List[PositionLot] = field(default_factory=list)
+    lots: list[PositionLot] = field(default_factory=list)
     trade_count: int = 0
     last_trade_ts: str = ""
     owner_tag: str = ""
@@ -99,7 +99,7 @@ class BrokerPositionsSnapshot:
     account: str
     asof: str
     simulation: bool
-    positions: List[BrokerPosition] = field(default_factory=list)
+    positions: list[BrokerPosition] = field(default_factory=list)
     error: str = ""
 
 
@@ -114,14 +114,14 @@ class BotOwnership:
 def load_portfolio(
     root: Path,
     *,
-    owner_filter: Optional[str] = None,
-) -> Tuple[List[PortfolioTrade], Dict[str, PortfolioPosition]]:
+    owner_filter: str | None = None,
+) -> tuple[list[PortfolioTrade], dict[str, PortfolioPosition]]:
     """Load local trade files and return all trades plus current open positions."""
     trades = load_trades(root)
     return trades, build_positions(trades, owner_filter=owner_filter)
 
 
-def load_bot_portfolio(root: Path) -> Tuple[List[PortfolioTrade], Dict[str, PortfolioPosition]]:
+def load_bot_portfolio(root: Path) -> tuple[list[PortfolioTrade], dict[str, PortfolioPosition]]:
     """Load local trade files and return only AI-owned open positions."""
     return load_portfolio(root, owner_filter=BOT_OWNER_TAG)
 
@@ -154,7 +154,7 @@ def fetch_shioaji_positions(settings: Any, *, timeout: int = 8000) -> BrokerPosi
         )
 
     api = sj.Shioaji(simulation=bool(getattr(settings, "simulation", True)))
-    account: Optional[Any] = None
+    account: Any | None = None
     account_label = ""
     try:
         api.login(
@@ -217,7 +217,7 @@ def broker_position_from_shioaji(pos: Any, *, account: str = "") -> BrokerPositi
 
 def classify_bot_ownership(
     broker_qty: float,
-    bot_position: Optional[PortfolioPosition],
+    bot_position: PortfolioPosition | None,
 ) -> BotOwnership:
     local_qty = max(float(bot_position.qty if bot_position else 0.0), 0.0)
     bot_qty = min(max(float(broker_qty), 0.0), local_qty)
@@ -236,12 +236,12 @@ def classify_bot_ownership(
     )
 
 
-def load_trades(root: Path) -> List[PortfolioTrade]:
+def load_trades(root: Path) -> list[PortfolioTrade]:
     data_dir = root / "data"
     if not data_dir.exists():
         return []
 
-    out: List[PortfolioTrade] = []
+    out: list[PortfolioTrade] = []
     for path in sorted(data_dir.glob("trades_*.csv")):
         out.extend(_read_trade_file(path))
     return out
@@ -250,9 +250,9 @@ def load_trades(root: Path) -> List[PortfolioTrade]:
 def build_positions(
     trades: Iterable[PortfolioTrade],
     *,
-    owner_filter: Optional[str] = None,
-) -> Dict[str, PortfolioPosition]:
-    positions: Dict[str, PortfolioPosition] = {}
+    owner_filter: str | None = None,
+) -> dict[str, PortfolioPosition]:
+    positions: dict[str, PortfolioPosition] = {}
     normalized_owner = (owner_filter or "").strip().upper()
 
     for trade in trades:
@@ -285,8 +285,8 @@ def build_positions(
     }
 
 
-def _read_trade_file(path: Path) -> List[PortfolioTrade]:
-    rows: List[PortfolioTrade] = []
+def _read_trade_file(path: Path) -> list[PortfolioTrade]:
+    rows: list[PortfolioTrade] = []
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as fp:
             reader = csv.DictReader(fp)
@@ -300,7 +300,7 @@ def _read_trade_file(path: Path) -> List[PortfolioTrade]:
 
 
 def _parse_trade_row(
-    row: Dict[str, str],
+    row: dict[str, str],
     source_file: str,
     source_row: int,
 ) -> PortfolioTrade | None:
@@ -329,7 +329,7 @@ def _parse_trade_row(
     )
 
 
-def _consume_fifo(lots: List[PositionLot], sell_qty: float) -> None:
+def _consume_fifo(lots: list[PositionLot], sell_qty: float) -> None:
     remaining = sell_qty
     while lots and remaining > 0:
         lot = lots[0]
@@ -351,7 +351,7 @@ def _normalize_side(value: str) -> str:
     return lowered
 
 
-def _first(row: Dict[str, str], *keys: str) -> str:
+def _first(row: dict[str, str], *keys: str) -> str:
     for key in keys:
         value = row.get(key)
         if value not in (None, ""):
