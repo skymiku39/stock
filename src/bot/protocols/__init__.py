@@ -4,12 +4,14 @@
 """
 
 from bot.protocols.broker import BrokerProtocol
+from bot.protocols.llm import LlmClient
 from bot.protocols.market_source import MarketSourceProtocol
 from bot.protocols.notifier import NotifierProtocol
 from bot.protocols.recorder import TradeRecorderProtocol
 
 __all__ = [
     "BrokerProtocol",
+    "LlmClient",
     "MarketSourceProtocol",
     "NotifierProtocol",
     "TradeRecorderProtocol",
