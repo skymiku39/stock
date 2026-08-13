@@ -46,7 +46,7 @@ template: |
 |----|--------|------|
 | `analyze_presentation` | active | 解析法說會逐字稿，輸出情緒/Capex/毛利率指引等 |
 | `logic_check` | active | 言行反查：法說語意 vs 籌碼面（`verdict` 欄位） |
-| `extract_etf_holdings` | active | 從投信網頁 HTML/PDF 抽出 ETF 持股 JSON |
+| `extract_etf_holdings` | active | 從投信網頁 HTML/PDF 抽出 ETF／共同基金持股 JSON |
 | `daily_brief` | active | 每日盤後簡報，整合所有分析結果 |
 | `us_market_brief` | active | 美股盤後 → 台股早盤影響評估 (Markdown 簡報) |
 | `research_ticker` | active | 全自動個股研究（行事曆+搜尋+新聞 → 結構化 JSON） |

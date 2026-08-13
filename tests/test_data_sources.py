@@ -140,7 +140,7 @@ class TestMopsHelpers:
 class TestActiveEtfUrls:
     def test_all_default_urls_present_and_valid(self) -> None:
         from bot.active_etf import DEFAULT_ACTIVE_ETFS
-        assert len(DEFAULT_ACTIVE_ETFS) >= 27
+        assert len(DEFAULT_ACTIVE_ETFS) >= 28
         for e in DEFAULT_ACTIVE_ETFS:
             url = e.get("holdings_url", "")
             assert url, f"{e['symbol']} 缺 holdings_url"
@@ -152,6 +152,17 @@ class TestActiveEtfUrls:
         m = {e["symbol"]: e["holdings_url"] for e in DEFAULT_ACTIVE_ETFS}
         for sym in ("00402A", "00404A", "00405A", "00406A", "00407A", "00998A"):
             assert "moneydj" in m[sym].lower(), f"{sym} 仍指向失效來源"
+
+    def test_allianz_taiwan_tech_fund_listed(self) -> None:
+        from bot.active_etf import DEFAULT_ACTIVE_ETFS
+        m = {e["symbol"]: e for e in DEFAULT_ACTIVE_ETFS}
+        assert "ALI006" in m
+        assert "安聯台灣科技" in m["ALI006"]["name"]
+        assert m["ALI006"]["issuer"] == "安聯投信"
+        url = m["ALI006"]["holdings_url"].lower()
+        assert "moneydj.com" in url
+        assert "yp013000" in url
+        assert "acdd04" in url
 
 
 # ----------------------------------------------------------------------
