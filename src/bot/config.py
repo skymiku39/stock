@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Annotated, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -37,11 +37,11 @@ class Settings(BaseSettings):
     simulation: bool = True
 
     # --- 監控股票 (逗號分隔, e.g. "2330,0050,2881") ---
-    symbols: Annotated[List[str], NoDecode] = []
+    symbols: Annotated[list[str], NoDecode] = []
 
     @field_validator("symbols", mode="before")
     @classmethod
-    def _parse_symbols(cls, v: object) -> List[str]:
+    def _parse_symbols(cls, v: object) -> list[str]:
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return list(v)  # type: ignore[arg-type]
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     enter_cutoff_time: datetime.time = datetime.time(9, 30)
     exit_time: datetime.time = datetime.time(13, 15)
     # 午盤獲利平倉窗口起點；設定後 [起點, exit_time) 內淨利 > 0 即賣出（不等移動停利 2%）
-    profit_exit_start_time: Optional[datetime.time] = None
+    profit_exit_start_time: datetime.time | None = None
 
     @field_validator(
         "enter_cutoff_time",
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _parse_time(cls, v: object) -> Optional[datetime.time]:
+    def _parse_time(cls, v: object) -> datetime.time | None:
         if v in (None, ""):
             return None
         if isinstance(v, datetime.time):
@@ -86,19 +86,19 @@ class Settings(BaseSettings):
     stop_loss_pct: float = -3.0
     take_profit_pct: float = 6.0
     trailing_stop_pct: float = 2.0  # 從最高點回撤此百分比則觸發停利
-    sell_profit_targets: Annotated[Dict[str, float], NoDecode] = Field(default_factory=dict)
+    sell_profit_targets: Annotated[dict[str, float], NoDecode] = Field(default_factory=dict)
     # 例: SELL_PROFIT_TARGETS=2330:8,0050:5.5
     # 有設定的股票，AI 部位只有在報酬率達到該門檻後才允許自動賣出。
 
     @field_validator("sell_profit_targets", mode="before")
     @classmethod
-    def _parse_sell_profit_targets(cls, v: object) -> Dict[str, float]:
+    def _parse_sell_profit_targets(cls, v: object) -> dict[str, float]:
         if v in (None, ""):
             return {}
         if isinstance(v, dict):
             return {str(k).strip(): float(val) for k, val in v.items() if str(k).strip()}
         if isinstance(v, str):
-            out: Dict[str, float] = {}
+            out: dict[str, float] = {}
             for raw_item in v.replace(";", ",").split(","):
                 item = raw_item.strip()
                 if not item:
@@ -144,15 +144,15 @@ class Settings(BaseSettings):
     # --- 進場條件 (configurable 策略) ---
     min_pct_chg_on_entry: float = 1.0    # 全域最低進場漲幅 %
     # 例: BUY_ENTRY_TARGETS=2330:1:5,0050:0.5:3
-    buy_entry_targets: Annotated[Dict[str, Tuple[float, float]], NoDecode] = Field(
+    buy_entry_targets: Annotated[dict[str, tuple[float, float]], NoDecode] = Field(
         default_factory=dict,
     )
     max_pct_chg_on_entry: float = 0.0    # 漲幅超過 N% 不進場 (0=不限)
     min_price: float = 0.0               # 最低股價 (0=不限)，避免低價股
     max_price: float = 0.0               # 最高股價 (0=不限)，避免超高價股
-    blacklist_symbols: Annotated[List[str], NoDecode] = []   # 強制不交易的代號
+    blacklist_symbols: Annotated[list[str], NoDecode] = []   # 強制不交易的代號
     # 手動長期持股：永不自動監控/交易（併入風控黑名單）
-    manual_hold_symbols: Annotated[List[str], NoDecode] = []
+    manual_hold_symbols: Annotated[list[str], NoDecode] = []
 
     # --- 損失熔斷 ---
     daily_max_loss_twd: int = 0          # 當日實現虧損絕對值上限 (0=不限)
@@ -161,11 +161,11 @@ class Settings(BaseSettings):
 
     @field_validator("buy_entry_targets", mode="before")
     @classmethod
-    def _parse_buy_entry_targets(cls, v: object) -> Dict[str, Tuple[float, float]]:
+    def _parse_buy_entry_targets(cls, v: object) -> dict[str, tuple[float, float]]:
         if v in (None, ""):
             return {}
         if isinstance(v, dict):
-            out: Dict[str, Tuple[float, float]] = {}
+            out: dict[str, tuple[float, float]] = {}
             for sym, val in v.items():
                 symbol = str(sym).strip()
                 if not symbol:
@@ -178,7 +178,7 @@ class Settings(BaseSettings):
                     )
             return out
         if isinstance(v, str):
-            parsed: Dict[str, Tuple[float, float]] = {}
+            parsed: dict[str, tuple[float, float]] = {}
             for raw_item in v.replace(";", ",").split(","):
                 item = raw_item.strip()
                 if not item:
@@ -198,14 +198,14 @@ class Settings(BaseSettings):
 
     @field_validator("blacklist_symbols", mode="before")
     @classmethod
-    def _parse_blacklist(cls, v: object) -> List[str]:
+    def _parse_blacklist(cls, v: object) -> list[str]:
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return list(v)  # type: ignore[arg-type]
 
     @field_validator("manual_hold_symbols", mode="before")
     @classmethod
-    def _parse_manual_hold(cls, v: object) -> List[str]:
+    def _parse_manual_hold(cls, v: object) -> list[str]:
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return list(v)  # type: ignore[arg-type]
@@ -240,19 +240,19 @@ class Settings(BaseSettings):
     smile_buy_tiers: str = "1:1,3:2,5:3,8:4"
     smile_base_lot: int = 1
     smile_regular_tax_rate: float = 0.003  # 一般證交稅（非當沖）
-    smile_reference_prices: Annotated[Dict[str, float], NoDecode] = Field(
+    smile_reference_prices: Annotated[dict[str, float], NoDecode] = Field(
         default_factory=dict,
     )
 
     @field_validator("smile_reference_prices", mode="before")
     @classmethod
-    def _parse_smile_reference_prices(cls, v: object) -> Dict[str, float]:
+    def _parse_smile_reference_prices(cls, v: object) -> dict[str, float]:
         if v in (None, ""):
             return {}
         if isinstance(v, dict):
             return {str(k).strip(): float(val) for k, val in v.items() if str(k).strip()}
         if isinstance(v, str):
-            parsed: Dict[str, float] = {}
+            parsed: dict[str, float] = {}
             for raw_item in v.replace(";", ",").split(","):
                 item = raw_item.strip()
                 if not item:
@@ -290,6 +290,23 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     # 允許 auto_llm 在無 research_ticker prompt 時退回 analyze_presentation
     auto_llm_allow_legacy: bool = False
+
+    # --- LLM 提供者 (統一路由) ---
+    # chain = Gemini 閘道 → Cursor 閘道 → Gemini SDK（推薦）
+    # gemini_gateway = 僅 Gemini 瀏覽器閘道 (port 8816)
+    # cursor = 僅 Cursor 閘道 (port 8815)
+    # gemini = 僅 Gemini SDK API (需 API Key)
+    llm_provider: Literal["chain", "gemini_gateway", "cursor", "gemini"] = "chain"
+
+    # --- Gemini 閘道 (蹭google的geminiAI) ---
+    gemini_gateway_base_url: str = "http://127.0.0.1:8816"
+    gemini_gateway_timeout: float = 180
+    gemini_gateway_model_label: str = "gemini-auto"
+
+    # --- Cursor 閘道 (蹭cursor的AI) ---
+    cursor_llm_base_url: str = "http://127.0.0.1:8815"
+    cursor_llm_timeout: float = 180
+    cursor_llm_model_label: str = "cursor-auto"
 
     # --- 自動化研究管線 ---
     pipeline_chip_lookback_days: int = 5

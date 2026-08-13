@@ -4,97 +4,41 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 # 確保被 `streamlit run src/bot/dashboard.py` 啟動時也能 import bot.*
 _PKG_ROOT = Path(__file__).resolve().parents[2]
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-import pandas as pd  # noqa: E402
-import streamlit as st  # noqa: E402
+import pandas as pd
+import streamlit as st
 
-from bot.env_io import (  # noqa: E402
-    ENV_FIELDS,
-    EnvField,
-    env_path,
-    grouped_fields,
-    load_env,
-    save_env,
-    validate,
-)
-from bot.process_runner import get_runner, get_scheduler_runner, tail_file  # noqa: E402
-from bot.active_etf import (  # noqa: E402
+from bot import watchlist as wl
+from bot.active_etf import (
     ActiveEtf,
-    DEFAULT_ACTIVE_ETFS,
     Holding,
     HoldingsSnapshot,
-    list_active_etfs_path,
     list_holdings_dates,
     load_active_etfs,
     load_holdings,
     save_active_etfs,
     save_holdings,
 )
-from bot.etf_consensus import (  # noqa: E402
-    build_consensus,
-    consensus_additions,
-    consensus_new_builds,
-    diff_snapshots,
-)
-from bot.prompt_registry import get_registry  # noqa: E402
-from bot.llm_log import get_call_logger  # noqa: E402
-from bot.scoring import (  # noqa: E402
-    ADVISORY_RULE_NOTE,
-    STRATEGY_RULES,
-    TIMEFRAMES,
-    TIMEFRAME_LABELS,
-    WEIGHTS,
-    compute_scorecard,
-    scorecard_to_row,
-)
-from bot.ticker_view import build_snapshot, snapshot_to_dict  # noqa: E402
-from bot.portfolio import (  # noqa: E402
-    LOT_SIZE,
-    BrokerPosition,
-    PortfolioPosition,
-    classify_bot_ownership,
-    fetch_broker_positions,
-    load_bot_portfolio,
-)
-from bot.portfolio_analysis import (  # noqa: E402
-    build_portfolio_analysis_bundle,
-    bundle_to_json,
-)
-from bot import watchlist as wl  # noqa: E402
-from bot.stock_db import (  # noqa: E402
-    ALL_TABLES,
-    SYNCABLE_TABLES,
-    StockDB,
-    StockInfo,
-    WatchlistRow,
-    default_db_path,
-    get_db,
-    reset_db_singleton,
-)
-from bot.company_info import lookup_company_info  # noqa: E402
-from bot.cloud_sync import (  # noqa: E402
-    CloudConfig,
+from bot.cloud_sync import (
     CloudSyncDependencyError,
     GoogleSheetSync,
     TableSyncResult,
     load_config_from_env,
 )
-
+from bot.company_info import lookup_company_info
 from bot.dashboard.common import (
     LLM_HINT_AUTO,
     LLM_HINT_DIRECT,
-    LLM_LABEL,
-    LLM_TAG,
     PROJECT_ROOT,
     _badge,
     _display_altair,
@@ -103,13 +47,57 @@ from bot.dashboard.common import (
     _llm_auto_banner,
     _llm_button_label,
     _llm_caption,
-    _local_file_label,
     _project_path,
-    _safe_json_field,
     _safe_read_csv,
     _ticker_local_data_summary,
 )
-
+from bot.env_io import (
+    EnvField,
+    env_path,
+    grouped_fields,
+    load_env,
+    save_env,
+    validate,
+)
+from bot.etf_consensus import (
+    build_consensus,
+    consensus_additions,
+    consensus_new_builds,
+)
+from bot.llm_log import get_call_logger
+from bot.portfolio import (
+    LOT_SIZE,
+    BrokerPosition,
+    PortfolioPosition,
+    classify_bot_ownership,
+    fetch_broker_positions,
+    load_bot_portfolio,
+)
+from bot.portfolio_analysis import (
+    build_portfolio_analysis_bundle,
+    bundle_to_json,
+)
+from bot.process_runner import get_runner, tail_file
+from bot.prompt_registry import get_registry
+from bot.scoring import (
+    ADVISORY_RULE_NOTE,
+    STRATEGY_RULES,
+    TIMEFRAME_LABELS,
+    TIMEFRAMES,
+    WEIGHTS,
+    compute_scorecard,
+    scorecard_to_row,
+)
+from bot.stock_db import (
+    ALL_TABLES,
+    SYNCABLE_TABLES,
+    StockDB,
+    StockInfo,
+    WatchlistRow,
+    default_db_path,
+    reset_db_singleton,
+)
+from bot.ticker_view import build_snapshot, snapshot_to_dict
 
 # ======================================================================
 # 頁面: 功能總覽
@@ -371,7 +359,7 @@ def page_config() -> None:
         st.warning("尚未找到 .env，將使用各欄位預設值。儲存後會自動建立。")
 
     groups = grouped_fields()
-    new_values: Dict[str, str] = dict(env_values)
+    new_values: dict[str, str] = dict(env_values)
 
     for section, fields_in_section in groups.items():
         with st.expander(section, expanded=section in ("執行模式", "策略", "風控")):
@@ -484,7 +472,7 @@ def page_runner() -> None:
             st.info("尚未啟動過任何 Bot。設定好 .env 後按「啟動 Bot」即可。")
 
     if start_clicked:
-        extra: Dict[str, str] = {}
+        extra: dict[str, str] = {}
         if symbols_override.strip():
             extra["SYMBOLS"] = ",".join(
                 s.strip() for s in symbols_override.split(",") if s.strip()
@@ -525,8 +513,8 @@ def page_risk_center() -> None:
     st.title("風控中心 (Risk Center)")
     st.caption("看一眼今天的資金/部位/虧損狀態，必要時拉下「緊急 Kill Switch」立刻關掉所有新進場。")
 
-    from bot.config import Settings as S  # noqa: E402
-    from bot.risk_guard import KILL_SWITCH_FILENAME, RiskGuard  # noqa: E402
+    from bot.config import Settings as S
+    from bot.risk_guard import KILL_SWITCH_FILENAME, RiskGuard
 
     settings = S()
     guard = RiskGuard(settings=settings, project_root=PROJECT_ROOT)
@@ -556,7 +544,7 @@ def page_risk_center() -> None:
 
     # ============ 持倉安全（混倉警示）============
     if settings.api_key and settings.symbols:
-        from bot.position_safety import (  # noqa: E402
+        from bot.position_safety import (
             audit_manual_overlap,
             reconcile_broker_vs_bot_records,
         )
@@ -761,8 +749,8 @@ def page_preflight() -> None:
         return
 
     if run_btn:
-        from bot.config import Settings as S  # noqa: E402
-        from bot.preflight import report_to_dict, run_preflight  # noqa: E402
+        from bot.config import Settings as S
+        from bot.preflight import report_to_dict, run_preflight
 
         with st.spinner("檢查中… (連線 Shioaji 約需數秒)"):
             try:
@@ -852,7 +840,7 @@ def page_preflight() -> None:
 # ======================================================================
 
 
-def _render_csv_chart(df: pd.DataFrame, ts_col: str, value_col: str, group_col: Optional[str] = None) -> None:
+def _render_csv_chart(df: pd.DataFrame, ts_col: str, value_col: str, group_col: str | None = None) -> None:
     try:
         import altair as alt
         chart_df = df.copy()
@@ -1384,9 +1372,10 @@ def page_etf_tracker() -> None:
                 st.error("請先在「組態設定」填入 GEMINI_API_KEY")
             else:
                 from bot.etf_holdings_fetcher import fetch_all_active_etfs
-                from bot.llm_analyzer import GeminiClient
+                from bot.llm_analyzer import create_llm_client
 
-                client = GeminiClient(api_key=api_key, model=model)
+                client = create_llm_client()
+                etfs_with_url = [e for e in etfs if e.holdings_url]
                 status = st.status("抓取 ETF 持股", expanded=True)
                 status.write(f"準備處理 {len(etfs_with_url)} 檔有 URL 的 ETF。")
                 status.write("每檔會下載來源頁面，並呼叫 Gemini 抽取結構化持股。")
@@ -1425,7 +1414,7 @@ def page_etf_tracker() -> None:
             except Exception:
                 uploaded.seek(0)
                 df_in = pd.read_csv(uploaded, encoding="utf-8")
-            holdings: List[Holding] = []
+            holdings: list[Holding] = []
             for _, row in df_in.iterrows():
                 holdings.append(Holding(
                     ticker=str(row.get("ticker", "")).strip(),
@@ -1466,9 +1455,9 @@ def page_etf_tracker() -> None:
 # ======================================================================
 
 
-def _load_all_latest_snapshots() -> Dict[str, "HoldingsSnapshot"]:
+def _load_all_latest_snapshots() -> dict[str, HoldingsSnapshot]:
     etfs = load_active_etfs(PROJECT_ROOT)
-    out: Dict[str, HoldingsSnapshot] = {}
+    out: dict[str, HoldingsSnapshot] = {}
     for e in etfs:
         dates = list_holdings_dates(e.symbol, PROJECT_ROOT)
         if not dates:
@@ -1479,9 +1468,9 @@ def _load_all_latest_snapshots() -> Dict[str, "HoldingsSnapshot"]:
     return out
 
 
-def _load_prev_snapshots() -> Dict[str, "HoldingsSnapshot"]:
+def _load_prev_snapshots() -> dict[str, HoldingsSnapshot]:
     etfs = load_active_etfs(PROJECT_ROOT)
-    out: Dict[str, HoldingsSnapshot] = {}
+    out: dict[str, HoldingsSnapshot] = {}
     for e in etfs:
         dates = list_holdings_dates(e.symbol, PROJECT_ROOT)
         if len(dates) < 2:
@@ -1616,7 +1605,7 @@ def page_follow_signals() -> None:
 # ======================================================================
 
 
-def _conference_row_dict(e: Any) -> Dict[str, str]:
+def _conference_row_dict(e: Any) -> dict[str, str]:
     """法說會行事曆單筆 → DataFrame 列。"""
     url = getattr(e, "presentation_url", "") or ""
     return {
@@ -1637,13 +1626,13 @@ def _mops_session_key(kind: str, *parts: str) -> str:
 
 def _render_earnings_source_panel(
     ticker: str,
-    raw_cache: Optional[Dict[str, Any]] = None,
+    raw_cache: dict[str, Any] | None = None,
     *,
-    source_sections: Optional[Dict[str, Any]] = None,
+    source_sections: dict[str, Any] | None = None,
     key_prefix: str = "earnings_src",
 ) -> None:
     """顯示法說會 / MOPS / LLM 原始素材（來自 auto_llm 快取）。"""
-    sections: Dict[str, Any] = dict(source_sections or {})
+    sections: dict[str, Any] = dict(source_sections or {})
     if not sections and raw_cache:
         sections = dict(raw_cache.get("source_sections") or {})
     if not sections:
@@ -1691,7 +1680,7 @@ def _render_earnings_source_panel(
     ])
 
     def _calendar_md(block: str) -> str:
-        lines: List[str] = []
+        lines: list[str] = []
         for line in (block or "(無)").splitlines():
             if "| 簡報: " in line:
                 pre, url = line.split("| 簡報: ", 1)
@@ -1809,7 +1798,7 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
     upcoming_global = upcoming_global_events(days=14, root=PROJECT_ROOT)
     if upcoming or upcoming_global:
         upcoming_tickers_list = list({e.ticker for e in upcoming if e.ticker})
-        global_tickers: List[str] = []
+        global_tickers: list[str] = []
         for ge in upcoming_global:
             for t in ge.tickers:
                 if t.isdigit() and t not in global_tickers:
@@ -1848,7 +1837,7 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
         disabled=not api_key, key="auto_research_run",
     )
     if btn_run:
-        tickers: List[str] = []
+        tickers: list[str] = []
         for raw in (tickers_input or "").split(","):
             t = raw.strip()
             if t and t not in tickers:
@@ -1868,10 +1857,10 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
             return
 
         from bot.auto_llm import auto_research_ticker
-        from bot.llm_analyzer import GeminiClient
+        from bot.llm_analyzer import create_llm_client
 
-        client = GeminiClient(api_key=api_key, model=model)
-        results: List[Dict] = []
+        client = create_llm_client()
+        results: list[dict] = []
         progress = st.progress(
             0.0,
             text=(
@@ -1926,7 +1915,7 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
         st.success(f"完成：{len(results)} 檔已自動研究")
 
     # ------ 自動載入/還原快取結果 ------
-    current_tickers: List[str] = []
+    current_tickers: list[str] = []
     for raw in (tickers_input or "").split(","):
         t = raw.strip()
         if t and t not in current_tickers:
@@ -2129,9 +2118,9 @@ def page_llm_analysis() -> None:
             help=LLM_HINT_DIRECT,
         )
         if run:
-            from bot.llm_analyzer import GeminiClient, analyze_presentation
-            client = GeminiClient(api_key=api_key, model=model)
-            with st.spinner("Gemini 正在解析貼上的法說內容，並輸出結構化 JSON..."):
+            from bot.llm_analyzer import analyze_presentation, create_llm_client
+            client = create_llm_client()
+            with st.spinner("LLM 正在解析貼上的法說內容，並輸出結構化 JSON..."):
                 analysis = analyze_presentation(text, ticker=ticker, client=client)
             st.session_state["last_llm_analysis"] = analysis
             _save_paste_analysis(analysis, text)
@@ -2178,8 +2167,8 @@ def page_llm_analysis() -> None:
             from bot.conference_calendar import (
                 load_calendar,
                 recent_conferences,
-                update_calendar,
                 upcoming_conferences,
+                update_calendar,
             )
             cc1, cc2, cc3 = st.columns([1, 1, 2])
             days_up = cc1.number_input("未來 N 天", 1, 60, 14, key="cal_up_days")
@@ -2255,8 +2244,8 @@ def page_llm_analysis() -> None:
         with sub_tab_mat:
             mt = st.text_input("股票代號", value="2330", key="mops_mat_ticker")
             if st.button("抓取重大訊息", key="mops_mat_fetch"):
-                from bot.mops_scraper import fetch_material_info, fetch_material_detail
-                mat_stats: Dict[str, Any] = {}
+                from bot.mops_scraper import fetch_material_detail, fetch_material_info
+                mat_stats: dict[str, Any] = {}
                 with st.spinner(f"自 MOPS 抓取 {mt} 的重大訊息..."):
                     materials = fetch_material_info(mt, stats=mat_stats)
                 if materials:
@@ -2415,7 +2404,11 @@ def page_llm_analysis() -> None:
                     "\n\n" + LLM_HINT_DIRECT
                 ),
             ):
-                from bot.llm_analyzer import ChipsContext, GeminiClient, logic_check
+                from bot.llm_analyzer import (
+                    ChipsContext,
+                    create_llm_client,
+                    logic_check,
+                )
                 chips = ChipsContext(
                     foreign_net=foreign,
                     investment_trust_net=trust,
@@ -2425,7 +2418,7 @@ def page_llm_analysis() -> None:
                     block_trade_net=block,
                     notes=note,
                 )
-                client = GeminiClient(api_key=api_key, model=model) if api_key else None
+                client = create_llm_client()
                 with st.spinner("用籌碼摘要反查 LLM 結論一致性..."):
                     result = logic_check(last_analysis, chips, client)
                 st.session_state["last_logic_check_result"] = result
@@ -2545,7 +2538,7 @@ def page_pipeline() -> None:
         )
 
         focus = [s.strip() for s in extra_focus.split(",") if s.strip()]
-        presentations: List[PresentationInput] = []
+        presentations: list[PresentationInput] = []
         if pres_ticker.strip() and pres_text.strip():
             presentations.append(PresentationInput(
                 ticker=pres_ticker.strip(),
@@ -2894,17 +2887,17 @@ def _action_badge(action: str) -> str:
 
 
 def _build_scorecards(
-    tickers: List[str],
+    tickers: list[str],
     *,
-    name_map: Optional[Dict[str, str]] = None,
+    name_map: dict[str, str] | None = None,
     refresh_chips: bool = False,
     refresh_fundamentals: bool = False,
     refresh_technicals: bool = False,
     refresh_distribution: bool = False,
     auto_fill_missing: bool = False,
     auto_llm: bool = False,
-    on_progress: Optional[Callable[[int, int, str], None]] = None,
-) -> List:
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> list:
     """對一群 ticker 組 snapshot 後跑 scoring。"""
     out = []
     nm = name_map or {}
@@ -3195,7 +3188,7 @@ def page_watchlist() -> None:
 # ======================================================================
 
 
-def _latest_local_close(db: StockDB, symbol: str) -> Tuple[float, str]:
+def _latest_local_close(db: StockDB, symbol: str) -> tuple[float, str]:
     try:
         bars = db.get_price_history(symbol, limit=1, ascending=True)
     except Exception:
@@ -3205,7 +3198,7 @@ def _latest_local_close(db: StockDB, symbol: str) -> Tuple[float, str]:
     return float(bars[-1].close or 0.0), str(bars[-1].date or "")
 
 
-def _stock_label(db: StockDB, symbol: str) -> Tuple[str, str]:
+def _stock_label(db: StockDB, symbol: str) -> tuple[str, str]:
     try:
         info = db.get_stock_info(symbol)
     except Exception:
@@ -3253,11 +3246,11 @@ def _stock_label(db: StockDB, symbol: str) -> Tuple[str, str]:
 
 
 def _portfolio_rows(
-    broker_positions: List[BrokerPosition],
-    bot_positions: Dict[str, PortfolioPosition],
+    broker_positions: list[BrokerPosition],
+    bot_positions: dict[str, PortfolioPosition],
     db: StockDB,
-) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for bp in sorted(broker_positions, key=lambda p: p.symbol):
         symbol = bp.symbol
         bot_pos = bot_positions.get(symbol)
@@ -3312,8 +3305,8 @@ def _portfolio_rows(
     return rows
 
 
-def _portfolio_warnings(df: pd.DataFrame) -> List[str]:
-    warnings: List[str] = []
+def _portfolio_warnings(df: pd.DataFrame) -> list[str]:
+    warnings: list[str] = []
     if df.empty:
         return warnings
 
@@ -3347,7 +3340,7 @@ def _collect_portfolio_analysis_bundle(
     *,
     df: pd.DataFrame,
     broker_snapshot: Any,
-    warnings: List[str],
+    warnings: list[str],
     max_holdings: int,
     auto_fill_missing: bool,
     refresh_chips: bool,
@@ -3355,10 +3348,10 @@ def _collect_portfolio_analysis_bundle(
     refresh_technicals: bool,
     refresh_distribution: bool,
     auto_ticker_llm: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     ranked = df.sort_values("權重%", ascending=False).head(max_holdings)
     rows = ranked.to_dict("records")
-    snapshots: Dict[str, Dict[str, Any]] = {}
+    snapshots: dict[str, dict[str, Any]] = {}
 
     status = st.status("蒐集目前持股分析資料包", expanded=True)
     status.write(
@@ -3413,7 +3406,7 @@ def _collect_portfolio_analysis_bundle(
         raise
 
 
-def _save_portfolio_bundle(bundle: Dict[str, Any]) -> Path:
+def _save_portfolio_bundle(bundle: dict[str, Any]) -> Path:
     out_dir = _project_path("data", "portfolio_analysis")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -3426,7 +3419,7 @@ def _save_portfolio_bundle(bundle: Dict[str, Any]) -> Path:
     return path
 
 
-def _save_portfolio_llm_result(markdown: str, info: Dict[str, Any]) -> Path:
+def _save_portfolio_llm_result(markdown: str, info: dict[str, Any]) -> Path:
     out_dir = _project_path("data", "portfolio_analysis")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -3482,7 +3475,7 @@ def _load_broker_snapshot():
         return None
 
 
-def _load_portfolio_bundle_from_disk() -> Optional[Dict[str, Any]]:
+def _load_portfolio_bundle_from_disk() -> dict[str, Any] | None:
     """從磁碟讀取上次儲存的 portfolio analysis bundle。"""
     path = _project_path("data", "portfolio_analysis", "latest_bundle.json")
     if not path.exists():
@@ -3493,7 +3486,7 @@ def _load_portfolio_bundle_from_disk() -> Optional[Dict[str, Any]]:
         return None
 
 
-def _load_portfolio_llm_from_disk() -> Optional[Dict[str, Any]]:
+def _load_portfolio_llm_from_disk() -> dict[str, Any] | None:
     """從磁碟讀取上次儲存的 LLM 投組分析結果。"""
     path = _project_path("data", "portfolio_analysis", "latest_analysis.md")
     if not path.exists():
@@ -3501,7 +3494,7 @@ def _load_portfolio_llm_from_disk() -> Optional[Dict[str, Any]]:
     try:
         markdown = path.read_text(encoding="utf-8")
         # 解析 header 中的 prompt/version/model 資訊
-        info: Dict[str, str] = {}
+        info: dict[str, str] = {}
         if markdown.startswith("<!--"):
             end = markdown.find("-->")
             if end > 0:
@@ -3538,7 +3531,7 @@ def _save_paste_analysis(analysis, text: str) -> None:
         pass
 
 
-def _load_paste_analysis() -> Optional[Dict[str, Any]]:
+def _load_paste_analysis() -> dict[str, Any] | None:
     """從 data/cache_paste_analysis.json 載入貼文字分析結果與文字。"""
     from bot.llm_analyzer import PresentationAnalysis
     path = _project_path("data", "cache_paste_analysis.json")
@@ -3575,7 +3568,7 @@ def _save_logic_check(ticker: str, chips, result) -> None:
         pass
 
 
-def _load_logic_check(expected_ticker: str) -> Optional[Dict[str, Any]]:
+def _load_logic_check(expected_ticker: str) -> dict[str, Any] | None:
     """從 data/cache_logic_check.json 載入特定股票代號的籌碼與反查結果。"""
     from bot.llm_analyzer import ChipsContext, LogicCheckResult
     path = _project_path("data", "cache_logic_check.json")
@@ -3621,8 +3614,8 @@ def _render_portfolio_analysis_section(
     *,
     df: pd.DataFrame,
     broker_snapshot: Any,
-    warnings: List[str],
-    env_values: Dict[str, str],
+    warnings: list[str],
+    env_values: dict[str, str],
 ) -> None:
     st.markdown("### 資料蒐集與 LLM 投組分析")
     st.caption(
@@ -3722,11 +3715,11 @@ def _render_portfolio_analysis_section(
             key="portfolio_llm_analyze",
             help=LLM_HINT_DIRECT,
         ):
-            from bot.llm_analyzer import GeminiClient, gemini_call
+            from bot.llm_analyzer import create_llm_client, llm_call
 
-            client = GeminiClient(api_key=api_key, model=model)
-            with st.spinner("Gemini 正在讀取資料包並分析投組..."):
-                raw, info = gemini_call(
+            client = create_llm_client()
+            with st.spinner("LLM 正在讀取資料包並分析投組..."):
+                raw, info = llm_call(
                     "portfolio_analysis",
                     client=client,
                     registry=get_registry(PROJECT_ROOT / "prompts"),
@@ -4082,7 +4075,7 @@ def page_ticker_detail() -> None:
     )
 
     wlist = wl.load(PROJECT_ROOT)
-    options: List[str] = sorted({i.ticker for i in wlist.items})
+    options: list[str] = sorted({i.ticker for i in wlist.items})
 
     # 來自 watchlist 跳轉
     default_t = st.session_state.get("detail_ticker")
@@ -4226,7 +4219,7 @@ def page_ticker_detail() -> None:
 
     # ---- 資料完整度提示 ----
     # local-first 模式下缺資料是正常狀態；引導使用者只刷新需要的資料源。
-    missing: List[str] = []
+    missing: list[str] = []
     try:
         from bot.market_meta import detect_market, is_etf, market_label
         _mkt = detect_market(snap.ticker, root=PROJECT_ROOT)
@@ -4560,7 +4553,7 @@ def page_ticker_detail() -> None:
                 } for w in snap.distribution_trend.weeks
             ])
             try:
-                import altair as alt  # noqa: F401
+                import altair as alt
                 long = df_dist.melt(id_vars=["週別"], var_name="類別", value_name="比例")
                 chart = alt.Chart(long).mark_line(point=True).encode(
                     x=alt.X("週別:T", title="日期"),
@@ -4706,7 +4699,7 @@ def _render_fundamentals_tab(snap) -> None:
             } for r in sorted(f.revenues, key=lambda x: (x.year, x.month))
         ])
         try:
-            import altair as alt  # noqa: F401
+            import altair as alt
             base = alt.Chart(df_rev).encode(x=alt.X("年月:N", title="年月"))
             bar = base.mark_bar(opacity=0.4, color="#4c78a8").encode(
                 y=alt.Y("營收 (千元):Q", title="營收"),
@@ -4735,7 +4728,7 @@ def _render_fundamentals_tab(snap) -> None:
             } for q in sorted(f.quarterlies, key=lambda x: (x.year, x.quarter))
         ])
         try:
-            import altair as alt  # noqa: F401
+            import altair as alt
             melted = df_q.melt(
                 id_vars=["年季"],
                 value_vars=["毛利率 %", "營業利益率 %", "淨利率 %"],
@@ -4879,7 +4872,7 @@ def _render_dividends_tab(snap) -> None:
         )
 
     try:
-        import altair as alt  # noqa: F401
+        import altair as alt
         long = df_d.melt(
             id_vars=["年度"],
             value_vars=["現金股利", "股票股利"],
@@ -4900,7 +4893,7 @@ def _render_dividends_tab(snap) -> None:
     )
 
 
-def _stability(values: List[float]) -> str:
+def _stability(values: list[float]) -> str:
     arr = [v for v in values if v is not None]
     if len(arr) < 2:
         return "—"
@@ -4955,7 +4948,7 @@ def _render_quarterly_tab(snap) -> None:
             hide_index=True, use_container_width=True,
         )
         try:
-            import altair as alt  # noqa: F401
+            import altair as alt
             df_eps["key"] = df_eps["year"].astype(str) + " " + df_eps["label"]
             long = df_eps.melt(
                 id_vars=["key"], value_vars=["eps_sum", "prev_year_eps_sum"],
@@ -4994,7 +4987,7 @@ def _render_quarterly_tab(snap) -> None:
         ])
         st.dataframe(df_qr, hide_index=True, use_container_width=True)
         try:
-            import altair as alt  # noqa: F401
+            import altair as alt
             chart = alt.Chart(df_qr).mark_bar(color="#4c78a8").encode(
                 x=alt.X("年季:N", sort=None),
                 y=alt.Y("季營收:Q"),
@@ -5038,7 +5031,7 @@ KLINE_WINDOWS = [
 ]
 
 
-def _auto_candle_width(row_count: Optional[int]) -> int:
+def _auto_candle_width(row_count: int | None) -> int:
     """依目前顯示根數給一個容易閱讀的 K 棒寬度。"""
     if not row_count or row_count <= 0:
         return 4
@@ -5071,10 +5064,10 @@ def _candle_color_col(df: pd.DataFrame) -> pd.DataFrame:
 def _kline_panel(
     df: pd.DataFrame,
     *,
-    ma_periods: Tuple[int, ...] = (5, 20, 60),
+    ma_periods: tuple[int, ...] = (5, 20, 60),
     bollinger: bool = False,
-    y_min: Optional[float] = None,
-    y_max: Optional[float] = None,
+    y_min: float | None = None,
+    y_max: float | None = None,
     height: int = 320,
     candle_width: int = 4,
     title: str = "",
@@ -5277,7 +5270,7 @@ def _boll_panel(df: pd.DataFrame, *, height: int = 220, title: str = "布林通�
 def _build_df_with_indicators(
     df: pd.DataFrame,
     *,
-    ma_periods: Tuple[int, ...] = (5, 10, 20, 60, 120),
+    ma_periods: tuple[int, ...] = (5, 10, 20, 60, 120),
 ) -> pd.DataFrame:
     """確保 df 含技術指標欄位 (給 panel 用)。"""
     from bot.technicals import compute_indicators
@@ -5295,8 +5288,8 @@ def _slice_df_by_window(
     df: pd.DataFrame,
     window_label: str,
     *,
-    custom_start: Optional[dt.date] = None,
-    custom_end: Optional[dt.date] = None,
+    custom_start: dt.date | None = None,
+    custom_end: dt.date | None = None,
 ) -> pd.DataFrame:
     """依照「近 N 月/年 / 自訂日期」剪 df。"""
     if df is None or df.empty:
@@ -5379,17 +5372,13 @@ def _render_kline_workspace(
     *,
     key_prefix: str,
     default_window: str = "近 6 個月",
-    default_panels: Tuple[str, ...] = ("kline", "volume", "macd", "rsi"),
+    default_panels: tuple[str, ...] = ("kline", "volume", "macd", "rsi"),
     show_fetch_more: bool = True,
 ) -> None:
     """K 線完整工作台：時間範圍 / Y 軸 / 面板選擇 / 堆疊或分頁 + 往前批量抓。
 
     被「個股深入分析 - 技術面」與「K 線看板 - 單檔展開」共用。
     """
-    from bot.technicals import (
-        extend_kline_backward,
-        get_kline_coverage,
-    )
 
     if df is None or df.empty:
         st.info("無 K 線資料 — 請先抓取。")
@@ -5467,8 +5456,8 @@ def _render_kline_workspace(
 
     auto_low = float(df_slice["low"].min())
     auto_high = float(df_slice["high"].max())
-    y_min: Optional[float] = None
-    y_max: Optional[float] = None
+    y_min: float | None = None
+    y_max: float | None = None
     if y_mode == "手動":
         ya, yb = st.columns(2)
         y_min = ya.number_input(
@@ -5517,7 +5506,7 @@ def _render_kline_workspace(
                 )
 
     # ===== 繪圖 =====
-    panels: List[tuple[str, str, Any]] = []
+    panels: list[tuple[str, str, Any]] = []
     for key in panel_keys:
         chart = _make_panel_chart(
             key, df_slice,
@@ -5578,8 +5567,8 @@ def _make_panel_chart(
     key: str,
     df: pd.DataFrame,
     *,
-    y_min: Optional[float] = None,
-    y_max: Optional[float] = None,
+    y_min: float | None = None,
+    y_max: float | None = None,
     candle_width: int = 4,
     bollinger: bool = False,
     title: str = "",
@@ -5653,9 +5642,9 @@ def _run_extend_backward(
 # ======================================================================
 
 
-def _board_rows_summary(symbols: List[str], db: StockDB) -> pd.DataFrame:
+def _board_rows_summary(symbols: list[str], db: StockDB) -> pd.DataFrame:
     """組多檔股票的「最新報價 / 漲跌 / 5日 20日 % / 量比」快報。"""
-    rows: List[Dict[str, object]] = []
+    rows: list[dict[str, object]] = []
     for sym in symbols:
         bars = db.get_price_history(sym, limit=60, ascending=True)
         if not bars:
@@ -5679,7 +5668,7 @@ def _board_rows_summary(symbols: List[str], db: StockDB) -> pd.DataFrame:
         d5 = bars[-6] if len(bars) >= 6 else bars[0]
         d20 = bars[-21] if len(bars) >= 21 else bars[0]
 
-        def _pct(a: float, b: float) -> Optional[float]:
+        def _pct(a: float, b: float) -> float | None:
             if not b:
                 return None
             return round(100.0 * (a - b) / b, 2)
@@ -5815,7 +5804,7 @@ def _full_kline_chart(bars, *, ma_periods=(5, 20, 60), title: str = ""):
     return price, vol
 
 
-def _board_y_controls(key: str) -> Tuple[Optional[float], Optional[float]]:
+def _board_y_controls(key: str) -> tuple[float | None, float | None]:
     """Y 軸範圍 (Optional min, max)；放到 K 線 panel 用。"""
     enabled = st.toggle("手動 Y 軸範圍", value=False, key=f"{key}_y_enable")
     if not enabled:
@@ -5838,11 +5827,11 @@ def _bars_to_df(bars) -> pd.DataFrame:
 
 
 def _render_grid_view(
-    sorted_syms: List[str],
+    sorted_syms: list[str],
     df_view: pd.DataFrame,
     db,
     *,
-    n_days: Optional[int],
+    n_days: int | None,
     cols_per_row: int,
     candle_width: int,
 ) -> None:
@@ -5888,7 +5877,7 @@ def _render_grid_view(
 
 
 def _render_compare_view(
-    sorted_syms: List[str],
+    sorted_syms: list[str],
     df_view: pd.DataFrame,
     db,
     *,
@@ -5943,7 +5932,7 @@ def _render_compare_view(
 
 
 def _render_focus_view(
-    sorted_syms: List[str],
+    sorted_syms: list[str],
     db,
 ) -> None:
     """單檔專注：把完整 K 線工作台 (時間範圍/Y軸/面板/抓取) 顯示在這一檔上。"""
@@ -5968,7 +5957,7 @@ def _render_focus_view(
     )
 
 
-def _run_batch_refresh(symbols: List[str], months: int) -> None:
+def _run_batch_refresh(symbols: list[str], months: int) -> None:
     """『一鍵更新所有 K 線』後端：分檔 → 分月 fetch，含進度條。"""
     from bot.technicals import fetch_kline_range
 
@@ -6010,7 +5999,7 @@ def _run_batch_refresh(symbols: List[str], months: int) -> None:
     st.success(f"完成：成功 {ok} 檔 / 失敗 {fail} 檔，已寫入 price_history")
 
 
-def _run_batch_extend(symbols: List[str], years: int, delay: float) -> None:
+def _run_batch_extend(symbols: list[str], years: int, delay: float) -> None:
     """批量對所有股票呼叫 extend_kline_backward。"""
     from bot.technicals import extend_kline_backward
 
@@ -6320,7 +6309,7 @@ def _open_db_for_page() -> StockDB:
     return cached
 
 
-def _format_sync_result(r: "TableSyncResult") -> str:
+def _format_sync_result(r: TableSyncResult) -> str:
     if r.error:
         return f"❌ `{r.table}`: {r.error}"
     if r.skipped:
@@ -6713,9 +6702,10 @@ def page_intraday() -> None:
         ),
     ):
         env_values = load_env()
-        from bot.config import Settings as S
         # 確保 GEMINI_API_KEY 從 .env 載到 process env
         import os
+
+        from bot.config import Settings as S
         for k, v in env_values.items():
             if v and not os.environ.get(k):
                 os.environ[k] = v
@@ -6743,8 +6733,9 @@ def page_intraday() -> None:
         ),
     ):
         env_values = load_env()
-        from bot.config import Settings as S
         import os
+
+        from bot.config import Settings as S
         for k, v in env_values.items():
             if v and not os.environ.get(k):
                 os.environ[k] = v
@@ -6992,7 +6983,7 @@ def page_market_movers() -> None:
 
 
 def _render_intraday_live_tracking_table(
-    report: Dict[str, Any],
+    report: dict[str, Any],
     today: dt.date,
     *,
     report_date: str,
@@ -7000,7 +6991,7 @@ def _render_intraday_live_tracking_table(
     max_tickers: int,
     refresh_technicals: bool,
     refresh_chips: bool,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """渲染當沖即時追蹤表；回傳 rows 供下方 LLM 區塊使用。"""
     from bot.dashboard.cache_helpers import cached_intraday_tracking
 
@@ -7239,13 +7230,13 @@ def page_intraday_live() -> None:
             if value and not os.environ.get(key):
                 os.environ[key] = value
 
-        from bot.llm_analyzer import GeminiClient, gemini_call
+        from bot.llm_analyzer import create_llm_client, llm_call
         from bot.market_macro import fetch_macro_snapshot, macro_to_dict
         from bot.news_fetcher import fetch_today_news, news_to_compact_text
         from bot.prompt_registry import get_registry
 
         settings = S()
-        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
+        client = create_llm_client(settings)
         registry = get_registry(PROJECT_ROOT / "prompts")
         registry.reload()
         with st.spinner("刷新新資料並請 LLM 檢討早盤判斷..."):
@@ -7270,7 +7261,7 @@ def page_intraday_live() -> None:
                 force_refresh=True,
                 root=PROJECT_ROOT,
             )
-            raw, info = gemini_call(
+            raw, info = llm_call(
                 "intraday_live_review",
                 client=client,
                 registry=registry,
@@ -7376,8 +7367,9 @@ def page_next_day_watch() -> None:
         ),
     ):
         env_values = load_env()
-        from bot.config import Settings as S
         import os
+
+        from bot.config import Settings as S
         for k, v in env_values.items():
             if v and not os.environ.get(k):
                 os.environ[k] = v
@@ -7408,8 +7400,9 @@ def page_next_day_watch() -> None:
         ),
     ):
         env_values = load_env()
-        from bot.config import Settings as S
         import os
+
+        from bot.config import Settings as S
         for k, v in env_values.items():
             if v and not os.environ.get(k):
                 os.environ[k] = v
@@ -7967,14 +7960,11 @@ def page_macro() -> None:
             key="macro_brief",
             help=LLM_HINT_DIRECT,
         ):
-            from bot.llm_analyzer import GeminiClient, gemini_call
+            from bot.llm_analyzer import create_llm_client, llm_call
 
-            client = GeminiClient(
-                api_key=api_key,
-                model=env_values.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            )
-            with st.spinner("Gemini 正在撰寫美股/ADR 對台股影響簡報..."):
-                raw, info = gemini_call(
+            client = create_llm_client()
+            with st.spinner("LLM 正在撰寫美股/ADR 對台股影響簡報..."):
+                raw, info = llm_call(
                     "us_market_brief",
                     client=client,
                     metadata={"task": "us_market_brief", "source": "dashboard"},
@@ -8207,7 +8197,7 @@ def _month_end_for_ui(day: dt.date) -> dt.date:
     return next_month - dt.timedelta(days=1)
 
 
-def _render_market_calendar_table(events: List[Any]) -> None:
+def _render_market_calendar_table(events: list[Any]) -> None:
     from bot.market_calendar import event_to_row
 
     if not events:
@@ -8221,8 +8211,8 @@ def _render_market_calendar_table(events: List[Any]) -> None:
 
 
 def _render_market_calendar_grid(
-    weeks: List[List[dt.date]],
-    events: List[Any],
+    weeks: list[list[dt.date]],
+    events: list[Any],
     *,
     month: int,
     today: dt.date,
@@ -8325,16 +8315,14 @@ def _render_market_calendar_grid(
 def _market_calendar_event_label(event: Any) -> str:
     if event.category == "conference":
         label = " ".join(x for x in (event.time, event.ticker, event.company, "法說") if x)
-    elif event.category == "exhibition":
-        label = event.title
-    elif event.category == "global_tech":
+    elif event.category == "exhibition" or event.category == "global_tech":
         label = event.title
     else:
         label = " ".join(x for x in (event.ticker, event.company, event.category_label) if x)
     return label if len(label) <= 34 else label[:31] + "..."
 
 
-def _quick_scheduler_env(include_llm_reports: bool) -> Dict[str, str]:
+def _quick_scheduler_env(include_llm_reports: bool) -> dict[str, str]:
     env = {"SCHEDULER_ENABLED": "true"}
     if include_llm_reports:
         env.update({

@@ -4,6 +4,7 @@ V2 重構：
 * 所有 prompt 從 PromptRegistry 載入 (prompts/*.yaml)
 * 每筆 LLM 呼叫透過 LlmCallLogger 寫入 JSONL
 * 提供統一的 gemini_call() helper，給 etf_holdings_fetcher / data_pipeline 共用
+* V3: create_llm_client() 工廠 + ChainedLlmClient 容錯鏈
 """
 
 from __future__ import annotations
@@ -14,10 +15,10 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from bot.llm_log import LlmCallLogger, get_call_logger
-from bot.prompt_registry import PromptRegistry, PromptTemplate, get_registry
+from bot.prompt_registry import PromptRegistry, get_registry
 from bot.utils import get_logger
 
 try:
@@ -25,7 +26,7 @@ try:
     _HAS_GENAI = True
 except Exception:
     try:
-        import google.generativeai as genai  # type: ignore  # noqa: F401
+        import google.generativeai as genai  # type: ignore
         _HAS_GENAI = True
     except Exception:
         _HAS_GENAI = False
@@ -46,9 +47,9 @@ class PresentationAnalysis:
     sentiment: str = "neutral"
     sentiment_score: float = 0.0
     confidence: float = 0.5
-    key_metrics: Dict[str, Any] = field(default_factory=dict)
-    growth_drivers: List[str] = field(default_factory=list)
-    risks: List[str] = field(default_factory=list)
+    key_metrics: dict[str, Any] = field(default_factory=dict)
+    growth_drivers: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
     capex_signal: str = ""
     margin_outlook: str = ""
     raw_response: str = ""
@@ -92,12 +93,12 @@ class GeminiClient:
         self,
         api_key: str = "",
         model: str = DEFAULT_MODEL,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ):
         self.api_key = api_key
         self.model = model
         self.logger = logger or get_logger("llm")
-        self._client: Optional[Any] = None
+        self._client: Any | None = None
         self._mode: str = "none"
         self._enabled = bool(api_key) and _HAS_GENAI
         if self._enabled:
@@ -128,9 +129,9 @@ class GeminiClient:
         *,
         max_output_tokens: int = 2048,
         temperature: float = 0.2,
-    ) -> tuple[Optional[str], Dict[str, Any]]:
+    ) -> tuple[str | None, dict[str, Any]]:
         """回傳 (text, metadata)。metadata 包含 latency_ms / tokens 等。"""
-        meta: Dict[str, Any] = {"sdk": self._mode}
+        meta: dict[str, Any] = {"sdk": self._mode}
         if not self._enabled or self._client is None:
             return None, meta
 
@@ -140,7 +141,7 @@ class GeminiClient:
         is_25 = "2.5" in (self.model or "")
         try:
             if self._mode == "new":
-                cfg: Dict[str, Any] = {
+                cfg: dict[str, Any] = {
                     "temperature": temperature,
                     "top_p": 0.9,
                     "max_output_tokens": max_output_tokens,
@@ -153,7 +154,7 @@ class GeminiClient:
                     config=cfg,
                 )
             else:
-                gcfg: Dict[str, Any] = {
+                gcfg: dict[str, Any] = {
                     "temperature": temperature,
                     "top_p": 0.9,
                     "max_output_tokens": max_output_tokens,
@@ -186,11 +187,11 @@ def gemini_call(
     prompt_id: str,
     *,
     client: GeminiClient,
-    registry: Optional[PromptRegistry] = None,
-    call_logger: Optional[LlmCallLogger] = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    registry: PromptRegistry | None = None,
+    call_logger: LlmCallLogger | None = None,
+    metadata: dict[str, Any] | None = None,
     **vars: Any,
-) -> tuple[Optional[str], Dict[str, Any]]:
+) -> tuple[str | None, dict[str, Any]]:
     """渲染指定 prompt + 呼叫 Gemini + 自動記錄 JSONL。
 
     Returns:
@@ -203,7 +204,7 @@ def gemini_call(
         raise KeyError(f"Prompt 不存在: {prompt_id}")
 
     rendered = prompt.render(**vars)
-    info: Dict[str, Any] = {
+    info: dict[str, Any] = {
         "prompt_id": prompt.id,
         "prompt_version": prompt.version,
         "model": client.model,
@@ -251,7 +252,7 @@ def gemini_call(
 # ----------------------------------------------------------------------
 
 
-def extract_json(text: str) -> Optional[Any]:
+def extract_json(text: str) -> Any | None:
     if not text:
         return None
     cleaned = text.strip()
@@ -262,7 +263,7 @@ def extract_json(text: str) -> Optional[Any]:
     except Exception:
         # 試著找最外層的 {...} 或 [...]
         for pattern in (r"\{.*\}", r"\[.*\]"):
-            m = re.search(pattern, cleaned, re.S)
+            m = re.search(pattern, cleaned, re.DOTALL)
             if m:
                 try:
                     return json.loads(m.group(0))
@@ -279,10 +280,10 @@ def extract_json(text: str) -> Optional[Any]:
 def analyze_presentation(
     text: str,
     ticker: str = "",
-    client: Optional[GeminiClient] = None,
-    registry: Optional[PromptRegistry] = None,
-    call_logger: Optional[LlmCallLogger] = None,
-    logger: Optional[logging.Logger] = None,
+    client: GeminiClient | None = None,
+    registry: PromptRegistry | None = None,
+    call_logger: LlmCallLogger | None = None,
+    logger: logging.Logger | None = None,
 ) -> PresentationAnalysis:
     log = logger or get_logger("llm")
     if client is None or not client.enabled:
@@ -339,10 +340,10 @@ def analyze_presentation(
 def logic_check(
     analysis: PresentationAnalysis,
     chips: ChipsContext,
-    client: Optional[GeminiClient] = None,
-    registry: Optional[PromptRegistry] = None,
-    call_logger: Optional[LlmCallLogger] = None,
-    logger: Optional[logging.Logger] = None,
+    client: GeminiClient | None = None,
+    registry: PromptRegistry | None = None,
+    call_logger: LlmCallLogger | None = None,
+    logger: logging.Logger | None = None,
 ) -> LogicCheckResult:
     log = logger or get_logger("llm")
     if client is not None and client.enabled and analysis.enabled:
@@ -443,11 +444,11 @@ def _rule_based_logic_check(
 # ----------------------------------------------------------------------
 
 
-def analysis_to_dict(a: PresentationAnalysis) -> Dict[str, Any]:
+def analysis_to_dict(a: PresentationAnalysis) -> dict[str, Any]:
     return dataclasses.asdict(a)
 
 
-def logic_to_dict(r: LogicCheckResult) -> Dict[str, Any]:
+def logic_to_dict(r: LogicCheckResult) -> dict[str, Any]:
     return dataclasses.asdict(r)
 
 
@@ -456,10 +457,166 @@ __all__ = [
     "GeminiClient",
     "LogicCheckResult",
     "PresentationAnalysis",
-    "analyze_presentation",
     "analysis_to_dict",
+    "analyze_presentation",
+    "create_llm_client",
     "extract_json",
     "gemini_call",
+    "llm_call",
+    "llm_ready",
     "logic_check",
     "logic_to_dict",
 ]
+
+
+# ----------------------------------------------------------------------
+# LLM 工廠 + 統一呼叫
+# ----------------------------------------------------------------------
+
+
+def create_llm_client(settings: Any = None) -> Any:
+    """依 settings.llm_provider 建立對應的 LLM 客戶端。
+
+    Returns:
+        LlmClient 實例（GeminiGatewayClient / CursorGatewayClient /
+        GeminiClient / ChainedLlmClient）。
+    """
+    from bot.chained_llm import ChainedLlmClient
+    from bot.cursor_llm import CursorGatewayClient
+    from bot.gemini_gateway import GeminiGatewayClient
+
+    if settings is None:
+        from bot.config import Settings
+        settings = Settings()
+
+    provider = getattr(settings, "llm_provider", "chain")
+
+    if provider == "gemini_gateway":
+        return GeminiGatewayClient(
+            base_url=settings.gemini_gateway_base_url,
+            timeout=settings.gemini_gateway_timeout,
+            model_label=settings.gemini_gateway_model_label,
+        )
+    elif provider == "cursor":
+        return CursorGatewayClient(
+            base_url=settings.cursor_llm_base_url,
+            timeout=settings.cursor_llm_timeout,
+            model_label=settings.cursor_llm_model_label,
+        )
+    elif provider == "gemini":
+        return GeminiClient(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+        )
+    else:
+        # chain: Gemini 閘道 → Cursor 閘道 → Gemini SDK
+        backends = [
+            GeminiGatewayClient(
+                base_url=settings.gemini_gateway_base_url,
+                timeout=settings.gemini_gateway_timeout,
+                model_label=settings.gemini_gateway_model_label,
+                check_health=True,
+            ),
+            CursorGatewayClient(
+                base_url=settings.cursor_llm_base_url,
+                timeout=settings.cursor_llm_timeout,
+                model_label=settings.cursor_llm_model_label,
+                check_health=True,
+            ),
+        ]
+        if settings.gemini_api_key:
+            backends.append(GeminiClient(
+                api_key=settings.gemini_api_key,
+                model=settings.gemini_model,
+            ))
+        return ChainedLlmClient(backends=backends)
+
+
+def llm_ready(settings: Any = None) -> bool:
+    """快速判斷是否有任何 LLM 後端可用（不實際呼叫）。"""
+    if settings is None:
+        from bot.config import Settings
+        settings = Settings()
+
+    provider = getattr(settings, "llm_provider", "chain")
+
+    if provider == "gemini":
+        return bool(settings.gemini_api_key) and _HAS_GENAI
+    elif provider == "cursor":
+        return bool(settings.cursor_llm_base_url)
+    elif provider == "gemini_gateway":
+        return bool(settings.gemini_gateway_base_url)
+    else:
+        # chain: 任一有設定即算 ready
+        return (
+            bool(settings.gemini_gateway_base_url)
+            or bool(settings.cursor_llm_base_url)
+            or (bool(settings.gemini_api_key) and _HAS_GENAI)
+        )
+
+
+def llm_call(
+    prompt_id: str,
+    *,
+    client: Any = None,
+    settings: Any = None,
+    registry: PromptRegistry | None = None,
+    call_logger: LlmCallLogger | None = None,
+    metadata: dict[str, Any] | None = None,
+    **vars: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    """統一 LLM 呼叫入口：渲染 prompt → 呼叫 → 寫 log → 回傳結果。
+
+    與 gemini_call() 相容但支援任何 LlmClient 後端。
+    """
+    if client is None:
+        client = create_llm_client(settings)
+
+    reg = registry or get_registry()
+    log = call_logger or get_call_logger()
+    prompt = reg.get(prompt_id)
+    if prompt is None:
+        raise KeyError(f"Prompt 不存在: {prompt_id}")
+
+    rendered = prompt.render(**vars)
+    info: dict[str, Any] = {
+        "prompt_id": prompt.id,
+        "prompt_version": prompt.version,
+        "model": client.model,
+    }
+
+    if not client.enabled:
+        log.record(
+            prompt_id=prompt.id,
+            prompt_version=prompt.version,
+            model=client.model,
+            input_text=rendered,
+            output_text="",
+            success=False,
+            error="LLM disabled (no backend available)",
+            metadata=metadata or {},
+        )
+        info["disabled"] = True
+        return None, info
+
+    text, meta = client.generate_raw(
+        rendered,
+        max_output_tokens=prompt.max_output_tokens,
+        temperature=prompt.temperature,
+    )
+    info.update(meta)
+    success = text is not None and not meta.get("error")
+    log.record(
+        prompt_id=prompt.id,
+        prompt_version=prompt.version,
+        model=client.model,
+        input_text=rendered,
+        output_text=text or "",
+        latency_ms=meta.get("latency_ms", 0),
+        tokens_in=meta.get("tokens_in"),
+        tokens_out=meta.get("tokens_out"),
+        success=success,
+        error=str(meta.get("error", "")),
+        metadata=metadata or {},
+    )
+    return text, info
