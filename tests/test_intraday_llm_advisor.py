@@ -34,12 +34,11 @@ def test_run_cycle_refreshes_symbols_only_without_intraday_report() -> None:
     risk = MagicMock()
     risk.open_positions_count = 0
     advisor = IntradayLlmAdvisor(settings, risk=risk)
-    with patch("bot.auto_llm.auto_analyze_ticker") as refresh:
-        with patch(
-            "bot.intraday_pipeline.load_intraday_by_date",
-            return_value=None,
-        ):
-            advisor._run_cycle("test")
+    with patch("bot.auto_llm.auto_analyze_ticker") as refresh, patch(
+        "bot.intraday_pipeline.load_intraday_by_date",
+        return_value=None,
+    ):
+        advisor._run_cycle("test")
     assert refresh.call_count == 2
 
 

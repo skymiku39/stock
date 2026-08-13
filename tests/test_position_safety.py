@@ -11,7 +11,6 @@ from bot.config import Settings
 from bot.portfolio import (
     BrokerPosition,
     BrokerPositionsSnapshot,
-    PortfolioPosition,
 )
 from bot.position_safety import (
     audit_manual_overlap,

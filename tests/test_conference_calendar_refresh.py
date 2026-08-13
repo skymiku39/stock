@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from bot.conference_calendar import (
     calendar_needs_url_refresh,

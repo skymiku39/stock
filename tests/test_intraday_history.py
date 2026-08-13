@@ -113,6 +113,7 @@ class TestIntradayDb:
 class TestFetchAndStore:
     def test_fetch_and_store_with_mock_broker(self, tmp_path: Path) -> None:
         import datetime as dt
+
         from shioaji.data import Kbars
 
         broker = MagicMock()

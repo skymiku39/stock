@@ -9,14 +9,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bot.config import Settings
+from bot.entry_rules import in_entry_range, resolve_entry_range
 from bot.llm_gate import LlmGate
 from bot.models import MarketTick, PositionInfo
 from bot.ownership import BOT_BUY_FIELD, bot_sell_field
-from bot.entry_rules import in_entry_range, resolve_entry_range
 from bot.risk_guard import RiskGuard
 from bot.strategy import SymbolExitRecord
-from bot.trade_cost import buy_cash_required, position_net_pnl_pct
 from bot.strategy_configurable import ConfigurableStrategy
+from bot.trade_cost import buy_cash_required, position_net_pnl_pct
 
 
 def _make_settings(**overrides) -> Settings:

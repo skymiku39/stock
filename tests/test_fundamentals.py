@@ -6,9 +6,8 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import patch
 
 import pandas as pd
@@ -25,7 +24,6 @@ from bot.fundamentals_fetcher import (
     FundamentalSnapshot,
     MonthlyRevenue,
     QuarterlyFinancials,
-    ValuationDaily,
     _enrich_dividends_with_payout,
     _parse_one_revenue,
     _parse_valuation,
@@ -49,7 +47,6 @@ from bot.technicals import (
     fetch_kline_range,
     get_kline_coverage,
 )
-
 
 # ----------------------------------------------------------------------
 # fundamentals
@@ -358,7 +355,7 @@ class TestTechnicalIndicators:
 # ----------------------------------------------------------------------
 
 
-def _fake_month_rows(ticker: str, year: int, month: int) -> List[Dict[str, Any]]:
+def _fake_month_rows(ticker: str, year: int, month: int) -> list[dict[str, Any]]:
     """虛擬 K 線：每月 5 根 K 棒。"""
     out = []
     for d in (3, 7, 14, 21, 28):

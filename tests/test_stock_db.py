@@ -14,9 +14,8 @@ import pytest
 from bot.stock_db import (
     ALL_TABLES,
     SYNCABLE_TABLES,
-    EtfMeta,
-    MonthlyRevenue,
     LlmDailyReportRow,
+    MonthlyRevenue,
     PriceBar,
     QuarterlyReport,
     StockDB,

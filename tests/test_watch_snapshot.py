@@ -4,8 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from bot.price_band_heat import PriceBandHeatResult, PriceBandHeatRow
 from bot.hot_stock_futures import HotStockFuturesResult
+from bot.price_band_heat import PriceBandHeatResult, PriceBandHeatRow
 from bot.watch_snapshot import save_watch_snapshot
 
 

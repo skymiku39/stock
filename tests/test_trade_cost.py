@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from bot.config import Settings
 from bot.trade_cost import (
     TradeCostParams,

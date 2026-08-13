@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from bot.events import (
-    InMemoryEventBus,
     SchedulerJobCompleted,
     SchedulerStarted,
     create_event_bus,

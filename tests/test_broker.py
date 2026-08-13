@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from shioaji.constant import (
+    Action,
+    OrderType,
+    QuoteType,
+    StockOrderCond,
+    StockPriceType,
+)
+
 import bot.broker as broker_module
 from bot.broker import SjBroker
 from bot.config import Settings
-from shioaji.constant import Action, OrderType, QuoteType, StockOrderCond, StockPriceType
 
 
 def _settings(**overrides) -> Settings:

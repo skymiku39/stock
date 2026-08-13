@@ -1,12 +1,13 @@
 """Tests for SVG candlestick renderer."""
 from __future__ import annotations
 
+import pandas as pd
+
 from bot.dashboard.common import (
     _build_candlestick_image,
     _build_candlestick_svg,
     _ohlc_bars_from_df,
 )
-import pandas as pd
 
 
 def test_build_candlestick_svg_contains_candles():

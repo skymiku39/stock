@@ -5,11 +5,11 @@ from pathlib import Path
 
 from bot.global_events_fetcher import (
     MEGA_TECH_ORGANIZERS,
-    canonical_from_title,
-    merge_global_event_rows,
-    mega_tech_organizers_in_supply_chain,
-    tickers_for_organizer,
     _default_global_tech_seeds,
+    canonical_from_title,
+    mega_tech_organizers_in_supply_chain,
+    merge_global_event_rows,
+    tickers_for_organizer,
 )
 
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from bot.archive_status import day_trading_trade_blocked, trade_block_message
 from bot.config import Settings
 

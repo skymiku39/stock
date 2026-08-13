@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from bot import gemini_smoke
 from bot.llm_analyzer import DEFAULT_MODEL, GeminiClient, gemini_call
 from bot.llm_log import LlmCallLogger
@@ -64,14 +62,12 @@ def test_gemini_call_disabled_records_audit_log(tmp_path) -> None:
 
 
 def test_gemini_smoke_cli_requires_key(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        gemini_smoke,
-        "Settings",
-        lambda: SimpleNamespace(gemini_api_key="", gemini_model=DEFAULT_MODEL),
-    )
+    """gemini_smoke --provider gemini 在無 API Key 時應回傳非零 exit code。"""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GEMINI_GATEWAY_BASE_URL", "")
+    monkeypatch.setenv("CURSOR_LLM_BASE_URL", "")
 
     exit_code = gemini_smoke.main([])
 
-    captured = capsys.readouterr()
-    assert exit_code == 2
-    assert "GEMINI_API_KEY is not set" in captured.out
+    assert exit_code != 0

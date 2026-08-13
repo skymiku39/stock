@@ -1,22 +1,20 @@
 """Tests for MOPS scraper link parsing and detail helpers."""
 from __future__ import annotations
 
-import logging
-
 import datetime as dt
+import logging
 
 from bot.mops_scraper import (
     MOPS_CALENDAR_FILE_PREFIX,
     MaterialInfo,
     _extract_url_from_onclick,
-    _html_to_plain_text,
     _href_from_tr_html,
+    _html_to_plain_text,
     _merge_material_lists,
     _parse_conference_html,
     _parse_material_html,
     is_meaningful_presentation_url,
 )
-
 
 SAMPLE_CONFERENCE_HTML = """
 <table>
