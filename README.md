@@ -28,7 +28,7 @@
 - **MOPS 法說會爬蟲** -- 抓法人說明會行事曆與個股重大訊息
 - **🤖 全自動法說研究** -- 自動抓行事曆 + 上網搜尋 (DuckDuckGo + Google News) + 鉅亨新聞 + LLM 結構化分析，不需貼逐字稿
 - **法說會行事曆自動快取** -- 上月 / 本月 / 下月 / +2 月四個月份自動每日更新，dashboard 進入即用
-- **Gemini LLM 分析** -- 免費 API 解析法說會語意、提取情緒/Capex/毛利率指引/催化劑展望
+- **Gemini LLM 分析** -- 雙閘道容錯鏈：Gemini 瀏覽器閘道 → Cursor 閘道 → Gemini SDK，免費使用 AI
 - **言行反查** -- 對比管理階層語意 vs 籌碼面，偵測疑似出貨/吸籌
 - **Prompt 版本化管理** -- 所有 LLM prompt 集中於 `prompts/*.yaml`，UI 可直接編輯
 - **LLM 呼叫全紀錄** -- 每次呼叫的 input/output/延遲/tokens 自動寫入 JSONL
@@ -419,21 +419,53 @@ ETF_MAX_PCT_CHG_ON_ENTRY=4.0
 
 接著到「主動 ETF 追蹤」頁匯入至少兩日的 ETF 持股 CSV，重啟 bot 即可。
 
-### 啟用 Gemini LLM 法說分析
+### 啟用 LLM 分析（雙閘道容錯鏈）
 
-到 [Google AI Studio](https://aistudio.google.com) 取得免費 API Key，
-填入 `.env` 的 `GEMINI_API_KEY` (預設模型 `gemini-2.5-flash`)。
-無 API key 時系統會自動退回「純規則式」邏輯反查，依然可用。
+專案預設使用 **chain** 模式（`LLM_PROVIDER=chain`），依序嘗試：
+
+1. **Gemini 瀏覽器閘道** (port 8816) — 蹭 Google 付費會員，不消耗 API 額度
+2. **Cursor 閘道** (port 8815) — 蹭 Cursor 訂閱，不消耗 API 額度
+3. **Gemini SDK API** — 備援，需 `GEMINI_API_KEY`
+
+#### 快速開始
+
+```powershell
+# 方法一：一鍵啟動所有服務
+.\scripts\start_full_auto.ps1
+
+# 方法二：手動分別啟動
+# Terminal 1: Gemini 閘道
+cd D:\skymiku\蹭google的geminiAI && uv run gemini-gateway
+
+# Terminal 2: Cursor 閘道
+cd D:\skymiku\蹭cursor的AI && uv run cursor-gateway
+
+# Terminal 3: 測試連線
+uv run stock-llm-test --provider all
+
+# Terminal 4: 啟動排程器 + 儀表板
+uv run stock-scheduler &
+uv run stock-dashboard
+```
+
+#### 設定 Windows 自動開機啟動
+
+```powershell
+.\scripts\setup_win_scheduler.ps1     # 安裝排程任務
+.\scripts\setup_win_scheduler.ps1 -Remove  # 移除
+```
+
+#### 備援：使用 Gemini API Key
+
+若閘道都不可用，可設定 SDK 備援：
 
 ```bash
 GEMINI_API_KEY=your_google_ai_studio_key
 GEMINI_MODEL=gemini-2.5-flash
-
-uv run stock-gemini-test
+uv run stock-llm-test --provider gemini
 ```
 
-`stock-gemini-test` 會讀取 `.env`、建立 Gemini client、送出一段短 prompt，
-並回報模型、延遲與 token metadata；成功後再執行下方自動化研究管線。
+無任何 LLM 後端可用時，系統會自動退回「純規則式」邏輯反查，依然可用。
 
 ### 🤖 全自動 LLM 個股研究 (新)
 
