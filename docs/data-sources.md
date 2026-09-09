@@ -23,6 +23,7 @@
 | 三大法人籌碼 | TWSE OpenAPI (法人/借券/融資) | 籌碼面 | 否 | 本地 cache |
 | 集保股權分散 | TDCC OpenData | 大戶 vs 散戶 | 否 | 本地 cache |
 | **法說會行事曆** | `mopsov.twse.com.tw/mops/web/ajax_t100sb02_1` | 法說會日曆 | 否 | 舊主機 `mops.twse.com.tw` 會被安全性阻擋；可用 `MOPS_HOST` 覆寫主機 |
+| **法說簡報原文** | MOPS 行事曆 `presentation_url` → `data/mops_downloads/` | `research_ticker` 的 `presentation_block` | 否 | 先讀本地 TXT/HTML/PDF；不足時自動下載近 2 場並抽字；失敗則該段為「(無)」 |
 | **重大訊息** | `openapi.twse.com.tw/v1/opendata/t187ap04_L` (每日全市場) | 個股重大訊息 | 否 | fallback 走 `mopsov` 個股歷史 `ajax_t05st02`；遇安全性阻擋會明確標記失敗 |
 | 新聞 | 鉅亨網 cnyes | 題材/情緒 | 否 | 空清單 |
 | 網路搜尋 | DuckDuckGo HTML | 法說/題材研究 | 否 | 空清單 (DDG 偶回 202 限流) |

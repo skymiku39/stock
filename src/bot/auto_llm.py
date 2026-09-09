@@ -12,9 +12,10 @@
    * 鉅亨網今日台股新聞中與此 ticker 相關的條目
    * **法說會行事曆**：自動拉本月 ±N 月，列「過去 90 天 + 未來 30 天」
    * **網頁搜尋** (DuckDuckGo HTML + Google News RSS) — 多 query 聚合
-   * 若有先前 pipeline 跑過的法說 PDF 文字，也一併納入
-2. **LLM 結構化分析** — 使用新版 ``research_ticker`` prompt
-3. **回退機制** — 若無 research_ticker prompt，會退回 ``analyze_presentation``
+   * **法說簡報原文**：讀 ``data/mops_downloads`` / ``mops_cache`` 的 TXT/HTML/PDF；
+     不足時可自動下載行事曆上的近期簡報（上限 N 份）並抽字
+2. **LLM 結構化分析** — 使用 ``research_ticker`` prompt（含 ``presentation_block``）
+3. **回退機制** — 若無 research_ticker 結果且 ``AUTO_LLM_ALLOW_LEGACY=1``，退回 ``analyze_presentation``
 4. **可選 logic_check** — 若呼叫者帶入 ChipsContext，會接著跑言行反查
 5. 結果寫到 ``data/auto_llm/<ticker>.json``，並會被 ``ticker_view.build_snapshot``
    讀回掛在 ``snap.llm_analysis``
@@ -60,6 +61,9 @@ from bot.utils import get_logger, mk_folder, now_tw
 AUTO_LLM_DIR_REL = "data/auto_llm"
 DEFAULT_AGE_HOURS = 12          # 同一個 ticker 12 小時內不重跑
 MIN_INPUT_CHARS = 80            # 素材少於此字數視為「沒料」，不浪費 API
+PRESENTATION_MAX_CHARS = 12000  # 餵給 research_ticker 的簡報原文上限
+MAX_AUTO_PRESENTATION_DOWNLOADS = 2  # 自動下載近期簡報份數上限
+MIN_PRESENTATION_CHARS = 200    # 少於此字數視為抽字失敗／無實質內容
 
 
 # ----------------------------------------------------------------------
@@ -115,33 +119,145 @@ def _gather_pipeline_text(
     ticker: str,
     *,
     root: Path,
-    max_chars: int = 12000,
+    max_chars: int = PRESENTATION_MAX_CHARS,
 ) -> str:
-    """如果之前 pipeline 跑過法說會 PDF/TXT，把純文字撈回來。"""
+    """讀本地法說會 PDF/TXT/HTML，抽出純文字供 LLM 使用。"""
+    from bot.mops_scraper import extract_pdf_text
+
     raw_dirs = [
         root / "data" / "mops_downloads",
         root / "data" / "mops_cache",
     ]
-    chunks: List[str] = []
+    files: List[Path] = []
     for d in raw_dirs:
         if not d.exists():
             continue
         for f in d.rglob(f"*{ticker}*"):
-            if not f.is_file():
-                continue
-            try:
-                if f.suffix.lower() in (".txt", ".html"):
-                    text = f.read_text(encoding="utf-8", errors="ignore")
-                else:
-                    continue
-            except Exception:
-                continue
-            if text:
-                chunks.append(text.strip())
+            if f.is_file() and f.suffix.lower() in (".txt", ".html", ".pdf"):
+                files.append(f)
+    # 較新檔案優先
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+
+    chunks: List[str] = []
+    for f in files:
+        text = ""
+        try:
+            if f.suffix.lower() in (".txt", ".html"):
+                text = f.read_text(encoding="utf-8", errors="ignore")
+            elif f.suffix.lower() == ".pdf":
+                pt = extract_pdf_text(f)
+                text = (pt.text if pt else "") or ""
+        except Exception:
+            continue
+        text = (text or "").strip()
+        if len(text) >= MIN_PRESENTATION_CHARS:
+            chunks.append(f"[{f.name}]\n{text}")
+        if sum(len(c) for c in chunks) >= max_chars:
+            break
     if not chunks:
         return ""
     joined = "\n\n--- 來源切換 ---\n\n".join(chunks)
     return joined[:max_chars]
+
+
+def _download_recent_presentations(
+    ticker: str,
+    conference_entries: List[Any],
+    *,
+    root: Path,
+    logger: logging.Logger,
+    max_downloads: int = MAX_AUTO_PRESENTATION_DOWNLOADS,
+    max_chars: int = PRESENTATION_MAX_CHARS,
+) -> str:
+    """對行事曆上具有效簡報連結的近期法說，自動下載並抽字。
+
+    只處理過去場次（newest first），上限 ``max_downloads``，避免拖垮 MOPS。
+    """
+    from bot.mops_scraper import (
+        download_presentation,
+        is_meaningful_presentation_url,
+    )
+
+    today = now_tw().date()
+    candidates: List[Any] = []
+    for e in conference_entries:
+        url = getattr(e, "presentation_url", "") or ""
+        if not is_meaningful_presentation_url(url):
+            continue
+        edate = getattr(e, "date", None)
+        if edate is None:
+            continue
+        try:
+            if hasattr(edate, "isoformat"):
+                d = edate
+            else:
+                d = dt.date.fromisoformat(str(edate)[:10])
+        except Exception:
+            continue
+        if d > today:
+            continue
+        candidates.append(e)
+    candidates.sort(
+        key=lambda e: e.date if hasattr(e.date, "isoformat") else str(e.date),
+        reverse=True,
+    )
+
+    dest_dir = root / "data" / "mops_downloads"
+    mk_folder(str(dest_dir))
+    chunks: List[str] = []
+    downloaded = 0
+    for e in candidates:
+        if downloaded >= max_downloads:
+            break
+        url = e.presentation_url
+        try:
+            date_str = e.date.isoformat() if hasattr(e.date, "isoformat") else str(e.date)[:10]
+        except Exception:
+            date_str = "unknown"
+        dest = dest_dir / f"{ticker}_{date_str}_auto.pdf"
+        try:
+            pt = download_presentation(url, dest, logger=logger)
+        except Exception:
+            logger.exception("[%s] 自動下載法說簡報失敗: %s", ticker, url)
+            continue
+        if pt is None or not (pt.text or "").strip():
+            continue
+        text = pt.text.strip()
+        if len(text) < MIN_PRESENTATION_CHARS:
+            continue
+        chunks.append(f"[{date_str} 簡報]\n{text}")
+        downloaded += 1
+        if sum(len(c) for c in chunks) >= max_chars:
+            break
+    if not chunks:
+        return ""
+    return "\n\n--- 來源切換 ---\n\n".join(chunks)[:max_chars]
+
+
+def _resolve_presentation_block(
+    ticker: str,
+    *,
+    root: Path,
+    calendar_data: Dict[str, List[Any]],
+    logger: logging.Logger,
+    enable_download: bool = True,
+    max_chars: int = PRESENTATION_MAX_CHARS,
+) -> str:
+    """合併本地法說原文；不足時可選自動下載近期簡報。"""
+    local = _gather_pipeline_text(ticker, root=root, max_chars=max_chars)
+    if len(local) >= MIN_PRESENTATION_CHARS:
+        return local
+    if not enable_download:
+        return local
+    past = list(calendar_data.get("past") or [])
+    downloaded = _download_recent_presentations(
+        ticker, past, root=root, logger=logger, max_chars=max_chars,
+    )
+    if not downloaded:
+        return local
+    if local:
+        return (local + "\n\n--- 來源切換 ---\n\n" + downloaded)[:max_chars]
+    return downloaded
 
 
 def _gather_calendar(
@@ -233,6 +349,9 @@ def _format_calendar_text(items: List[Any]) -> str:
         line = f"- {date_str} {e.time or ''} {e.ticker} {e.company}".rstrip()
         if getattr(e, "note", ""):
             line += f" — {e.note}"
+        url = getattr(e, "presentation_url", "") or ""
+        if url:
+            line += f" | 簡報: {url}"
         parts.append(line)
     return "\n".join(parts)
 
@@ -499,6 +618,7 @@ def _try_research_ticker(
     logger: logging.Logger,
     global_upcoming_text: str = "(無)",
     global_recent_text: str = "(無)",
+    presentation_block: str = "",
 ) -> Optional[Dict[str, Any]]:
     """嘗試呼叫 ``research_ticker`` prompt；若 registry 沒有此 prompt 回 None。"""
     try:
@@ -527,6 +647,7 @@ def _try_research_ticker(
         upcoming_parts.append("【全球科技事件 (近期/進行中)】\n" + global_recent_text)
     upcoming_block = "\n\n".join(upcoming_parts).strip() or "(無)"
     news_block = _format_news(news) if news else "(無)"
+    presentation = (presentation_block or "").strip() or "(無)"
 
     raw, info = gemini_call(
         "research_ticker",
@@ -537,6 +658,7 @@ def _try_research_ticker(
         today=now_tw().date().isoformat(),
         upcoming_events=upcoming_block,
         past_events=past_block,
+        presentation_block=presentation,
         news_block=news_block,
         web_block=web_block or "(無)",
     )
@@ -568,6 +690,7 @@ def auto_analyze_ticker(
     max_age_hours: int = DEFAULT_AGE_HOURS,
     enable_web_search: bool = True,
     enable_calendar: bool = True,
+    enable_presentation_download: bool = True,
     chips: Optional[ChipsContext] = None,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -602,13 +725,19 @@ def auto_analyze_ticker(
 
     materials = _gather_material_info(ticker, logger=log)
     news = _gather_news(ticker, name_hint=name_hint, root=root, logger=log)
-    pipeline_text = _gather_pipeline_text(ticker, root=root)
     calendar_data: Dict[str, List[Any]] = (
         _gather_calendar(ticker, root=root, logger=log)
         if enable_calendar else {
             "upcoming": [], "past": [],
             "global_upcoming_text": "(無)", "global_recent_text": "(無)",
         }
+    )
+    pipeline_text = _resolve_presentation_block(
+        ticker,
+        root=root,
+        calendar_data=calendar_data,
+        logger=log,
+        enable_download=enable_presentation_download,
     )
     web_material = (
         _gather_web(ticker, name_hint, root=root, logger=log)
@@ -625,6 +754,7 @@ def auto_analyze_ticker(
         client=client, logger=log,
         global_upcoming_text=str(calendar_data.get("global_upcoming_text") or "(無)"),
         global_recent_text=str(calendar_data.get("global_recent_text") or "(無)"),
+        presentation_block=pipeline_text,
     )
 
     analysis: Optional[PresentationAnalysis] = None
