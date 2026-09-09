@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from bot.events.protocols import EventPublisher
@@ -59,3 +60,33 @@ def publish_pipeline_completed(
             extra=extra or {},
         ),
     )
+
+
+@dataclass
+class PipelineProgress:
+    """依序發布 ``PipelineStepCompleted``，方便各管線里程碑對齊。"""
+
+    publisher: Optional[EventPublisher]
+    pipeline: str
+    total_steps: int
+    _index: int = field(default=0, init=False)
+
+    def complete(
+        self,
+        step: str,
+        *,
+        success: bool = True,
+        message: str = "",
+        started_at: Optional[float] = None,
+    ) -> None:
+        publish_pipeline_step(
+            self.publisher,
+            pipeline=self.pipeline,
+            step=step,
+            step_index=self._index,
+            total_steps=self.total_steps,
+            success=success,
+            message=message,
+            started_at=started_at,
+        )
+        self._index += 1

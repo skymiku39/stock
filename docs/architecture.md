@@ -118,10 +118,10 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 |------|------------|
 | `types.py` | 不可變領域事件（資料、交易、管線） |
 | `protocols.py` | `EventPublisher` / `EventSubscriber` 介面 (ISP, DIP) |
-| `bus.py` | `InMemoryEventBus` — 僅負責路由 |
+| `bus.py` | `InMemoryEventBus` — 僅負責路由；單一 handler 例外不中斷其餘訂閱者 |
 | `handlers.py` | 橫切 handler（`LoggingEventHandler`, `JsonlEventRecorder`） |
 | `trading_handlers.py` | 交易側效應（通知 / 紀錄 / 風控） |
-| `pipeline_helpers.py` | 管線步驟/完成事件發布輔助 |
+| `pipeline_helpers.py` | 管線步驟/完成事件發布輔助（`PipelineProgress` 依序發 `PipelineStepCompleted`） |
 | `wiring.py` | `wire_trading_handlers`, `wire_application_handlers` |
 
 #### 依賴反轉介面 (`src/bot/protocols/`)

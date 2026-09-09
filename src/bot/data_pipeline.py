@@ -49,7 +49,7 @@ from bot.llm_analyzer import (
     logic_check,
 )
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
-from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -166,6 +166,7 @@ def run_full_pipeline(
 
     t0 = time.time()
     today = started.date()
+    progress = PipelineProgress(publisher, "data_research", total_steps=6)
 
     # ---- 0. 法說會行事曆自動更新 (含上月 / 本月 / 下月 / +2 月) ----
     upcoming_calendar_tickers: List[str] = []
@@ -231,6 +232,11 @@ def run_full_pipeline(
             run.errors.append(f"calendar: {e}")
     else:
         log.info("[0/6] (略) 行事曆自動更新已關閉")
+    progress.complete(
+        "calendar",
+        success=not any(e.startswith("calendar:") for e in run.errors),
+        message="" if config.update_calendar else "skipped",
+    )
 
     # ---- 1. ETF 持股自動抓取 ----
     if config.fetch_etf_holdings:
@@ -262,6 +268,11 @@ def run_full_pipeline(
             run.errors.append(f"etf_fetch: {e}")
     else:
         log.info("[1/6] (略) ETF 抓取已關閉")
+    progress.complete(
+        "etf_holdings",
+        success=not any(e.startswith("etf_fetch:") for e in run.errors),
+        message="" if config.fetch_etf_holdings else "skipped",
+    )
 
     # ---- 2. 共識計算 ----
     log.info("[2/6] 計算 ETF 共識與變動 …")
@@ -321,6 +332,11 @@ def run_full_pipeline(
         len(focus_list), config.auto_focus_upcoming_days,
         len(upcoming_calendar_tickers), focus_list[:10],
     )
+    progress.complete(
+        "consensus_focus",
+        success=True,
+        message=f"{len(focus_list)} tickers",
+    )
 
     # ---- 4. 籌碼面 ----
     chip_map: Dict[str, ChipSummary] = {}
@@ -341,6 +357,11 @@ def run_full_pipeline(
                 run.errors.append(f"chips_{t}: {e}")
     else:
         log.info("[4/6] (略) 籌碼面抓取已關閉")
+    progress.complete(
+        "chips",
+        success=not any(e.startswith("chips_") for e in run.errors),
+        message="" if (config.fetch_chips and focus_list) else "skipped",
+    )
 
     # ---- 5. 法說會 LLM 分析 + 言行反查 ----
     analyses: List[PresentationAnalysis] = []
@@ -482,6 +503,14 @@ def run_full_pipeline(
             log.exception("us_market_brief 失敗")
             run.errors.append(f"us_brief: {e}")
 
+    progress.complete(
+        "research",
+        success=not any(
+            e.startswith(("llm_", "auto_research:", "macro:", "us_brief:"))
+            for e in run.errors
+        ),
+    )
+
     # ---- 6. 每日簡報 ----
     if config.generate_brief and client.enabled:
         log.info("[6/6] 產出每日簡報 …")
@@ -513,6 +542,11 @@ def run_full_pipeline(
             run.errors.append(f"daily_brief: {e}")
     else:
         log.info("[6/6] (略) 每日簡報未啟用或 LLM 未啟用")
+    progress.complete(
+        "daily_brief",
+        success=not any(e.startswith("daily_brief:") for e in run.errors),
+        message="" if (config.generate_brief and client.enabled) else "skipped",
+    )
 
     # ---- 收尾 ----
     ended = now_tw()

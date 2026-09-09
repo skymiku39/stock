@@ -44,7 +44,7 @@ from bot.pipeline_shared import (
     macro_summary_text as _macro_summary_text,
     parse_json_blob as _parse_json,
 )
-from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -321,6 +321,7 @@ def run_intraday(
     report = IntradayReport(asof=today.isoformat())
 
     t0 = time.time()
+    progress = PipelineProgress(publisher, "intraday", total_steps=6)
 
     # ---- 1. 抓新聞 ----
     log.info("[1/6] 抓今日台股新聞 (cnyes)...")
@@ -336,6 +337,10 @@ def run_intraday(
         report.errors.append(f"news: {e}")
         items = []
         news_text = ""
+    progress.complete(
+        "news",
+        success=not any(e.startswith("news:") for e in report.errors),
+    )
 
     # ---- 2. 抓 macro ----
     log.info("[2/6] 抓 macro (yfinance)...")
@@ -354,6 +359,10 @@ def run_intraday(
 
     macro_text = _macro_summary_text(macro)
     log.info("macro: %s", macro_text)
+    progress.complete(
+        "macro",
+        success=not any(e.startswith("macro:") for e in report.errors),
+    )
 
     # ---- 3. LLM 主題雷達 ----
     client = GeminiClient(
@@ -386,6 +395,11 @@ def run_intraday(
             report.errors.append(f"theme_radar: {e}")
     else:
         log.info("[3/6] (略) LLM 未啟用或無新聞")
+    progress.complete(
+        "theme_radar",
+        success=not any(e.startswith("theme_radar:") for e in report.errors),
+        message="" if (client.enabled and news_text) else "skipped",
+    )
 
     # ---- 4. 合併候選股 ----
     log.info("[4/6] 合併候選股 ...")
@@ -403,6 +417,7 @@ def run_intraday(
         sum(1 for r in pool.values() if "etf" in r.sources),
         sum(1 for r in pool.values() if "watchlist" in r.sources),
     )
+    progress.complete("candidates", success=True, message=f"{len(pool)} pool")
 
     # ---- 5. 評分排序 ----
     log.info("[5/6] 對 %d 檔候選股計算當沖分 ...", len(pool))
@@ -420,6 +435,7 @@ def run_intraday(
         key=lambda r: (-r.day_trade_score, -r.theme_heat),
     )[:candidate_limit]
     report.rankings = rankings
+    progress.complete("scoring", success=True, message=f"{len(rankings)} ranked")
 
     # ---- 6. LLM 戰情簡報 ----
     if client.enabled and themes:
@@ -444,6 +460,11 @@ def run_intraday(
             report.errors.append(f"brief: {e}")
     else:
         log.info("[6/6] (略) 略過戰情簡報")
+    progress.complete(
+        "brief",
+        success=not any(e.startswith("brief:") for e in report.errors),
+        message="" if (client.enabled and themes) else "skipped",
+    )
 
     report.duration_sec = round(time.time() - t0, 2)
 

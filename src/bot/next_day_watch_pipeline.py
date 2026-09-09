@@ -43,7 +43,7 @@ from bot.pipeline_shared import (
 from bot.llm_analyzer import GeminiClient, gemini_call
 from bot.market_macro import fetch_macro_snapshot, load_supply_chain, macro_to_dict
 from bot.news_fetcher import fetch_today_news, news_to_compact_text
-from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -517,6 +517,7 @@ def run_next_day_watch(
         mode=mode,
     )
     t0 = time.time()
+    progress = PipelineProgress(publisher, "next_day_watch", total_steps=7)
 
     # ---- 1. 新聞 ----
     log.info("[1/7] 抓今日新聞 (force_refresh=%s) ...", force_refresh_news)
@@ -532,6 +533,10 @@ def run_next_day_watch(
         report.errors.append(f"news: {e}")
         news_items = []
         news_text = ""
+    progress.complete(
+        "news",
+        success=not any(e.startswith("news:") for e in report.errors),
+    )
 
     # ---- 2. Macro ----
     log.info("[2/7] 抓 macro (force=%s) ...", force_refresh_macro)
@@ -551,6 +556,10 @@ def run_next_day_watch(
         macro = {}
     macro_text = _macro_summary_text(macro)
     log.info("macro: %s", macro_text)
+    progress.complete(
+        "macro",
+        success=not any(e.startswith("macro:") for e in report.errors),
+    )
 
     # ---- 3. 明日事件 ----
     log.info("[3/7] 取明日 catalysts ...")
@@ -564,6 +573,7 @@ def run_next_day_watch(
     events = _catalyst_events(target, root, log)
     report.catalyst_count = len(events)
     catalyst_text = _catalyst_text(events)
+    progress.complete("catalysts", success=True, message=f"{len(events)} events")
 
     # ---- 4. 候選池 + 強勢度掃描 ----
     log.info("[4/7] 組候選池 + 掃描今日強勢度 ...")
@@ -589,6 +599,11 @@ def run_next_day_watch(
         max_tickers=scan_limit,
     )
     today_strong_text = _strong_carry_text(strength_map, name_map)
+    progress.complete(
+        "strength_scan",
+        success=True,
+        message=f"{len(initial_pool)} scanned",
+    )
 
     # ---- 5. LLM next_day_radar ----
     client = GeminiClient(
@@ -630,6 +645,11 @@ def run_next_day_watch(
             report.errors.append(f"next_day_radar: {e}")
     else:
         log.info("[5/7] (略) LLM 未啟用")
+    progress.complete(
+        "radar",
+        success=not any(e.startswith("next_day_radar:") for e in report.errors),
+        message="" if client.enabled else "skipped",
+    )
 
     # LLM can discover topical/event candidates that were not in the initial
     # watchlist/ETF/event scan. Fill their technical/chip data before scoring.
@@ -766,6 +786,7 @@ def run_next_day_watch(
         key=lambda r: (-r.next_day_score, -r.strength_score, -r.theme_heat),
     )[:candidate_limit]
     report.rankings = rankings
+    progress.complete("scoring", success=True, message=f"{len(rankings)} ranked")
 
     # ---- 7. LLM next_day_brief ----
     if client.enabled and (report.carry_themes or rankings):
@@ -797,6 +818,11 @@ def run_next_day_watch(
             report.errors.append(f"next_day_brief: {e}")
     else:
         log.info("[7/7] (略) LLM 未啟用或無題材")
+    progress.complete(
+        "brief",
+        success=not any(e.startswith("next_day_brief:") for e in report.errors),
+        message="" if (client.enabled and (report.carry_themes or rankings)) else "skipped",
+    )
 
     report.duration_sec = round(time.time() - t0, 2)
 

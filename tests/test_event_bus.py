@@ -68,6 +68,22 @@ class TestInMemoryEventBus:
         b = get_event_bus()
         assert a is b
 
+    def test_handler_exception_does_not_stop_others(self) -> None:
+        bus = InMemoryEventBus()
+        received: list[str] = []
+
+        def boom(_event) -> None:
+            raise RuntimeError("handler boom")
+
+        def ok(event) -> None:
+            received.append(event.symbol)
+
+        bus.subscribe(DailyKlineFetched, boom)
+        bus.subscribe(DailyKlineFetched, ok)
+        bus.publish(DailyKlineFetched(symbol="2303", bar_count=1, start="a", end="b"))
+
+        assert received == ["2303"]
+
 
 class TestJsonlRecorder:
     def test_writes_jsonl(self, tmp_path: Path) -> None:
