@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from bot.cloud_sync import (
@@ -20,7 +21,7 @@ from bot.cloud_sync import (
     TableSyncResult,
     load_config_from_env,
 )
-from bot.stock_db import SYNCABLE_TABLES, StockDB, default_db_path
+from bot.stock_db import SYNCABLE_TABLES, StockDB, backup_stock_db, default_db_path
 from bot.utils import get_logger
 
 
@@ -97,10 +98,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     tables = _parse_tables(args.tables) if args.tables.strip() else list(SYNCABLE_TABLES)
 
     try:
-        from bot.config import Settings
-        settings = Settings()
-        db_path = settings.stock_db_path or str(default_db_path())
-        db = StockDB.open(db_path) if hasattr(StockDB, "open") else StockDB(db_path)
+        db_path = default_db_path()
+        if args.pull:
+            try:
+                bak = backup_stock_db(src=Path(db_path), label="pre-pull")
+                logger.info("pull 前已備份 DB → %s", bak)
+            except FileNotFoundError:
+                logger.info("尚無本地 DB，略過 pull 前備份")
+
+        db = StockDB.open(path=db_path)
         sync = GoogleSheetSync(cfg, db=db, logger=logger)
         results = _run_sync(sync, push=args.push, pull=args.pull, tables=tables)
     except CloudSyncDependencyError as exc:

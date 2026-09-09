@@ -198,6 +198,7 @@ Select-String -Path "log\strategy_*.log" -Pattern "2330"
 
 - 檢查 `log/` 目錄大小，清理過舊的 log
 - 檢查 `data/` 目錄，備份交易紀錄
+- 備份本地 SQLite：`uv run stock-db-backup`（預設保留最近 14 份於 `data/backups/`）
 - 回顧本週交易績效
 
 ### 每月

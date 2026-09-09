@@ -28,3 +28,10 @@ def _isolate_risk_guard_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         )
 
     monkeypatch.setattr(RiskGuard, "__init__", _init)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_stock_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """避免 .env 的 STOCK_DB_PATH 讓測試誤開正式庫。"""
+    monkeypatch.setenv("STOCK_DB_PATH", "")
+    monkeypatch.setattr("bot.stock_db._configured_stock_db_path", lambda: None)

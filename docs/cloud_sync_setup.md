@@ -31,7 +31,15 @@
 
 ## 模式 A：Google Drive 直接同步 DB 檔
 
-**最簡單，但兩台電腦不能同時使用**(會 corrupt SQLite)。
+**不建議作為日常方案。** 兩台電腦不能同時開啟同一份 `.db`（會損壞 SQLite / WAL）。  
+若只是要「防萬一」，請改用本機備份：
+
+```powershell
+uv run stock-db-backup
+# 產物在 data/backups/stock_YYYYMMDD_HHMMSS.db
+```
+
+若仍要用 Drive 掛載檔案：
 
 1. 把 Google Drive desktop 安裝好 (掛載成 `G:\` 或 `~/Google Drive/`)
 2. 在 Drive 內建一個資料夾，例如 `G:\My Drive\stock-shared\`
@@ -39,16 +47,20 @@
    ```
    STOCK_DB_PATH=G:/My Drive/stock-shared/stock.db
    ```
-4. 啟動 dashboard，DB 會直接在 Drive 資料夾建立並被 Drive 自動同步
+4. **所有** CLI／dashboard／管線都會經 `default_db_path()` 讀取此路徑（已統一）
 
 > **重要**：要切換到另一台電腦時，請先關閉目前這台的 dashboard / bot，
 > 等 Drive 圖示顯示「已同步」後再到另一台啟動。否則 SQLite WAL 檔可能衝突。
+> **更安全做法**：本機 `data/stock.db` + `stock-db-backup` + 模式 B Sheets 同步。
 
 ---
 
 ## 模式 B：Google Sheets API 同步 (推薦)
 
 **多機並行安全，且可從手機 / Forms 直接編輯。**
+
+`stock-cloud-sync --pull` 會先自動備份本地 DB（`data/backups/stock_*_pre-pull.db`），
+再以遠端資料 **整表覆蓋** 本地；遠端若為空表會清空對應本地表，請先確認 Sheets 內容。
 
 ### B-1. 建立 Google Cloud Project (一次性)
 

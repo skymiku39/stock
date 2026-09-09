@@ -399,9 +399,101 @@ SYNCABLE_TABLES: Tuple[str, ...] = (
 _DEFAULT_DB_REL = "data/stock.db"
 
 
+def _configured_stock_db_path() -> Optional[Path]:
+    """讀取 ``STOCK_DB_PATH``（環境變數或 ``.env`` / Settings）。
+
+    回傳絕對路徑；未設定則 ``None``（改用 ``<root>/data/stock.db``）。
+    """
+    import os
+
+    raw = (os.environ.get("STOCK_DB_PATH") or "").strip()
+    if not raw:
+        try:
+            from bot.config import Settings
+
+            raw = (Settings().stock_db_path or "").strip()
+        except Exception:
+            raw = ""
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
 def default_db_path(root: Optional[Path] = None) -> Path:
-    """DB 預設位置 (專案根/data/stock.db)。可由 .env 覆寫。"""
+    """解析實際 DB 路徑。
+
+    優先順序
+    --------
+    1. ``STOCK_DB_PATH`` / ``Settings.stock_db_path``（若有設定）
+    2. ``<root or cwd>/data/stock.db``
+    """
+    override = _configured_stock_db_path()
+    if override is not None:
+        return override
     return (root or Path.cwd()) / _DEFAULT_DB_REL
+
+
+def backup_stock_db(
+    *,
+    src: Optional[Path] = None,
+    dest_dir: Optional[Path] = None,
+    root: Optional[Path] = None,
+    keep: int = 14,
+    label: str = "",
+) -> Path:
+    """用 SQLite online backup API 複製資料庫（含進行中寫入的安全快照）。
+
+    Parameters
+    ----------
+    src:
+        來源 DB；預設 ``default_db_path(root)``。
+    dest_dir:
+        備份目錄；預設 ``<src.parent>/backups``。
+    keep:
+        保留最近幾份 ``stock_*.db``；``<=0`` 表示不清理。
+    label:
+        檔名附加標籤（例如 ``pre-pull``）。
+
+    Returns
+    -------
+    Path
+        新備份檔路徑。
+    """
+    source = Path(src) if src is not None else default_db_path(root)
+    if not source.is_file():
+        raise FileNotFoundError(f"找不到資料庫: {source}")
+
+    out_dir = Path(dest_dir) if dest_dir is not None else source.parent / "backups"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = now_tw().strftime("%Y%m%d_%H%M%S")
+    suffix = f"_{label}" if label else ""
+    dest = out_dir / f"stock_{stamp}{suffix}.db"
+
+    src_conn = sqlite3.connect(str(source))
+    try:
+        dst_conn = sqlite3.connect(str(dest))
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+    if keep > 0:
+        existing = sorted(
+            out_dir.glob("stock_*.db"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in existing[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    return dest
 
 
 class StockDB:
@@ -425,10 +517,12 @@ class StockDB:
     @classmethod
     def open(
         cls,
-        path: Optional[Path] = None,
+        path: Optional[Path | str] = None,
         root: Optional[Path] = None,
     ) -> "StockDB":
-        return cls(path or default_db_path(root))
+        if path is not None:
+            return cls(Path(path))
+        return cls(default_db_path(root))
 
     # ----- 連線 (per-thread) -----
 
@@ -1403,6 +1497,7 @@ __all__ = [
     "SyncMeta",
     "WatchlistRow",
     "default_db_path",
+    "backup_stock_db",
     "get_db",
     "reset_db_singleton",
 ]

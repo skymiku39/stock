@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from bot.company_info import backfill_stock_info, load_company_map
-from bot.config import Settings
 from bot.stock_db import StockDB, default_db_path
 from bot.utils import get_logger
 
@@ -35,14 +34,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     logger = get_logger("company-update")
-    settings = Settings()
     root = Path.cwd()
 
     if args.refresh:
         load_company_map(root=root, force_refresh=True, logger=logger)
 
-    db_path = settings.stock_db_path or str(default_db_path(root))
-    db = StockDB.open(db_path) if hasattr(StockDB, "open") else StockDB(db_path)
+    db_path = default_db_path(root)
+    db = StockDB.open(path=db_path)
 
     logger.info("=== 公司基本資料更新開始 (db=%s) ===", db_path)
     count = backfill_stock_info(

@@ -6305,10 +6305,6 @@ def page_board() -> None:
 
 
 def _resolved_db_path() -> Path:
-    env = load_env()
-    p = env.get("STOCK_DB_PATH", "").strip()
-    if p:
-        return Path(p).expanduser()
     return default_db_path(PROJECT_ROOT)
 
 

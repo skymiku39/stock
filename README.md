@@ -932,14 +932,23 @@ print(bars[-1].close, bars[-1].date)
 uv sync --extra cloud
 ```
 
-**模式 A — 最簡單** (單機自動備份)：
-把 `.env` 的 `STOCK_DB_PATH` 指向 Google Drive 同步資料夾即可。
+**本機備份（建議先做）**：
+
+```bash
+uv run stock-db-backup              # → data/backups/stock_YYYYMMDD_HHMMSS.db
+uv run stock-db-backup --json       # CI / 腳本用
+```
+
+`STOCK_DB_PATH`（若設定）會被所有 CLI／dashboard／管線統一使用；未設定則為 `data/stock.db`。
+
+**模式 A — Google Drive 掛載 DB**（不建議日常；兩機不可同時開同一檔）：
+把 `.env` 的 `STOCK_DB_PATH` 指向 Drive 同步資料夾即可。
 
 ```
 STOCK_DB_PATH=G:/My Drive/stock-shared/stock.db
 ```
 
-> 注意：兩台電腦不要同時開啟同一個 DB 檔，否則可能損毀。
+> 注意：兩台電腦不要同時開啟同一個 DB 檔，否則可能損毀。較安全做法是本機 DB + `stock-db-backup` + 模式 B。
 
 **模式 B — 多機並行** (推薦)：
 用 Google Sheets 當源頭，本地 SQLite 當快取。

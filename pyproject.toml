@@ -58,6 +58,7 @@ stock-smile-screen = "bot.smile_curve_screener_cli:main"
 stock-smile-audit = "bot.smile_curve_audit_cli:main"
 stock-watch-snapshot = "bot.watch_snapshot:main"
 stock-watch-data-fetch = "bot.watch_data_fetch:main"
+stock-db-backup = "bot.db_backup_cli:main"
 
 [build-system]
 requires = ["hatchling"]
