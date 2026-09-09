@@ -151,8 +151,10 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 
 - `NotificationHandler` → Telegram 推播
 - `TradeRecordingHandler` → CSV 成交紀錄
-- `RiskPostTradeHandler` → 成交後資金/部位狀態
 - `LoggingEventHandler` / `JsonlEventRecorder` → 稽核日誌
+
+成交後資金／部位狀態由 `BaseStrategy` 同步更新 `RiskGuard`（非事件 handler）。
+`RiskPostTradeHandler` 與 `wire_trading_handlers(..., risk=)` 簽名保留供未來擴充，目前未接線。
 
 **事件鏈 (可選)**：`.env` 設 `EVENT_CHAIN_SMILE_SCREEN=true` 時，`QuantDataFetchCompleted` 自動觸發微笑曲線選股（`events/chain_handlers.py`）。
 

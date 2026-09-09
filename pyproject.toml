@@ -1,7 +1,7 @@
 [project]
 name = "stock-bot"
 version = "0.1.0"
-description = "台股當沖自動交易機器人 (Shioaji)"
+description = "台股研究與分析平台 (Shioaji；當沖實單已封存)"
 readme = "README.md"
 authors = [
     { name = "skymiku39", email = "52848246+skymiku39@users.noreply.github.com" }

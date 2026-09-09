@@ -34,6 +34,7 @@ _SECTION_TITLES = {
     "section_account": "4. 帳戶權限",
     "section_risk": "5. 風控設定",
     "section_time": "6. 時間窗口",
+    "section_safety": "7. 持倉安全",
 }
 
 
@@ -71,9 +72,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger=logger,
     )
 
+    exit_code = 0 if not report.has_fail() else 2
+
     if args.json:
         print(json.dumps(report_to_dict(report), ensure_ascii=False, indent=2))
-        return 0 if report.can_simulate else 1
+        return exit_code
 
     # 人類可讀版
     print()
@@ -95,7 +98,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print()
 
     print(f"最終結論: {'🟢 可下真實單' if report.can_trade_now else '🟡 暫不可下真實單' if report.can_simulate else '🔴 設定有阻擋'}")
-    return 0 if not report.has_fail() else 2
+    return exit_code
 
 
 if __name__ == "__main__":

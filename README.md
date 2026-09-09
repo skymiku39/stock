@@ -89,6 +89,8 @@ uv run stock-preflight --no-login     # 只檢查 .env 設定
 uv run stock-preflight --json         # 給 CI / 通知用
 ```
 
+Exit code：`0` 無 fail／`2` 有阻擋項（人類可讀與 `--json` 相同）。
+
 或在儀表板 **⚡ 執行與紀錄 → 🩺 交易可行性檢查** 點「立刻檢查」，
 會顯示 **7 個分區**（環境 / CA / 連線 / 帳戶 / 風控 / 時間 / **持倉安全**）、
 每項通過/警告/阻擋狀態與修復建議。
