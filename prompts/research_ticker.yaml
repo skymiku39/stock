@@ -1,6 +1,6 @@
 id: research_ticker
-version: "1.1"
-description: 個股自動研究 — 整合行事曆、MOPS 重大訊息、法說簡報原文、新聞、網路搜尋，輸出 JSON 研究報告
+version: "1.2"
+description: 個股自動研究 — 整合行事曆、法說原文、量化證據（基本面/籌碼/ETF）、新聞、網搜，輸出 JSON
 model_hint: gemini-2.5-flash
 max_output_tokens: 2048
 temperature: 0.2
@@ -23,6 +23,10 @@ inputs:
     required: false
     desc: 既有法說會 PDF/TXT 抽字或自動下載的簡報原文
     max_chars: 12000
+  - name: quant_block
+    required: false
+    desc: 本地量化證據摘要（月營收/估值/季報、近 N 日籌碼、主動 ETF 共識）
+    max_chars: 4000
   - name: news_block
     required: false
     desc: 近期新聞摘要清單
@@ -45,15 +49,20 @@ template: |
   --- 3. 法說會簡報 / 逐字稿原文（若有） ---
   {presentation_block}
 
-  --- 4. 新聞精選 ---
+  --- 4. 量化證據（基本面 / 籌碼 / 主動 ETF 共識） ---
+  {quant_block}
+
+  --- 5. 新聞精選 ---
   {news_block}
 
-  --- 5. 網路搜尋與部分原文 ---
+  --- 6. 網路搜尋與部分原文 ---
   {web_block}
 
   分析準則：
   - 「素材是否充足」直接反映在 confidence；資料少必須降到 0.2 以下
   - 有法說簡報/逐字稿時，key_metrics / capex_signal / margin_outlook 應優先引用該原文，勿只靠新聞臆測
+  - 量化證據可用於交叉驗證：例如法說偏多但外資大賣、或月營收連跌，應寫進 risks 或調降 sentiment
+  - key_metrics.yoy / qoq 若量化區有數字可填入，仍不可捏造未提供的數字
   - 不要憑空捏造數字，若素材沒提到就在 key_metrics 留 ""
   - 若有「即將舉行的法說會」要在 catalyst_outlook 明確點名
   - 若新聞與行事曆出現矛盾、或言論口風變化，請寫進 risks

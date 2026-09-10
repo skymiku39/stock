@@ -14,7 +14,8 @@
    * **網頁搜尋** (DuckDuckGo HTML + Google News RSS) — 多 query 聚合
    * **法說簡報原文**：讀 ``data/mops_downloads`` / ``mops_cache`` 的 TXT/HTML/PDF；
      不足時可自動下載行事曆上的近期簡報（上限 N 份）並抽字
-2. **LLM 結構化分析** — 使用 ``research_ticker`` prompt（含 ``presentation_block``）
+   * **量化證據**：本地基本面（月營收/PER/季報）、近 N 日籌碼、主動 ETF 共識
+2. **LLM 結構化分析** — 使用 ``research_ticker`` prompt（含 ``presentation_block``、``quant_block``）
 3. **回退機制** — 若無 research_ticker 結果且 ``AUTO_LLM_ALLOW_LEGACY=1``，退回 ``analyze_presentation``
 4. **可選 logic_check** — 若呼叫者帶入 ChipsContext，會接著跑言行反查
 5. 結果寫到 ``data/auto_llm/<ticker>.json``，並會被 ``ticker_view.build_snapshot``
@@ -42,6 +43,7 @@ from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.config import Settings
 from bot.conference_calendar import update_calendar, upcoming_tickers
 from bot.env_io import load_env
+from bot.evidence import make_evidence
 from bot.llm_analyzer import (
     ChipsContext,
     DEFAULT_MODEL,
@@ -52,6 +54,7 @@ from bot.llm_analyzer import (
     extract_json,
     gemini_call,
     logic_check,
+    validate_presentation_payload,
 )
 from bot.mops_scraper import MaterialInfo, fetch_material_info
 from bot.news_fetcher import NewsItem, fetch_today_news
@@ -64,6 +67,8 @@ MIN_INPUT_CHARS = 80            # 素材少於此字數視為「沒料」，不�
 PRESENTATION_MAX_CHARS = 12000  # 餵給 research_ticker 的簡報原文上限
 MAX_AUTO_PRESENTATION_DOWNLOADS = 2  # 自動下載近期簡報份數上限
 MIN_PRESENTATION_CHARS = 200    # 少於此字數視為抽字失敗／無實質內容
+QUANT_BLOCK_MAX_CHARS = 4000
+DEFAULT_CHIP_DAYS_FOR_QUANT = 5
 
 
 # ----------------------------------------------------------------------
@@ -260,6 +265,234 @@ def _resolve_presentation_block(
     return downloaded
 
 
+def _format_fundamentals_quant(fund: Any) -> List[str]:
+    """把 FundamentalSnapshot 壓成短行列表。"""
+    lines: List[str] = []
+    if fund is None or not getattr(fund, "has_data", False):
+        return lines
+    lines.append("【基本面】")
+    val = getattr(fund, "valuation", None)
+    if val is not None:
+        lines.append(
+            f"- 估值 ({getattr(val, 'date', '') or '最新'}): "
+            f"PER={getattr(val, 'pe_ratio', 0):.1f} "
+            f"PBR={getattr(val, 'pb_ratio', 0):.2f} "
+            f"殖利率={getattr(val, 'dividend_yield', 0):.2f}%"
+        )
+    latest_rev = None
+    try:
+        latest_rev = fund.latest_revenue()
+    except Exception:
+        latest_rev = None
+    if latest_rev is not None:
+        streak = 0
+        try:
+            streak = int(fund.revenue_yoy_streak())
+        except Exception:
+            streak = 0
+        lines.append(
+            f"- 月營收 {latest_rev.year}/{latest_rev.month:02d}: "
+            f"YoY={latest_rev.yoy:+.1f}% MoM={latest_rev.mom:+.1f}% "
+            f"累計YoY={latest_rev.cum_yoy:+.1f}% "
+            f"(連續 YoY>0：{streak} 月)"
+        )
+    qs = list(getattr(fund, "quarterlies", None) or [])
+    if qs:
+        latest_q = sorted(qs, key=lambda q: (q.year, q.quarter))[-1]
+        lines.append(
+            f"- 季報 {latest_q.year}Q{latest_q.quarter}: "
+            f"EPS={latest_q.eps:.2f} "
+            f"毛利率={latest_q.gross_margin:.1f}% "
+            f"營益率={latest_q.operating_margin:.1f}% "
+            f"淨利率={latest_q.net_margin:.1f}%"
+        )
+    divs = list(getattr(fund, "dividends", None) or [])
+    if divs:
+        latest_d = sorted(divs, key=lambda d: d.year)[-1]
+        lines.append(
+            f"- 股利 {latest_d.year}: 現金={latest_d.cash_dividend:.2f} "
+            f"股票={latest_d.stock_dividend:.2f}"
+        )
+    return lines
+
+
+def _format_chips_quant(
+    chips: Optional[ChipsContext] = None,
+    *,
+    summary: Optional[Any] = None,
+) -> List[str]:
+    """籌碼摘要短行。優先用 ChipsContext，否則 ChipSummary。"""
+    foreign = trust = dealer = margin = borrow = block = None
+    days = None
+    if chips is not None:
+        foreign = chips.foreign_net
+        trust = chips.investment_trust_net
+        dealer = chips.dealer_net
+        margin = chips.margin_buy_change_pct
+        borrow = chips.short_borrow_change_pct
+        block = chips.block_trade_net
+        notes = getattr(chips, "notes", "") or ""
+        if "最近" in notes:
+            days = notes
+    elif summary is not None:
+        foreign = summary.foreign_net
+        trust = summary.investment_trust_net
+        dealer = summary.dealer_net
+        margin = summary.margin_buy_change_pct
+        borrow = summary.short_borrow_change_pct
+        block = summary.block_trade_net
+        days = f"近 {summary.days} 日"
+    else:
+        return []
+    label = days or "近幾日"
+    return [
+        "【籌碼面】",
+        f"- {label}: 外資淨買超={foreign:,.0f} "
+        f"投信={trust:,.0f} 自營商={dealer:,.0f}",
+        f"- 融資餘額變動={margin:+.1f}% 借券賣出變動={borrow:+.1f}% "
+        f"鉅額淨額={block:,.0f}",
+    ]
+
+
+def _format_etf_consensus_quant(ticker: str, *, root: Path) -> List[str]:
+    """只讀本地 ETF 持股快照，組共識／新建倉／加碼短行。"""
+    try:
+        from bot.active_etf import list_holdings_dates, load_active_etfs, load_holdings
+        from bot.etf_consensus import (
+            build_consensus,
+            consensus_additions,
+            consensus_new_builds,
+            diff_snapshots,
+        )
+    except Exception:
+        return []
+
+    try:
+        etfs = load_active_etfs(root)
+    except Exception:
+        return []
+    if not etfs:
+        return []
+
+    etf_meta = {e.symbol: e for e in etfs}
+    latest_holds: Dict[str, Any] = {}
+    prev_holds: Dict[str, Any] = {}
+    for e in etfs:
+        try:
+            dates = list_holdings_dates(e.symbol, root)
+        except Exception:
+            continue
+        if not dates:
+            continue
+        try:
+            latest = load_holdings(e.symbol, dates[0], root)
+        except Exception:
+            latest = None
+        if latest:
+            latest_holds[e.symbol] = latest
+        if len(dates) >= 2:
+            try:
+                prev = load_holdings(e.symbol, dates[1], root)
+            except Exception:
+                prev = None
+            if prev:
+                prev_holds[e.symbol] = prev
+
+    if not latest_holds:
+        return []
+
+    lines: List[str] = ["【主動 ETF 共識】"]
+    consensus = build_consensus(latest_holds, etf_meta, min_etf_count=1)
+    match = next((c for c in consensus if c.ticker == ticker), None)
+    if match:
+        etf_names = ", ".join(
+            (etf_meta[w.etf_symbol].name if w.etf_symbol in etf_meta else w.etf_symbol)
+            for w in match.held_by[:6]
+        )
+        lines.append(
+            f"- 被 {match.etf_count} 檔持有，合計權重≈{match.total_weight:.2f}% "
+            f"({etf_names}{'…' if match.etf_count > 6 else ''})"
+        )
+    else:
+        lines.append("- 目前未出現在已抓取的主動 ETF 持股清單")
+
+    changes = []
+    for sym, after in latest_holds.items():
+        before = prev_holds.get(sym)
+        if before:
+            changes.extend(diff_snapshots(before, after))
+    if changes:
+        news = [s for s in consensus_new_builds(changes, min_etfs=1) if s.ticker == ticker]
+        adds = [s for s in consensus_additions(changes, min_etfs=1) if s.ticker == ticker]
+        for s in news:
+            lines.append(
+                f"- 訊號：新建倉共識 ({s.etf_count} 檔) "
+                f"權重Δ={s.total_weight_delta:+.2f}% — {s.note}"
+            )
+        for s in adds:
+            lines.append(
+                f"- 訊號：加碼共識 ({s.etf_count} 檔) "
+                f"權重Δ={s.total_weight_delta:+.2f}% — {s.note}"
+            )
+    return lines
+
+
+def _build_quant_block(
+    ticker: str,
+    *,
+    root: Path,
+    logger: logging.Logger,
+    chips: Optional[ChipsContext] = None,
+    chip_days: int = DEFAULT_CHIP_DAYS_FOR_QUANT,
+    refresh_fundamentals_if_empty: bool = True,
+    max_chars: int = QUANT_BLOCK_MAX_CHARS,
+) -> str:
+    """組裝餵給 research_ticker 的量化證據純文字。失敗不 raise。"""
+    parts: List[str] = []
+
+    # 基本面：先讀 cache，空則可選補抓一次
+    try:
+        from bot.fundamentals_fetcher import build_fundamental_snapshot
+
+        fund = build_fundamental_snapshot(
+            ticker, root=root, refresh=False, logger=logger,
+        )
+        if refresh_fundamentals_if_empty and (
+            fund is None or not fund.has_data
+        ):
+            fund = build_fundamental_snapshot(
+                ticker, root=root, refresh=True, logger=logger,
+            )
+        parts.extend(_format_fundamentals_quant(fund))
+    except Exception:
+        logger.exception("[%s] quant 基本面組裝失敗", ticker)
+
+    # 籌碼：呼叫端已帶 ChipsContext 則直接用；否則抓近 N 日
+    try:
+        if chips is not None:
+            parts.extend(_format_chips_quant(chips=chips))
+        else:
+            from bot.chips_fetcher import build_chip_summary
+
+            summary = build_chip_summary(
+                ticker, days=chip_days, root=root, logger=logger,
+            )
+            parts.extend(_format_chips_quant(summary=summary))
+    except Exception:
+        logger.exception("[%s] quant 籌碼組裝失敗", ticker)
+
+    # ETF 共識：純本地
+    try:
+        parts.extend(_format_etf_consensus_quant(ticker, root=root))
+    except Exception:
+        logger.exception("[%s] quant ETF 共識組裝失敗", ticker)
+
+    text = "\n".join(parts).strip()
+    if not text:
+        return "(無量化快取；請先跑 stock-watch-fetch / stock-auto-research)"
+    return text[:max_chars]
+
+
 def _gather_calendar(
     ticker: str,
     *,
@@ -415,6 +648,7 @@ def _build_source_sections(
     web_material: Optional[Any],
     pipeline_text: str,
     composed_preview: str = "",
+    quant_block: str = "",
     logger: logging.Logger,
     detail_limit: int = 5,
     detail_max_chars: int = 3000,
@@ -426,14 +660,25 @@ def _build_source_sections(
     past = calendar_data.get("past") or []
 
     mops_items: List[Dict[str, Any]] = []
+    evidence: List[Dict[str, Any]] = []
     for m in materials[:12]:
+        date_str = m.date.isoformat() if hasattr(m.date, "isoformat") else str(m.date)
         mops_items.append({
-            "date": m.date.isoformat() if hasattr(m.date, "isoformat") else str(m.date),
+            "date": date_str,
             "time": m.time,
             "subject": m.subject,
             "detail_url": m.detail_url or "",
             "detail": "",
         })
+        evidence.append(make_evidence(
+            "mops_material",
+            source="mops",
+            source_ref=m.detail_url or f"{ticker}:{date_str}:{m.subject}",
+            title=m.subject,
+            url=m.detail_url or "",
+            observed_at=date_str,
+            excerpt=m.subject,
+        ))
 
     fetched = 0
     for item in mops_items:
@@ -458,6 +703,16 @@ def _build_source_sections(
         }
         for n in news[:15]
     ]
+    for n in news[:15]:
+        evidence.append(make_evidence(
+            "news",
+            source="cnyes",
+            source_ref=str(getattr(n, "url", "") or getattr(n, "link", "") or n.title),
+            title=n.title,
+            url=str(getattr(n, "url", "") or getattr(n, "link", "") or ""),
+            observed_at=str(getattr(n, "published_at", "") or getattr(n, "date", "") or ""),
+            excerpt=n.summary or n.title,
+        ))
 
     web_items: List[Dict[str, str]] = []
     if web_material is not None:
@@ -467,6 +722,31 @@ def _build_source_sections(
                 "title": p.title or "",
                 "text": _truncate_text(p.text or "", detail_max_chars),
             })
+            evidence.append(make_evidence(
+                "web",
+                source="web_search",
+                source_ref=p.url,
+                title=p.title or "",
+                url=p.url,
+                excerpt=p.text or "",
+            ))
+
+    if pipeline_text:
+        evidence.append(make_evidence(
+            "presentation_text",
+            source="local_presentation",
+            source_ref=f"{ticker}:presentation",
+            title=f"{ticker} presentation text",
+            excerpt=pipeline_text,
+        ))
+    if quant_block and quant_block.strip() not in {"", "(無)"}:
+        evidence.append(make_evidence(
+            "quant",
+            source="local_quant",
+            source_ref=f"{ticker}:quant",
+            title=f"{ticker} quant block",
+            excerpt=quant_block,
+        ))
 
     preview = composed_preview.strip()
     if not preview:
@@ -485,6 +765,8 @@ def _build_source_sections(
             parts.append("【過去法說會】\n" + "\n".join(past_lines))
         if materials:
             parts.append("【MOPS 重大訊息】\n" + _format_materials(materials))
+        if quant_block and quant_block.strip() not in {"", "(無)"}:
+            parts.append("【量化證據】\n" + quant_block)
         if news:
             parts.append("【鉅亨網新聞】\n" + _format_news(news))
         if web_material is not None:
@@ -506,7 +788,9 @@ def _build_source_sections(
         "news": news_items,
         "web_search": web_items,
         "pipeline_text": _truncate_text(pipeline_text, detail_max_chars) if pipeline_text else "",
+        "quant_block": _truncate_text(quant_block, detail_max_chars) if quant_block else "",
         "composed_preview": _truncate_text(preview, 8000),
+        "evidence": evidence,
     }
 
 
@@ -619,6 +903,8 @@ def _try_research_ticker(
     global_upcoming_text: str = "(無)",
     global_recent_text: str = "(無)",
     presentation_block: str = "",
+    quant_block: str = "",
+    memory_context: str = "",
 ) -> Optional[Dict[str, Any]]:
     """嘗試呼叫 ``research_ticker`` prompt；若 registry 沒有此 prompt 回 None。"""
     try:
@@ -636,6 +922,9 @@ def _try_research_ticker(
     if materials:
         past_events.append("【MOPS 重大訊息 (近一年)】")
         past_events.append(_format_materials(materials))
+    if memory_context:
+        past_events.append("【歷史研究記憶（僅供參考，需以本次來源重新驗證）】")
+        past_events.append(memory_context)
     past_block = "\n".join(past_events).strip() or "(無)"
 
     upcoming_parts: List[str] = []
@@ -648,6 +937,7 @@ def _try_research_ticker(
     upcoming_block = "\n\n".join(upcoming_parts).strip() or "(無)"
     news_block = _format_news(news) if news else "(無)"
     presentation = (presentation_block or "").strip() or "(無)"
+    quant = (quant_block or "").strip() or "(無)"
 
     raw, info = gemini_call(
         "research_ticker",
@@ -659,6 +949,7 @@ def _try_research_ticker(
         upcoming_events=upcoming_block,
         past_events=past_block,
         presentation_block=presentation,
+        quant_block=quant,
         news_block=news_block,
         web_block=web_block or "(無)",
     )
@@ -679,6 +970,40 @@ def _try_research_ticker(
 # ----------------------------------------------------------------------
 
 
+def _load_research_memory_context(
+    ticker: str,
+    *,
+    root: Path,
+    max_chars: int = 6000,
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """取回同一 ticker 的可靠短／長記憶，並保留分層標籤供 LLM 分辨。"""
+    try:
+        from bot.memory_store import MemoryStore
+        from bot.stock_db import StockDB
+
+        context = MemoryStore(StockDB.open(root=root)).build_context(
+            ticker,
+            scope_type="ticker",
+            scope_id=ticker,
+            max_chars=max_chars,
+            per_layer_limit=8,
+        )
+        sections: List[str] = []
+        for label, rows in (("短期", context.short), ("長期", context.long)):
+            if not rows:
+                continue
+            sections.append(f"【{label}記憶】")
+            for row in rows:
+                text = row.content or row.summary
+                sections.append(f"[{row.memory_id}] {row.summary}\n{text[:1800]}")
+        return "\n\n".join(sections)[:max_chars]
+    except Exception:
+        if logger is not None:
+            logger.debug("[%s] 讀取研究記憶失敗", ticker, exc_info=True)
+        return ""
+
+
 def auto_analyze_ticker(
     ticker: str,
     *,
@@ -691,7 +1016,9 @@ def auto_analyze_ticker(
     enable_web_search: bool = True,
     enable_calendar: bool = True,
     enable_presentation_download: bool = True,
+    enable_quant: bool = True,
     chips: Optional[ChipsContext] = None,
+    chip_days: int = DEFAULT_CHIP_DAYS_FOR_QUANT,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[Dict[str, Any]]:
     """全自動為個股做 LLM 法說/情緒分析 + 反查。
@@ -744,6 +1071,18 @@ def auto_analyze_ticker(
         if enable_web_search else None
     )
     web_block = web_material.compact_text() if web_material is not None else ""
+    memory_context = _load_research_memory_context(
+        ticker, root=root, logger=log,
+    )
+    quant_block = ""
+    if enable_quant:
+        quant_block = _build_quant_block(
+            ticker,
+            root=root,
+            logger=log,
+            chips=chips,
+            chip_days=chip_days,
+        )
 
     res = _try_research_ticker(
         ticker,
@@ -755,6 +1094,8 @@ def auto_analyze_ticker(
         global_upcoming_text=str(calendar_data.get("global_upcoming_text") or "(無)"),
         global_recent_text=str(calendar_data.get("global_recent_text") or "(無)"),
         presentation_block=pipeline_text,
+        quant_block=quant_block,
+        memory_context=memory_context,
     )
 
     analysis: Optional[PresentationAnalysis] = None
@@ -762,20 +1103,25 @@ def auto_analyze_ticker(
     if res is not None:
         data = res["data"]
         info = res["info"]
+        normalized, validation_errors = validate_presentation_payload(data)
+        raw_evidence_sources = data.get("evidence_sources", []) if isinstance(data, dict) else []
+        if not isinstance(raw_evidence_sources, list):
+            raw_evidence_sources = []
         payload = {
             "ticker": ticker,
-            "summary": str(data.get("summary", "")),
-            "sentiment": str(data.get("sentiment", "neutral")),
-            "sentiment_score": float(data.get("sentiment_score", 0.0)),
-            "confidence": float(data.get("confidence", 0.5)),
-            "key_metrics": dict(data.get("key_metrics", {}) or {}),
-            "growth_drivers": list(data.get("growth_drivers", []) or []),
-            "risks": list(data.get("risks", []) or []),
-            "capex_signal": str(data.get("capex_signal", "")),
-            "margin_outlook": str(data.get("margin_outlook", "")),
+            "summary": normalized["summary"],
+            "sentiment": normalized["sentiment"],
+            "sentiment_score": normalized["sentiment_score"],
+            "confidence": normalized["confidence"],
+            "key_metrics": normalized["key_metrics"],
+            "growth_drivers": normalized["growth_drivers"],
+            "risks": normalized["risks"],
+            "capex_signal": normalized["capex_signal"],
+            "margin_outlook": normalized["margin_outlook"],
             "catalyst_outlook": str(data.get("catalyst_outlook", "")),
             "news_sentiment": str(data.get("news_sentiment", "")),
-            "evidence_sources": list(data.get("evidence_sources", []) or []),
+            "evidence_sources": [str(x)[:500] for x in raw_evidence_sources[:30]],
+            "validation_errors": validation_errors,
             "prompt_id": info.get("prompt_id", "research_ticker"),
             "prompt_version": info.get("prompt_version", ""),
             "model": client.model,
@@ -796,6 +1142,7 @@ def auto_analyze_ticker(
             prompt_id=payload["prompt_id"],
             prompt_version=payload["prompt_version"],
             raw_response=res["raw"],
+            validation_errors=validation_errors,
         )
     else:
         allow_legacy = str(
@@ -843,6 +1190,7 @@ def auto_analyze_ticker(
         "mops_count": len(materials),
         "news_count": len(news),
         "pipeline_text_chars": len(pipeline_text),
+        "quant_block_chars": len(quant_block),
         "upcoming_conferences": len(calendar_data.get("upcoming") or []),
         "past_conferences": len(calendar_data.get("past") or []),
         "web_search_results": len(web_material.search_results) if web_material else 0,
@@ -856,8 +1204,10 @@ def auto_analyze_ticker(
         web_material=web_material,
         pipeline_text=pipeline_text,
         composed_preview=composed_for_preview,
+        quant_block=quant_block,
         logger=log,
     )
+    payload["evidence"] = payload["source_sections"].get("evidence", [])
     payload["fetched_at"] = now_tw().isoformat(timespec="seconds")
 
     if chips is not None and analysis is not None:
@@ -878,6 +1228,41 @@ def auto_analyze_ticker(
         _save_cache(ticker, root, payload)
     except Exception:
         log.exception("[%s] auto LLM 快取寫入失敗", ticker)
+
+    # 只有新版 research_ticker 且 schema validation 無錯誤時才升級成長期記憶。
+    # legacy/fallback 仍保留 JSONL 與 auto_llm cache，但不進正式長期知識層。
+    if res is not None and not payload.get("validation_errors"):
+        try:
+            from bot.memory_store import MemoryStore
+            from bot.stock_db import StockDB
+
+            memory_db = StockDB.open(root=root)
+            fetched_at = str(payload.get("fetched_at") or now_tw().isoformat(timespec="seconds"))
+            MemoryStore(memory_db).put_long(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+                memory_id=f"auto-research:{ticker}:{fetched_at}",
+                memory_type="research_summary",
+                scope_type="ticker",
+                scope_id=ticker,
+                subject=ticker,
+                summary=str(payload.get("summary") or ""),
+                keywords=[ticker, str(payload.get("sentiment") or ""), "research_ticker"],
+                importance=0.8,
+                confidence=float(payload.get("confidence") or 0.0),
+                quality_status="ok",
+                source="auto_llm",
+                source_ref=f"{ticker}:{fetched_at}",
+                source_record_id=f"auto-research:{ticker}:{fetched_at}",
+                evidence=payload.get("evidence") or [],
+                metadata={
+                    "prompt_id": payload.get("prompt_id", ""),
+                    "prompt_version": payload.get("prompt_version", ""),
+                    "model": payload.get("model", ""),
+                },
+                observed_at=fetched_at,
+            )
+        except Exception:
+            log.exception("[%s] 長期研究記憶寫入失敗", ticker)
     return payload
 
 
@@ -1053,6 +1438,7 @@ def auto_research_ticker(
         name_hint=name_hint,
         force_refresh=force_refresh,
         chips=chips_ctx,
+        chip_days=days,
         logger=log,
     )
 

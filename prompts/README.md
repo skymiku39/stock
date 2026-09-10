@@ -49,7 +49,7 @@ template: |
 | `extract_etf_holdings` | active | 從投信網頁 HTML/PDF 抽出 ETF／共同基金持股 JSON |
 | `daily_brief` | active | 每日盤後簡報，整合所有分析結果 |
 | `us_market_brief` | active | 美股盤後 → 台股早盤影響評估 (Markdown 簡報) |
-| `research_ticker` | active | 全自動個股研究（行事曆+法說原文+搜尋+新聞 → 結構化 JSON） |
+| `research_ticker` | active | 全自動個股研究（行事曆+法說原文+量化證據+搜尋+新聞 → 結構化 JSON） |
 | `portfolio_analysis` | active | 投組持倉分析與操作建議 |
 | `theme_radar` | active | 盤中題材雷達 |
 | `intraday_brief` | active | 當沖戰情簡報（停損停利為人工參考，非 bot 參數） |
