@@ -357,22 +357,22 @@ def section_gaps() -> str:
   {table(
       ["嚴重度", "缺口", "影響"],
       [
-          ["Critical", "Ask 缺 technical／chips／etf／macro／news／web 的 EvidencePack adapters",
-           "領域問題常 no_evidence（例如「00929 現在買嗎」無法引用技術／籌碼）"],
+          ["Done (P0)", "Ask snapshot adapters（technical／chips／etf／macro）",
+           "已由 bot.ask_adapters 只讀接通；仍需本地先有快取"],
+          ["Done (P0)", "ETF 評分遮蔽 fundamental／etf_consensus",
+           "compute_scorecard(instrument_type=etf) 已分流"],
           ["Critical", "DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地",
            "as_of／來源譜系／跨格式 SSOT 不完整"],
+          ["High", "Ask 仍缺 news／web_search 即時 adapters",
+           "新聞類問題仍依賴預寫 memory／evidence"],
           ["High", "planned prompts 未接線：classify_news、supply_chain_impact、analyst_real_sentiment",
            "文件與實作預期落差"],
-          ["High", "ETF 與個股共用同一套 scorecard 權重",
-           "對 00929 類商品 fundamental／etf_consensus 意義偏差"],
           ["High", "EtfFollowStrategy 略過 LLM 進場閘",
            "與「AI 閘門統一」敘事不一致"],
           ["High", "當沖 trade 模式預設封存",
            "易誤以為 bot 會實單，實際僅訊號"],
           ["Medium", "Ask 問答當下不抓外網",
            "本地未先跑 watch-data-fetch／pipeline 則證據空"],
-          ["Medium", "籌碼／技術 freshness 策略未完善",
-           "「最新」查詢易標 stale 或缺欄位"],
           ["Medium", "RiskPostTradeHandler 未接線",
            "成交後風控僅策略內同步"],
           ["Low", "EVENT_CHAIN_SMILE_SCREEN 預設關閉",
@@ -382,12 +382,12 @@ def section_gaps() -> str:
       ],
   )}
 
-  <h3>6. 建議優先順序</h3>
+  <h3>6. 建議優先順序（後續）</h3>
   <ol>
-    <li>為 Ask 接上只讀 adapters（從 build_snapshot／chips cache／ETF／macro 組 evidence，不在 ask 內呼叫 Gemini 抓料）</li>
-    <li>評分依商品類型分流（ETF 關閉或降權不適用因子）</li>
     <li>planned prompts：接線或移入 archive，並更新 prompts/README</li>
     <li>文件標註 EtfFollow 故意略過 LLM entry，或改為可選閘門</li>
+    <li>落地 DATA_ARCHITECTURE_REDESIGN（as_of／retrieved_at）與 RiskPostTradeHandler</li>
+    <li>Ask news／web adapters（仍維持問答不現場爬網時，改為讀本地新聞快取）</li>
   </ol>
 </section>
 """

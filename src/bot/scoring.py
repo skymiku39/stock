@@ -157,6 +157,8 @@ class TimeframeScore:
     factors: List[FactorScore] = field(default_factory=list)
     strategy: Dict[str, Any] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    raw_action: str = ""       # 未套用資料覆蓋率 gate 前的動作
+    decision_status: str = "eligible"  # eligible / blocked_insufficient_data / no_data
 
 
 @dataclass
@@ -279,6 +281,18 @@ def factor_chips(chips: Optional[Dict[str, Any]]) -> FactorScore:
             "chips", "籌碼方向", 50.0,
             detail="尚無籌碼面資料", available=False,
         )
+    # ChipSummary 會明確帶 rows；有這個欄位但為空代表抓取沒有拿到
+    # 該股票的任何交易日，不可只因 summary dict truthy 就算成可用資料。
+    if "rows" in chips and not isinstance(chips.get("rows"), list):
+        return FactorScore(
+            "chips", "籌碼方向", 50.0,
+            detail="籌碼資料格式不完整", available=False,
+        )
+    if "rows" in chips and not chips.get("rows"):
+        return FactorScore(
+            "chips", "籌碼方向", 50.0,
+            detail="籌碼摘要存在但沒有可用交易日", available=False,
+        )
     foreign = float(chips.get("foreign_net", 0) or 0)
     trust = float(chips.get("investment_trust_net", 0) or 0)
     dealer = float(chips.get("dealer_net", 0) or 0)
@@ -386,6 +400,12 @@ def factor_fundamental(fundamental: Optional[Dict[str, Any]]) -> FactorScore:
     val = fundamental.get("valuation") or {}
     quarterlies = fundamental.get("quarterlies") or []
     derived = fundamental.get("derived") or {}
+
+    if not revs and not val and not quarterlies:
+        return FactorScore(
+            "fundamental", "基本面", 50.0,
+            detail="基本面快照存在但沒有可用子資料", available=False,
+        )
 
     score = 50.0
     bits: List[str] = []
@@ -614,7 +634,10 @@ def factor_risk(
         elif margin_pct > 10:
             score -= 8
             notes.append(f"融資增加 +{margin_pct:.1f}%")
-    available = bool(chips or analysis)
+    chips_available = bool(chips) and (
+        "rows" not in chips or bool(chips.get("rows"))
+    )
+    available = bool(chips_available or analysis)
     if analysis:
         risks = analysis.get("risks") or []
         risk_text = "; ".join(map(str, risks)).lower()
@@ -670,6 +693,27 @@ def _build_strategy(timeframe: str, action: str, price: float) -> Dict[str, Any]
     }
 
 
+def detect_instrument_type(
+    ticker: str,
+    *,
+    name: str = "",
+    industry: str = "",
+) -> str:
+    """粗分 ``stock`` / ``etf``，供評分權重分流。"""
+    ind = (industry or "").strip()
+    nm = (name or "").strip()
+    blob = f"{ticker} {nm} {ind}".upper()
+    if "ETF" in blob or "ETN" in blob:
+        return "etf"
+    if "基金" in ind or ind in {"ETF / 基金", "ETF/基金"}:
+        return "etf"
+    # 台股 ETF／ETN 代號多為 00 開頭五碼（如 0050、00929）
+    t = (ticker or "").strip()
+    if len(t) == 5 and t.startswith("00") and t.isdigit():
+        return "etf"
+    return "stock"
+
+
 def compute_scorecard(
     *,
     ticker: str,
@@ -693,8 +737,18 @@ def compute_scorecard(
     related_us_stocks: Optional[List[Dict[str, Any]]] = None,
     adr_premium: Optional[Dict[str, Any]] = None,
     fetched_at: str = "",
+    instrument_type: str = "",
+    industry: str = "",
 ) -> StockScorecard:
-    """根據各種資料計算四個時間框架的綜合分數與建議。"""
+    """根據各種資料計算四個時間框架的綜合分數與建議。
+
+    ``instrument_type`` 為 ``etf`` 時，遮蔽不適用的個股基本面與
+    「被主動 ETF 持有」共識因子，權重自動正規化到其餘可用因子。
+    """
+    itype = (instrument_type or "").strip().lower()
+    if itype not in {"stock", "etf"}:
+        itype = detect_instrument_type(ticker, name=name, industry=industry)
+
     factor_funcs: Dict[str, FactorScore] = {
         "llm_sentiment": factor_llm_sentiment(llm_analysis),
         "logic": factor_logic(logic_result),
@@ -715,6 +769,19 @@ def compute_scorecard(
         ),
         "risk": factor_risk(chip_summary, llm_analysis),
     }
+
+    if itype == "etf":
+        # ETF 不適用個股財報因子；「被其他主動 ETF 持有」共識亦易誤導
+        factor_funcs["fundamental"] = FactorScore(
+            "fundamental", "基本面", 50.0,
+            detail="ETF 標的：已遮蔽個股基本面因子",
+            available=False,
+        )
+        factor_funcs["etf_consensus"] = FactorScore(
+            "etf_consensus", "ETF 共識", 50.0,
+            detail="ETF 標的：已遮蔽「被主動 ETF 持有」共識因子",
+            available=False,
+        )
 
     timeframes: Dict[str, TimeframeScore] = {}
     for tf, weights in WEIGHTS.items():
@@ -742,13 +809,27 @@ def compute_scorecard(
         else:
             total = 50.0
 
-        action, action_label, color = _action_from_score(total)
+        raw_action, raw_action_label, raw_color = _action_from_score(total)
+        action, action_label, color = raw_action, raw_action_label, raw_color
         confidence = available_sum / weight_sum if weight_sum else 0.0
         notes: List[str] = []
+        decision_status = "eligible"
+        if itype == "etf":
+            notes.append("ℹ 商品類型=ETF：已遮蔽 fundamental／etf_consensus")
         if confidence < 0.5:
             notes.append("⚠ 資料覆蓋率不足 50%，分數僅基於少數可用因子，請補齊資料再參考")
         elif confidence < 0.8:
             notes.append(f"ℹ 資料覆蓋率 {confidence:.0%}，部分因子缺資料 (已從加權中剔除)")
+        # 分數仍保留，動作則必須通過資料覆蓋率 gate，避免少數因子觸發
+        # 看似確定的買賣建議。這不是預測準確率，只是最低可用性門檻。
+        if confidence < 0.5 and raw_action != "HOLD":
+            action, action_label, color = "HOLD", "觀望", "gray"
+            decision_status = "blocked_insufficient_data"
+            notes.append("⛔ 已阻擋非觀望動作：資料覆蓋率低於 50%")
+        elif confidence < 0.8 and raw_action == "STRONG_BUY":
+            action, action_label, color = "BUY", "買進", "green"
+            decision_status = "downgraded_for_coverage"
+            notes.append("⚠ 強烈買進已降級：資料覆蓋率未達 80%")
         if action in ("STRONG_BUY", "BUY") and any(
             f.key == "risk" and f.score < 40 for f in used_factors
         ):
@@ -764,9 +845,13 @@ def compute_scorecard(
             factors=used_factors,
             strategy=_build_strategy(tf, action, price),
             notes=notes,
+            raw_action=raw_action,
+            decision_status=decision_status,
         )
 
     summary_notes: List[str] = []
+    if itype == "etf":
+        summary_notes.append("商品類型判定為 ETF，評分已排除個股基本面與 ETF 持股共識因子")
     if all(not f.available for f in factor_funcs.values()):
         summary_notes.append("此股票尚無任何資料；請先跑一次自動化管線")
     elif factor_funcs["llm_sentiment"].available is False:
@@ -817,9 +902,10 @@ __all__ = [
     "TIMEFRAME_LABELS",
     "WEIGHTS",
     "STRATEGY_RULES",
-    "StockScorecard",
-    "TimeframeScore",
+    "detect_instrument_type",
     "compute_scorecard",
     "factor_us_market",
     "scorecard_to_row",
+    "StockScorecard",
+    "TimeframeScore",
 ]

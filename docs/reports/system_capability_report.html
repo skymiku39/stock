@@ -64,7 +64,7 @@ ul { padding-left: 1.2rem; }
 <body>
 <header>
   <h1>Stock Bot 系統能力盤點報告</h1>
-  <p>產生時間：2026-09-16 12:12:07 +0800（Asia/Taipei）</p>
+  <p>產生時間：2026-09-16 12:26:33 +0800（Asia/Taipei）</p>
   <p class="note">本報告由 <code>scripts/generate_capability_report.py</code> 自程式碼掃描＋靜態盤點產生；不含任何 API 金鑰。</p>
 </header>
 <nav class="toc">
@@ -247,14 +247,14 @@ ul { padding-left: 1.2rem; }
 
 <section id="gaps">
   <h2>5. 缺少／缺口</h2>
-  <table><thead><tr><th>嚴重度</th><th>缺口</th><th>影響</th></tr></thead><tbody><tr><td>Critical</td><td>Ask 缺 technical／chips／etf／macro／news／web 的 EvidencePack adapters</td><td>領域問題常 no_evidence（例如「00929 現在買嗎」無法引用技術／籌碼）</td></tr><tr><td>Critical</td><td>DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地</td><td>as_of／來源譜系／跨格式 SSOT 不完整</td></tr><tr><td>High</td><td>planned prompts 未接線：classify_news、supply_chain_impact、analyst_real_sentiment</td><td>文件與實作預期落差</td></tr><tr><td>High</td><td>ETF 與個股共用同一套 scorecard 權重</td><td>對 00929 類商品 fundamental／etf_consensus 意義偏差</td></tr><tr><td>High</td><td>EtfFollowStrategy 略過 LLM 進場閘</td><td>與「AI 閘門統一」敘事不一致</td></tr><tr><td>High</td><td>當沖 trade 模式預設封存</td><td>易誤以為 bot 會實單，實際僅訊號</td></tr><tr><td>Medium</td><td>Ask 問答當下不抓外網</td><td>本地未先跑 watch-data-fetch／pipeline 則證據空</td></tr><tr><td>Medium</td><td>籌碼／技術 freshness 策略未完善</td><td>「最新」查詢易標 stale 或缺欄位</td></tr><tr><td>Medium</td><td>RiskPostTradeHandler 未接線</td><td>成交後風控僅策略內同步</td></tr><tr><td>Low</td><td>EVENT_CHAIN_SMILE_SCREEN 預設關閉</td><td>量化補齊後不會自動選股</td></tr><tr><td>Low</td><td>新掛牌主動 ETF 可能 no_data_yet</td><td>共識持股暫時低估</td></tr></tbody></table>
+  <table><thead><tr><th>嚴重度</th><th>缺口</th><th>影響</th></tr></thead><tbody><tr><td>Done (P0)</td><td>Ask snapshot adapters（technical／chips／etf／macro）</td><td>已由 bot.ask_adapters 只讀接通；仍需本地先有快取</td></tr><tr><td>Done (P0)</td><td>ETF 評分遮蔽 fundamental／etf_consensus</td><td>compute_scorecard(instrument_type=etf) 已分流</td></tr><tr><td>Critical</td><td>DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地</td><td>as_of／來源譜系／跨格式 SSOT 不完整</td></tr><tr><td>High</td><td>Ask 仍缺 news／web_search 即時 adapters</td><td>新聞類問題仍依賴預寫 memory／evidence</td></tr><tr><td>High</td><td>planned prompts 未接線：classify_news、supply_chain_impact、analyst_real_sentiment</td><td>文件與實作預期落差</td></tr><tr><td>High</td><td>EtfFollowStrategy 略過 LLM 進場閘</td><td>與「AI 閘門統一」敘事不一致</td></tr><tr><td>High</td><td>當沖 trade 模式預設封存</td><td>易誤以為 bot 會實單，實際僅訊號</td></tr><tr><td>Medium</td><td>Ask 問答當下不抓外網</td><td>本地未先跑 watch-data-fetch／pipeline 則證據空</td></tr><tr><td>Medium</td><td>RiskPostTradeHandler 未接線</td><td>成交後風控僅策略內同步</td></tr><tr><td>Low</td><td>EVENT_CHAIN_SMILE_SCREEN 預設關閉</td><td>量化補齊後不會自動選股</td></tr><tr><td>Low</td><td>新掛牌主動 ETF 可能 no_data_yet</td><td>共識持股暫時低估</td></tr></tbody></table>
 
-  <h3>6. 建議優先順序</h3>
+  <h3>6. 建議優先順序（後續）</h3>
   <ol>
-    <li>為 Ask 接上只讀 adapters（從 build_snapshot／chips cache／ETF／macro 組 evidence，不在 ask 內呼叫 Gemini 抓料）</li>
-    <li>評分依商品類型分流（ETF 關閉或降權不適用因子）</li>
     <li>planned prompts：接線或移入 archive，並更新 prompts/README</li>
     <li>文件標註 EtfFollow 故意略過 LLM entry，或改為可選閘門</li>
+    <li>落地 DATA_ARCHITECTURE_REDESIGN（as_of／retrieved_at）與 RiskPostTradeHandler</li>
+    <li>Ask news／web adapters（仍維持問答不現場爬網時，改為讀本地新聞快取）</li>
   </ol>
 </section>
 
