@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Stock Bot 系統能力盤點報告</title>
+<style>
+:root {
+  --bg: #0f1419;
+  --panel: #1a2332;
+  --text: #e7ecf3;
+  --muted: #9aa8bc;
+  --accent: #3d9cf0;
+  --border: #2a3a4f;
+  --ok: #3ecf8e;
+  --warn: #f0b429;
+  --bad: #f07178;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.55;
+}
+header {
+  padding: 2rem 1.5rem 1rem; border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #152033 0%, var(--bg) 100%);
+}
+header h1 { margin: 0 0 .4rem; font-size: 1.75rem; }
+header p { margin: .2rem 0; color: var(--muted); }
+nav.toc {
+  position: sticky; top: 0; z-index: 5;
+  background: rgba(15,20,25,.92); backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--border);
+  padding: .6rem 1.5rem; display: flex; flex-wrap: wrap; gap: .6rem 1rem;
+}
+nav.toc a { color: var(--accent); text-decoration: none; font-size: .92rem; }
+main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+section { margin: 2rem 0; padding: 1.25rem; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+h2 { margin-top: 0; border-bottom: 1px solid var(--border); padding-bottom: .4rem; }
+h3 { color: #c5d4e8; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: .8rem 0; }
+th, td { border: 1px solid var(--border); padding: .45rem .55rem; text-align: left; vertical-align: top; }
+th { background: #243247; }
+code { background: #0c1017; padding: .1rem .35rem; border-radius: 4px; font-size: .86em; }
+.tag { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .75rem; }
+.tag-trade { background: #5a2d2d; }
+.tag-research { background: #2d4a5a; }
+.tag-data { background: #2d5a3d; }
+.tag-validate { background: #5a4a2d; }
+.tag-dashboard { background: #3d2d5a; }
+.tag-other { background: #444; }
+.tag-active { background: #1f5a3a; }
+.tag-planned { background: #5a4a1f; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: .75rem; }
+.card { background: #121a26; border: 1px solid var(--border); border-radius: 8px; padding: .9rem; }
+.card .n { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+.card .l { color: var(--muted); font-size: .85rem; }
+pre.mermaid { background: #0c1017; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+.note { color: var(--muted); font-size: .9rem; }
+footer { text-align: center; color: var(--muted); padding: 2rem; font-size: .85rem; }
+ul { padding-left: 1.2rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stock Bot 系統能力盤點報告</h1>
+  <p>產生時間：2026-09-16 12:12:07 +0800（Asia/Taipei）</p>
+  <p class="note">本報告由 <code>scripts/generate_capability_report.py</code> 自程式碼掃描＋靜態盤點產生；不含任何 API 金鑰。</p>
+</header>
+<nav class="toc">
+  <a href="#summary">1. 摘要</a>
+  <a href="#tools">2. 可用工具</a>
+  <a href="#analysis">3. 分析能力</a>
+  <a href="#flows">4. 流程與判斷</a>
+  <a href="#gaps">5. 缺口</a>
+</nav>
+<main>
+<section id="summary">
+  <h2>1. 摘要</h2>
+  <div class="cards">
+    <div class="card"><div class="n">27</div><div class="l">stock-* CLI</div></div>
+    <div class="card"><div class="n">30</div><div class="l">Dashboard 頁面</div></div>
+    <div class="card"><div class="n">17</div><div class="l">Prompt YAML</div></div>
+    <div class="card"><div class="n">3</div><div class="l">planned 未接線</div></div>
+  </div>
+  <ul>
+    <li>分析主軸：<strong>TickerSnapshot → scorecard</strong>、LLM 研究／簡報、<strong>Ask 證據問答</strong>、微笑曲線選股／回測。</li>
+    <li>執行模式：trade／watch／report；當沖實單預設<strong>封存</strong>（需明確解凍）。</li>
+    <li>資料健康可用 <code>uv run stock-validate</code>；研究入口 <code>stock-auto-research</code>／Dashboard。</li>
+  </ul>
+</section>
+
+<section id="tools">
+  <h2>2. 可用工具</h2>
+  <h3>2.1 CLI（pyproject [project.scripts]）</h3>
+  <table><thead><tr><th>CLI</th><th>模組</th><th>用途</th><th>分類</th></tr></thead><tbody><tr><td><code>stock-bot</code></td><td><code>bot.main:main</code></td><td>依 RUN_MODE 啟動 trade／watch／report 策略生命週期</td><td><span class='tag tag-trade'>trade</span></td></tr><tr><td><code>stock-dashboard</code></td><td><code>bot.dashboard:run</code></td><td>啟動 Streamlit 儀表板</td><td><span class='tag tag-dashboard'>dashboard</span></td></tr><tr><td><code>stock-auto-research</code></td><td><code>bot.auto_research:main</code></td><td>一鍵研究管線：ETF／籌碼／法說／LLM／每日簡報</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-macro-update</code></td><td><code>bot.macro_update:main</code></td><td>抓取美股／台指期／ADR 等跨市場 macro 快照</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-fundamentals-refresh</code></td><td><code>bot.fundamentals_refresh:main</code></td><td>處理基本面慢速補抓佇列</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-intraday</code></td><td><code>bot.intraday_cli:main</code></td><td>今日當沖戰情室管線（題材＋評分＋簡報）</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-nextday</code></td><td><code>bot.next_day_watch_cli:main</code></td><td>明日當沖關注名單（draft／update）</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-preflight</code></td><td><code>bot.preflight_cli:main</code></td><td>交易可行性七區檢查（含封存／憑證／時段）</td><td><span class='tag tag-validate'>validate</span></td></tr><tr><td><code>stock-validate</code></td><td><code>bot.validate_sources:main</code></td><td>公開資料源只讀健康度（link／http／parse）</td><td><span class='tag tag-validate'>validate</span></td></tr><tr><td><code>stock-oddlot-test</code></td><td><code>bot.oddlot_test:main</code></td><td>零股下單煙測（僅模擬環境）</td><td><span class='tag tag-trade'>trade</span></td></tr><tr><td><code>stock-scheduler</code></td><td><code>bot.scheduler:main</code></td><td>背景排程：macro／研究／公司／雲端／歷史／監控</td><td><span class='tag tag-other'>other</span></td></tr><tr><td><code>stock-company-update</code></td><td><code>bot.company_update:main</code></td><td>補齊上市櫃公司基本資料至 SQLite</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-gemini-test</code></td><td><code>bot.gemini_smoke:main</code></td><td>驗證 GEMINI_API_KEY 與最小呼叫</td><td><span class='tag tag-validate'>validate</span></td></tr><tr><td><code>stock-calendar-update</code></td><td><code>bot.conference_calendar_cli:main</code></td><td>更新 MOPS 法說會與全球科技事件行事曆</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-cloud-sync</code></td><td><code>bot.cloud_sync_cli:main</code></td><td>Google Sheets ↔ 本地 SQLite 雙向同步</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-intraday-fetch</code></td><td><code>bot.intraday_fetch_cli:main</code></td><td>以 Shioaji 抓 1 分／tick 寫入 SQLite</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-intraday-backtest</code></td><td><code>bot.intraday_backtest_cli:main</code></td><td>當沖／日 K 量化回測（LLM 名單）</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-history-fetch</code></td><td><code>bot.history_fetch_cli:main</code></td><td>慢速補日 K（顧及 TWSE 限流）</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-smile-backtest</code></td><td><code>bot.smile_curve_backtest_cli:main</code></td><td>微笑曲線日 K 回測</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-smile-screen</code></td><td><code>bot.smile_curve_screener_cli:main</code></td><td>微笑曲線綜合選股（ETF 共識＋回撤＋負擔力）</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-smile-audit</code></td><td><code>bot.smile_curve_audit_cli:main</code></td><td>微笑曲線多情境稽核回測</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-watch-snapshot</code></td><td><code>bot.watch_snapshot:main</code></td><td>只看不買：熱度／熱門個股期貨快照</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-watch-data-fetch</code></td><td><code>bot.watch_data_fetch:main</code></td><td>只看不買：公司／日K／基本面／籌碼／技術／macro 補齊</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-db-backup</code></td><td><code>bot.db_backup_cli:main</code></td><td>stock.db 線上備份（保留策略／標籤）</td><td><span class='tag tag-data'>data</span></td></tr><tr><td><code>stock-calibrate</code></td><td><code>bot.scoring_calibration:main</code></td><td>評分訊號與前瞻報酬校準（只讀，不改權重）</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-memory</code></td><td><code>bot.memory_cli:main</code></td><td>短期／長期記憶查詢、回填、軟刪、提案</td><td><span class='tag tag-research'>research</span></td></tr><tr><td><code>stock-ask</code></td><td><code>bot.ask_cli:main</code></td><td>QueryPlan＋EvidencePack 本地問答（可棄權）</td><td><span class='tag tag-research'>research</span></td></tr></tbody></table>
+  <p class="note">共 27 個已註冊 console script。</p>
+
+  <h3>2.2 Dashboard 頁面</h3>
+  <table><thead><tr><th>頁面</th><th>導覽分組</th></tr></thead><tbody><tr><td>功能總覽</td><td>🔍 研究與分析</td></tr><tr><td>今日當沖戰情室</td><td>🔍 研究與分析</td></tr><tr><td>今日當沖即時追蹤</td><td>🔍 研究與分析</td></tr><tr><td>明日當沖關注</td><td>🔍 研究與分析</td></tr><tr><td>K 線看板</td><td>🔍 研究與分析</td></tr><tr><td>盤中強弱排行</td><td>🔍 研究與分析</td></tr><tr><td>個股總覽</td><td>🔍 研究與分析</td></tr><tr><td>目前持股分析</td><td>🔍 研究與分析</td></tr><tr><td>個股深入分析</td><td>🔍 研究與分析</td></tr><tr><td>自動化管線</td><td>🔍 研究與分析</td></tr><tr><td>美股 / 跨市場</td><td>📡 監控與訊號</td></tr><tr><td>熱門個股期貨</td><td>📡 監控與訊號</td></tr><tr><td>跟單訊號</td><td>📡 監控與訊號</td></tr><tr><td>主動 ETF 追蹤</td><td>📡 監控與訊號</td></tr><tr><td>LLM 法說分析</td><td>📡 監控與訊號</td></tr><tr><td>啟動 / 監控</td><td>⚡ 執行與紀錄</td></tr><tr><td>🛡 風控中心</td><td>⚡ 執行與紀錄</td></tr><tr><td>交易可行性檢查</td><td>⚡ 執行與紀錄</td></tr><tr><td>交易紀錄</td><td>⚡ 執行與紀錄</td></tr><tr><td>報表分析</td><td>⚡ 執行與紀錄</td></tr><tr><td>模擬交易</td><td>⚡ 執行與紀錄</td></tr><tr><td>組態設定</td><td>⚙️ 系統與診斷</td></tr><tr><td>資料庫 / 雲端同步</td><td>⚙️ 系統與診斷</td></tr><tr><td>Prompt 管理</td><td>⚙️ 系統與診斷</td></tr><tr><td>LLM 呼叫紀錄</td><td>⚙️ 系統與診斷</td></tr><tr><td>記憶與證據管理</td><td>⚙️ 系統與診斷</td></tr><tr><td>日誌檢視</td><td>⚙️ 系統與診斷</td></tr><tr><td>通知測試</td><td>⚙️ 系統與診斷</td></tr><tr><td>策略與文件</td><td>⚙️ 系統與診斷</td></tr><tr><td>台股行事曆</td><td>📡 監控與訊號</td></tr></tbody></table>
+
+  <h3>2.3 scripts/ 輔助</h3>
+  <table><thead><tr><th>檔名</th><th>用途</th></tr></thead><tbody><tr><td><code>generate_capability_report.py</code></td><td>輔助腳本</td></tr><tr><td><code>probe_taifex_mis.py</code></td><td>探測 TAIFEX MIS 熱門個股期貨端點</td></tr><tr><td><code>probe_taifex_mis10.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis2.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis3.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis4.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis5.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis6.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis7.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis8.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_mis9.py</code></td><td>TAIFEX MIS 端點／bundle 探測（開發用）</td></tr><tr><td><code>probe_taifex_sockjs.py</code></td><td>探測 TAIFEX SockJS rtCore</td></tr><tr><td><code>scan_price_10.py</code></td><td>從本地 DB 掃描約 10 元價位流動股</td></tr><tr><td><code>scan_price_10_debug.py</code></td><td>MIS 報價解析除錯</td></tr><tr><td><code>scan_price_10_mis.py</code></td><td>TWSE MIS 掃描 8–13 元流動非 ETF</td></tr><tr><td><code>show_price_band_heat.py</code></td><td>列印約 10 元價位熱度排行</td></tr><tr><td><code>start-watch-only.ps1</code></td><td>只看不買一鍵：watch-data-fetch → snapshot → scheduler → dashboard</td></tr></tbody></table>
+</section>
+
+<section id="prompts-live">
+  <h2>2.4 Prompt 清單（掃描 prompts/*.yaml）</h2>
+  <table><thead><tr><th>id</th><th>version</th><th>description</th><th>狀態</th><th>備註</th></tr></thead><tbody><tr><td><code>analyst_real_sentiment</code></td><td>1.0</td><td>外資/賣方研究報告語意 vs 實際買賣超的「真實情緒」反指標分析</td><td><span class='tag tag-planned'>planned</span></td><td></td></tr><tr><td><code>analyze_presentation</code></td><td>1.2</td><td>解析法說會逐字稿/簡報文字，輸出情緒、Capex、毛利率指引、成長驅動、風險等結構化 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>ask_answer</code></td><td>1.0</td><td>!ask 證據限定回答</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>classify_news</code></td><td>1.0</td><td>將 MOPS 重大訊息 / 新聞分類，輸出影響面與情緒</td><td><span class='tag tag-planned'>planned</span></td><td></td></tr><tr><td><code>daily_brief</code></td><td>1.2</td><td>整合 ETF 共識訊號 + 法說會分析 + 籌碼面 + 期貨領先指標，產出當日一頁紙</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>extract_etf_holdings</code></td><td>1.2</td><td>從投信網頁 HTML / PDF 文字抽取主動式 ETF／共同基金持股清單為 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>intraday_brief</code></td><td>1.2</td><td>把今日題材 + 候選股 + 量化分數 整合成「當沖戰情室」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>intraday_live_review</code></td><td>1.1</td><td>Manual intraday live review of LLM-mentioned stocks, using refreshed market data to check whether the morning thesis is still valid.</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>logic_check</code></td><td>1.1</td><td>對比法說語意 (言) 與籌碼面動向 (行)，判斷管理階層是否言行一致</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>next_day_brief</code></td><td>1.1</td><td>把明日預備題材 + 強勢承接 + 事件焦點 + 量化分數，整合成「明日當沖預備清單」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>next_day_radar</code></td><td>1.1</td><td>從盤後新聞 + 今日收盤資料 + 美股盤前/盤中 + 明日法說事件，萃取「明日預備題材 + 強勢承接 + 事件焦點」</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>portfolio_analysis</code></td><td>1.1</td><td>目前持股投組分析 — 以券商庫存與蒐集到的個股資料包為依據產出 LLM 分析</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>query_plan</code></td><td>1.0</td><td>!ask 查詢資源規劃</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>research_ticker</code></td><td>1.2</td><td>個股自動研究 — 整合行事曆、法說原文、量化證據（基本面/籌碼/ETF）、新聞、網搜，輸出 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>supply_chain_impact</code></td><td>1.0</td><td>分析單一美股新聞/財報，輸出對台股供應鏈的具體影響 JSON</td><td><span class='tag tag-planned'>planned</span></td><td></td></tr><tr><td><code>theme_radar</code></td><td>1.0</td><td>從一批今日台股新聞中，萃取 5-8 個「今日熱門題材」並列出最相關台股代號</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>us_market_brief</code></td><td>1.0</td><td>將當日 (或當夜) 美股表現整合為「對台股供應鏈影響」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr></tbody></table>
+</section>
+
+
+<section id="analysis">
+  <h2>3. 分析能力</h2>
+
+  <h3>3.1 決策主軸</h3>
+  <pre class="mermaid">flowchart TB
+  subgraph ingest [Ingestion]
+    FF[fundamentals]
+    CF[chips]
+    CD[distribution]
+    TC[technicals]
+    EC[etf_consensus]
+    AL[auto_llm]
+  end
+  subgraph hub [Hub]
+    TV[ticker_view.build_snapshot]
+  end
+  subgraph decide [Decide]
+    SC[scoring.compute_scorecard]
+    LG[llm_gate]
+    ASK[ask + evidence]
+  end
+  FF --&gt; TV
+  CF --&gt; TV
+  CD --&gt; TV
+  TC --&gt; TV
+  EC --&gt; TV
+  AL --&gt; TV
+  TV --&gt; SC
+  SC --&gt; LG
+  TV --&gt; ASK
+</pre>
+
+  <h3>3.2 量化評分（scoring）</h3>
+  <p>四時間框架：<code>day_trade</code>／<code>short_term</code>／<code>mid_term</code>／<code>long_term</code>。
+  九因子：llm_sentiment、logic、etf_consensus、chips、technical、fundamental、distribution、us_market、risk。
+  缺資料因子會從加權剔除（不以中性 50 稀釋）。</p>
+  <table><thead><tr><th>分數門檻</th><th>動作</th></tr></thead><tbody><tr><td>≥ 78</td><td>STRONG_BUY</td></tr><tr><td>≥ 62</td><td>BUY</td></tr><tr><td>≥ 45</td><td>HOLD</td></tr><tr><td>≥ 30</td><td>REDUCE</td></tr><tr><td>&lt; 30</td><td>SELL</td></tr></tbody></table>
+  <p>覆蓋率 &lt; 50% 強制 HOLD；&lt; 80% 時 STRONG_BUY 降為 BUY。進場／停損／停利為建議價，非 bot 環境參數。</p>
+
+  <h3>3.3 技術／基本面／籌碼</h3>
+  <ul>
+    <li><strong>technicals</strong>：日 K、MA／MACD／RSI／KD／布林、technical_score、16 種單根 K 型態</li>
+    <li><strong>fundamentals</strong>：月營收 YoY／MoM、PER／PBR／殖利率、股利、季報 EPS／三率</li>
+    <li><strong>chips</strong>：三大法人／融資券／借券／鉅額 N 日彙總</li>
+    <li><strong>chip_distribution</strong>：TDCC 大戶 vs 散戶結構分數</li>
+    <li><strong>etf_consensus</strong>：主動 ETF 共識持有、新建倉、加碼訊號</li>
+  </ul>
+
+  <h3>3.4 LLM 與 Prompt</h3>
+  <p>主路徑 <code>research_ticker</code> 已含 presentation_block（法說原文）與 quant_block（基本面／籌碼／ETF）。
+  言行反查走 <code>logic_check</code>。Ask 另用 <code>query_plan</code>／<code>ask_answer</code>。</p>
+
+  <h3>3.5 敘事管線</h3>
+  <ul>
+    <li><strong>intraday</strong>：theme_radar → 候選池 → day_trade 評分 → intraday_brief</li>
+    <li><strong>next_day</strong>：催化＋強度 → next_day_radar → 合成分數 → next_day_brief</li>
+    <li><strong>data_pipeline</strong>：ETF → 共識 → 籌碼 → 法說 LLM → daily_brief／us_market_brief</li>
+    <li><strong>portfolio_analysis</strong>：持股證據包 → LLM 操作建議（不下單）</li>
+    <li><strong>smile_curve*</strong>：階梯加碼策略、選股、回測／稽核</li>
+  </ul>
+
+  <h3>3.6 Ask／記憶</h3>
+  <p>流程：QueryPlan → 本地 EvidencePack → ask_answer → evidence_id 驗證 → 通過才回答；失敗則「我不確定」。
+  僅寫入短期記憶；長期需品質通過或管理者核准。Ask <strong>不會</strong>在問答當下打外網 API。</p>
+</section>
+
+
+<section id="flows">
+  <h2>4. 流程與判斷</h2>
+
+  <h3>4.1 Scheduler</h3>
+  <pre class="mermaid">flowchart TB
+  T[stock-scheduler tick] --&gt; J{{Due jobs}}
+  J --&gt; M[macro-update]
+  J --&gt; F[fundamentals-refresh]
+  J --&gt; R[auto-research]
+  J --&gt; C[company-update]
+  J --&gt; CS[cloud-sync]
+  J --&gt; H[history-fetch]
+  J --&gt; I[intraday]
+  J --&gt; N[nextday]
+  J --&gt; W[watch-snapshot]
+  T --&gt; SM{{Supervise monitor}}
+  SM --&gt;|盤中| BOT[stock-bot]
+  SM --&gt;|盤後| STOP[stop bot]
+</pre>
+
+  <h3>4.2 自動研究管線</h3>
+  <pre class="mermaid">flowchart LR
+  A[stock-auto-research] --&gt; B[calendar]
+  B --&gt; C[ETF holdings]
+  C --&gt; D[consensus signals]
+  D --&gt; E[chips]
+  E --&gt; F[LLM + logic_check]
+  F --&gt; G[auto_llm per focus]
+  G --&gt; H[macro + us_brief]
+  H --&gt; I[daily_brief]
+  I --&gt; O[pipeline_runs]
+</pre>
+
+  <h3>4.3 Bot 進出場判斷</h3>
+  <pre class="mermaid">flowchart TB
+  MAIN[main.py] --&gt; ARCH{{day_trading archived?}}
+  ARCH --&gt;|trade 且未解凍| ERR[拒絕啟動]
+  ARCH --&gt;|ok| ST{{STRATEGY_TYPE}}
+  ST --&gt;|configurable| CS[ConfigurableStrategy]
+  ST --&gt;|etf_follow| EF[EtfFollowStrategy]
+  CS --&gt; ER[entry_rules 漲幅區間]
+  ER --&gt; LG[LlmGate.allow_entry]
+  LG --&gt; RG[RiskGuard]
+  EF --&gt; SIG[ETF follow 訊號]
+  SIG --&gt; RG
+  RG --&gt; ORD[下單或虛擬 would-buy]
+  CS --&gt; EX[出場: 停損/移動停利/目標/收盤]
+  EX --&gt; LGX[LlmGate.allow_exit 可選]
+</pre>
+  <p><strong>重要差異</strong>：<code>ConfigurableStrategy</code> 進場必經 <code>LlmGate</code>；
+  <code>EtfFollowStrategy</code> 進場<strong>不經</strong> LLM 閘門，僅經 RiskGuard。</p>
+
+  <table><thead><tr><th>層級</th><th>判斷點</th><th>結果</th></tr></thead><tbody><tr><td>產品安全</td><td>day_trading_archived 且 RUN_MODE=trade</td><td>拒絕實單（需 DAY_TRADING_UNFREEZE）</td></tr><tr><td>模式</td><td>trade / watch / report</td><td>實單 vs 虛擬訊號</td></tr><tr><td>進場價格</td><td>in_entry_range / 回落買回</td><td>是否觸發進場嘗試</td></tr><tr><td>LLM 進場</td><td>sentiment、day_trade 分數門檻</td><td>允許或封鎖（僅 configurable）</td></tr><tr><td>風控</td><td>資金／張數／黑名單／日損／冷卻／漲幅上限</td><td>調整數量或封鎖</td></tr><tr><td>出場</td><td>停損、移動停利、目標賣、收盤清倉</td><td>觸發賣出</td></tr><tr><td>LLM 出場閘</td><td>llm_sell_gate_enabled</td><td>可能擋賣（停損／收盤可 bypass）</td></tr><tr><td>評分</td><td>四框架 scorecard</td><td>儀表板與當沖排序；非直接下單</td></tr><tr><td>Ask</td><td>evidence_ids 驗證失敗</td><td>棄權「我不確定」</td></tr></tbody></table>
+
+  <h3>4.4 Ask 流程</h3>
+  <pre class="mermaid">flowchart TB
+  Q[使用者問題] --&gt; P[plan_query]
+  P --&gt; E[收集本地證據]
+  E --&gt; PACK[EvidencePack + freshness]
+  PACK --&gt; A{{可用證據且有 Gemini?}}
+  A --&gt;|是| ANS[ask_answer]
+  ANS --&gt; V[answer_verifier]
+  V --&gt;|通過| OK[回答 + 短期記憶]
+  V --&gt;|失敗| NO[我不確定]
+  A --&gt;|否| NO
+</pre>
+</section>
+
+
+<section id="gaps">
+  <h2>5. 缺少／缺口</h2>
+  <table><thead><tr><th>嚴重度</th><th>缺口</th><th>影響</th></tr></thead><tbody><tr><td>Critical</td><td>Ask 缺 technical／chips／etf／macro／news／web 的 EvidencePack adapters</td><td>領域問題常 no_evidence（例如「00929 現在買嗎」無法引用技術／籌碼）</td></tr><tr><td>Critical</td><td>DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地</td><td>as_of／來源譜系／跨格式 SSOT 不完整</td></tr><tr><td>High</td><td>planned prompts 未接線：classify_news、supply_chain_impact、analyst_real_sentiment</td><td>文件與實作預期落差</td></tr><tr><td>High</td><td>ETF 與個股共用同一套 scorecard 權重</td><td>對 00929 類商品 fundamental／etf_consensus 意義偏差</td></tr><tr><td>High</td><td>EtfFollowStrategy 略過 LLM 進場閘</td><td>與「AI 閘門統一」敘事不一致</td></tr><tr><td>High</td><td>當沖 trade 模式預設封存</td><td>易誤以為 bot 會實單，實際僅訊號</td></tr><tr><td>Medium</td><td>Ask 問答當下不抓外網</td><td>本地未先跑 watch-data-fetch／pipeline 則證據空</td></tr><tr><td>Medium</td><td>籌碼／技術 freshness 策略未完善</td><td>「最新」查詢易標 stale 或缺欄位</td></tr><tr><td>Medium</td><td>RiskPostTradeHandler 未接線</td><td>成交後風控僅策略內同步</td></tr><tr><td>Low</td><td>EVENT_CHAIN_SMILE_SCREEN 預設關閉</td><td>量化補齊後不會自動選股</td></tr><tr><td>Low</td><td>新掛牌主動 ETF 可能 no_data_yet</td><td>共識持股暫時低估</td></tr></tbody></table>
+
+  <h3>6. 建議優先順序</h3>
+  <ol>
+    <li>為 Ask 接上只讀 adapters（從 build_snapshot／chips cache／ETF／macro 組 evidence，不在 ask 內呼叫 Gemini 抓料）</li>
+    <li>評分依商品類型分流（ETF 關閉或降權不適用因子）</li>
+    <li>planned prompts：接線或移入 archive，並更新 prompts/README</li>
+    <li>文件標註 EtfFollow 故意略過 LLM entry，或改為可選閘門</li>
+  </ol>
+</section>
+
+
+</main>
+<footer>
+  重新產生：<code>uv run python scripts/generate_capability_report.py</code>
+</footer>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "dark" });
+</script>
+</body>
+</html>

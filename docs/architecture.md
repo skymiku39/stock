@@ -1,5 +1,11 @@
 # 系統架構技術文件
 
+> **資料重設計基線**：請先參考 [DATA_ARCHITECTURE_REDESIGN.md](DATA_ARCHITECTURE_REDESIGN.md)。
+> **品質、分類與校準實作進度**：請參考 [DATA_QUALITY_IMPLEMENTATION.md](DATA_QUALITY_IMPLEMENTATION.md)。
+> **短期／長期記憶規格**：請參考 [MEMORY_STORAGE.md](MEMORY_STORAGE.md)。
+> **系統能力盤點（工具／分析／流程／缺口）**：請開啟 [reports/system_capability_report.html](reports/system_capability_report.html)（可用 `uv run python scripts/generate_capability_report.py` 重產）。
+> 本文件描述目前實作；新文件描述保留相容性的目標資料邊界與遷移順序。
+
 ## 概述
 
 Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表分析的台股策略機器人，核心採用 **Market Source / Broker / Strategy** 分層架構，讓行情來源、下單執行與策略邏輯彼此解耦。
