@@ -177,7 +177,12 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(
         "LLM_GATE_ENABLED", "啟用 LLM 閘門", "LLM 分析", "bool",
         default="false",
-        help="LLM 評分達標才允許進場",
+        help="LLM 評分達標才允許進場（ConfigurableStrategy；EtfFollow 另見 ETF_FOLLOW_LLM_GATE）",
+    ),
+    EnvField(
+        "ETF_FOLLOW_LLM_GATE", "ETF跟單也套用LLM進場閘", "LLM 分析", "bool",
+        default="false",
+        help="false=ETF共識跟單略過LLM進場閘（預設）；true=與 configurable 相同走 allow_entry",
     ),
     EnvField(
         "LLM_MIN_SENTIMENT_SCORE", "進場最低 sentiment", "LLM 分析", "float",
@@ -390,6 +395,13 @@ ENV_FIELDS: List[EnvField] = [
         "AUTO_LLM_ALLOW_LEGACY", "允許 auto_llm 舊版 fallback", "LLM 分析", "bool",
         default="false",
         help="僅在無 research_ticker prompt 時退回 analyze_presentation；預設關閉",
+    ),
+
+    # 記憶管理
+    EnvField(
+        "MEMORY_ADMIN_TOKEN", "記憶管理者 Token", "記憶管理", "password",
+        secret=True,
+        help="設定後，Dashboard 的記憶核准／拒絕／軟刪除才會啟用；留空則唯讀。",
     ),
 
     # 自動化管線

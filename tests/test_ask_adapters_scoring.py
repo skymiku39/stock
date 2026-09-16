@@ -174,3 +174,41 @@ def test_ask_engine_uses_snapshot_adapters(tmp_path: Path) -> None:
     assert "chips" in kinds
     assert "technical" not in result.evidence.missing_resources
     assert "chips" not in result.evidence.missing_resources
+
+
+def test_collect_news_adapter_reads_cache_only(tmp_path: Path) -> None:
+    item = SimpleNamespace(
+        news_id="n1",
+        title="00929 配息公告",
+        summary="將於下周除息",
+        url="https://example.com/n1",
+        published_at="2026-09-16T10:00:00+08:00",
+        source="cnyes",
+        related_tickers=["00929"],
+    )
+    with patch(
+        "bot.news_fetcher.load_cached_news_only",
+        return_value=[item],
+    ) as mock_load:
+        items = collect_snapshot_resource_evidence(
+            "00929",
+            root=tmp_path,
+            resource_needs=["news"],
+        )
+    mock_load.assert_called_once()
+    assert len(items) == 1
+    assert items[0]["kind"] == "news"
+    assert "配息" in items[0]["title"]
+
+
+def test_news_only_skips_snapshot_build(tmp_path: Path) -> None:
+    with patch("bot.ticker_view.build_snapshot") as mock_snap, patch(
+        "bot.news_fetcher.load_cached_news_only",
+        return_value=[],
+    ):
+        collect_snapshot_resource_evidence(
+            "00929",
+            root=tmp_path,
+            resource_needs=["news"],
+        )
+    mock_snap.assert_not_called()

@@ -40,7 +40,7 @@ template: |
 | `planned` | 已設計 YAML，管線尚未接線 |
 | `archived` | 已移至 `prompts/archive/`，不再載入 |
 
-## Active Prompt 清單（12 份）
+## Active Prompt 清單（15 份）
 
 | id | status | 用途 |
 |----|--------|------|
@@ -50,20 +50,19 @@ template: |
 | `daily_brief` | active | 每日盤後簡報，整合所有分析結果 |
 | `us_market_brief` | active | 美股盤後 → 台股早盤影響評估 (Markdown 簡報) |
 | `research_ticker` | active | 全自動個股研究（行事曆+法說原文+量化證據+搜尋+新聞 → 結構化 JSON） |
+| `classify_news` | active | MOPS 重大訊息分類（`auto_llm` enrichment → `classified_materials`） |
 | `portfolio_analysis` | active | 投組持倉分析與操作建議 |
 | `theme_radar` | active | 盤中題材雷達 |
 | `intraday_brief` | active | 當沖戰情簡報（停損停利為人工參考，非 bot 參數） |
 | `intraday_live_review` | active | 盤中即時檢討與推演 |
 | `next_day_radar` | active | 明日當沖關注雷達 |
 | `next_day_brief` | active | 明日當沖戰情簡報 |
+| `query_plan` | active | `!ask` 查詢規劃（資源需求／freshness） |
+| `ask_answer` | active | `!ask` 證據限定回答 |
 
-## Planned Prompt 清單（3 份）
+## Planned Prompt 清單
 
-| id | status | 用途 | 備註 |
-|----|--------|------|------|
-| `classify_news` | planned | 重大訊息分類與影響面評分 | `mops_scraper` 已就緒，待接 `gemini_call` |
-| `supply_chain_impact` | planned | 美股財報/新聞 → 對應台股供應鏈影響 JSON | `supply_chain.json` 已就緒 |
-| `analyst_real_sentiment` | planned | 外資報告語意 vs 實際買賣超（`discrepancy` 欄位） | 見 glossary 獨立流程說明 |
+目前無（未接線的設計稿請直接放 `prompts/archive/` 並註明原因）。
 
 ## Archived Prompt
 

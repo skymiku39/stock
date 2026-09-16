@@ -93,6 +93,8 @@ ConfigurableStrategy 的回落買回窗口延伸至 `EXIT_TIME` 前。
 - 須有 ETF 共識訊號（新建倉 ≥ `ETF_MIN_CONSENSUS_NEW`、加碼 ≥ `ETF_MIN_CONSENSUS_ADD`）
 - 漲幅：`-1% < pct_chg < ETF_MAX_PCT_CHG_ON_ENTRY`（預設 4%）
 - 張數依共識強度可 boost×2；資金上限用 `effective_fund_cap()`（含手續費）
+- **LLM 進場閘（刻意預設關閉）**：跟單以共識訊號為主，**預設不經** `llm_gate.allow_entry()`。
+  若要與 `ConfigurableStrategy` 對齊，設 `ETF_FOLLOW_LLM_GATE=true`（且通常同時啟用 `LLM_GATE_ENABLED=true`）。
 
 ---
 
@@ -200,7 +202,8 @@ ConfigurableStrategy 的回落買回窗口延伸至 `EXIT_TIME` 前。
 | `ALLOW_SAME_DAY_REENTRY` | true | 策略層允許當日再進（受冷卻限制） |
 | `REENTRY_COOLDOWN_SECONDS` | 0 | RiskGuard 再進場冷卻（秒） |
 | `REBUY_TARGET_NET_PCT` | 2.0 | 回落買回淨利門檻（ConfigurableStrategy） |
-| `LLM_GATE_ENABLED` | false | LLM 進場閘門 |
+| `LLM_GATE_ENABLED` | false | LLM 進場閘門（ConfigurableStrategy） |
+| `ETF_FOLLOW_LLM_GATE` | false | EtfFollow 亦套用 LLM 進場閘（通常搭配上一項） |
 | `LLM_SELL_GATE_ENABLED` | false | 賣出前 AI 分析 |
 | `LLM_SELL_GATE_BYPASS_STOP_LOSS` | true | 停損略過 AI 賣出閘門 |
 | `LLM_SELL_GATE_BYPASS_CLOSE` | true | 收盤全出略過 AI 賣出閘門 |

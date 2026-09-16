@@ -64,7 +64,7 @@ ul { padding-left: 1.2rem; }
 <body>
 <header>
   <h1>Stock Bot 系統能力盤點報告</h1>
-  <p>產生時間：2026-09-16 12:26:33 +0800（Asia/Taipei）</p>
+  <p>產生時間：2026-09-16 12:37:43 +0800（Asia/Taipei）</p>
   <p class="note">本報告由 <code>scripts/generate_capability_report.py</code> 自程式碼掃描＋靜態盤點產生；不含任何 API 金鑰。</p>
 </header>
 <nav class="toc">
@@ -80,8 +80,8 @@ ul { padding-left: 1.2rem; }
   <div class="cards">
     <div class="card"><div class="n">27</div><div class="l">stock-* CLI</div></div>
     <div class="card"><div class="n">30</div><div class="l">Dashboard 頁面</div></div>
-    <div class="card"><div class="n">17</div><div class="l">Prompt YAML</div></div>
-    <div class="card"><div class="n">3</div><div class="l">planned 未接線</div></div>
+    <div class="card"><div class="n">15</div><div class="l">Prompt YAML</div></div>
+    <div class="card"><div class="n">0</div><div class="l">planned 未接線</div></div>
   </div>
   <ul>
     <li>分析主軸：<strong>TickerSnapshot → scorecard</strong>、LLM 研究／簡報、<strong>Ask 證據問答</strong>、微笑曲線選股／回測。</li>
@@ -105,7 +105,7 @@ ul { padding-left: 1.2rem; }
 
 <section id="prompts-live">
   <h2>2.4 Prompt 清單（掃描 prompts/*.yaml）</h2>
-  <table><thead><tr><th>id</th><th>version</th><th>description</th><th>狀態</th><th>備註</th></tr></thead><tbody><tr><td><code>analyst_real_sentiment</code></td><td>1.0</td><td>外資/賣方研究報告語意 vs 實際買賣超的「真實情緒」反指標分析</td><td><span class='tag tag-planned'>planned</span></td><td></td></tr><tr><td><code>analyze_presentation</code></td><td>1.2</td><td>解析法說會逐字稿/簡報文字，輸出情緒、Capex、毛利率指引、成長驅動、風險等結構化 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>ask_answer</code></td><td>1.0</td><td>!ask 證據限定回答</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>classify_news</code></td><td>1.0</td><td>將 MOPS 重大訊息 / 新聞分類，輸出影響面與情緒</td><td><span class='tag tag-planned'>planned</span></td><td></td></tr><tr><td><code>daily_brief</code></td><td>1.2</td><td>整合 ETF 共識訊號 + 法說會分析 + 籌碼面 + 期貨領先指標，產出當日一頁紙</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>extract_etf_holdings</code></td><td>1.2</td><td>從投信網頁 HTML / PDF 文字抽取主動式 ETF／共同基金持股清單為 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>intraday_brief</code></td><td>1.2</td><td>把今日題材 + 候選股 + 量化分數 整合成「當沖戰情室」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>intraday_live_review</code></td><td>1.1</td><td>Manual intraday live review of LLM-mentioned stocks, using refreshed market data to check whether the morning thesis is still valid.</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>logic_check</code></td><td>1.1</td><td>對比法說語意 (言) 與籌碼面動向 (行)，判斷管理階層是否言行一致</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>next_day_brief</code></td><td>1.1</td><td>把明日預備題材 + 強勢承接 + 事件焦點 + 量化分數，整合成「明日當沖預備清單」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>next_day_radar</code></td><td>1.1</td><td>從盤後新聞 + 今日收盤資料 + 美股盤前/盤中 + 明日法說事件，萃取「明日預備題材 + 強勢承接 + 事件焦點」</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>portfolio_analysis</code></td><td>1.1</td><td>目前持股投組分析 — 以券商庫存與蒐集到的個股資料包為依據產出 LLM 分析</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>query_plan</code></td><td>1.0</td><td>!ask 查詢資源規劃</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>research_ticker</code></td><td>1.2</td><td>個股自動研究 — 整合行事曆、法說原文、量化證據（基本面/籌碼/ETF）、新聞、網搜，輸出 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>supply_chain_impact</code></td><td>1.0</td><td>分析單一美股新聞/財報，輸出對台股供應鏈的具體影響 JSON</td><td><span class='tag tag-planned'>planned</span></td><td></td></tr><tr><td><code>theme_radar</code></td><td>1.0</td><td>從一批今日台股新聞中，萃取 5-8 個「今日熱門題材」並列出最相關台股代號</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>us_market_brief</code></td><td>1.0</td><td>將當日 (或當夜) 美股表現整合為「對台股供應鏈影響」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr></tbody></table>
+  <table><thead><tr><th>id</th><th>version</th><th>description</th><th>狀態</th><th>備註</th></tr></thead><tbody><tr><td><code>analyze_presentation</code></td><td>1.2</td><td>解析法說會逐字稿/簡報文字，輸出情緒、Capex、毛利率指引、成長驅動、風險等結構化 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>ask_answer</code></td><td>1.0</td><td>!ask 證據限定回答</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>classify_news</code></td><td>1.0</td><td>將 MOPS 重大訊息 / 新聞分類，輸出影響面與情緒</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>daily_brief</code></td><td>1.2</td><td>整合 ETF 共識訊號 + 法說會分析 + 籌碼面 + 期貨領先指標，產出當日一頁紙</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>extract_etf_holdings</code></td><td>1.2</td><td>從投信網頁 HTML / PDF 文字抽取主動式 ETF／共同基金持股清單為 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>intraday_brief</code></td><td>1.2</td><td>把今日題材 + 候選股 + 量化分數 整合成「當沖戰情室」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>intraday_live_review</code></td><td>1.1</td><td>Manual intraday live review of LLM-mentioned stocks, using refreshed market data to check whether the morning thesis is still valid.</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>logic_check</code></td><td>1.1</td><td>對比法說語意 (言) 與籌碼面動向 (行)，判斷管理階層是否言行一致</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>next_day_brief</code></td><td>1.1</td><td>把明日預備題材 + 強勢承接 + 事件焦點 + 量化分數，整合成「明日當沖預備清單」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>next_day_radar</code></td><td>1.1</td><td>從盤後新聞 + 今日收盤資料 + 美股盤前/盤中 + 明日法說事件，萃取「明日預備題材 + 強勢承接 + 事件焦點」</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>portfolio_analysis</code></td><td>1.1</td><td>目前持股投組分析 — 以券商庫存與蒐集到的個股資料包為依據產出 LLM 分析</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>query_plan</code></td><td>1.0</td><td>!ask 查詢資源規劃</td><td><span class='tag tag-active'>active</span></td><td>程式已接線（README 可能滯後）</td></tr><tr><td><code>research_ticker</code></td><td>1.2</td><td>個股自動研究 — 整合行事曆、法說原文、量化證據（基本面/籌碼/ETF）、新聞、網搜，輸出 JSON</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>theme_radar</code></td><td>1.0</td><td>從一批今日台股新聞中，萃取 5-8 個「今日熱門題材」並列出最相關台股代號</td><td><span class='tag tag-active'>active</span></td><td></td></tr><tr><td><code>us_market_brief</code></td><td>1.0</td><td>將當日 (或當夜) 美股表現整合為「對台股供應鏈影響」中文簡報</td><td><span class='tag tag-active'>active</span></td><td></td></tr></tbody></table>
 </section>
 
 
@@ -220,15 +220,17 @@ ul { padding-left: 1.2rem; }
   ER --&gt; LG[LlmGate.allow_entry]
   LG --&gt; RG[RiskGuard]
   EF --&gt; SIG[ETF follow 訊號]
-  SIG --&gt; RG
+  SIG --&gt; LG2[LlmGate.allow_entry 可選]
+  LG2 --&gt; RG[RiskGuard]
   RG --&gt; ORD[下單或虛擬 would-buy]
   CS --&gt; EX[出場: 停損/移動停利/目標/收盤]
   EX --&gt; LGX[LlmGate.allow_exit 可選]
 </pre>
   <p><strong>重要差異</strong>：<code>ConfigurableStrategy</code> 進場必經 <code>LlmGate</code>；
-  <code>EtfFollowStrategy</code> 進場<strong>不經</strong> LLM 閘門，僅經 RiskGuard。</p>
+  <code>EtfFollowStrategy</code> 預設略過 LLM 進場閘（共識訊號為主），設
+  <code>ETF_FOLLOW_LLM_GATE=true</code> 可對齊。</p>
 
-  <table><thead><tr><th>層級</th><th>判斷點</th><th>結果</th></tr></thead><tbody><tr><td>產品安全</td><td>day_trading_archived 且 RUN_MODE=trade</td><td>拒絕實單（需 DAY_TRADING_UNFREEZE）</td></tr><tr><td>模式</td><td>trade / watch / report</td><td>實單 vs 虛擬訊號</td></tr><tr><td>進場價格</td><td>in_entry_range / 回落買回</td><td>是否觸發進場嘗試</td></tr><tr><td>LLM 進場</td><td>sentiment、day_trade 分數門檻</td><td>允許或封鎖（僅 configurable）</td></tr><tr><td>風控</td><td>資金／張數／黑名單／日損／冷卻／漲幅上限</td><td>調整數量或封鎖</td></tr><tr><td>出場</td><td>停損、移動停利、目標賣、收盤清倉</td><td>觸發賣出</td></tr><tr><td>LLM 出場閘</td><td>llm_sell_gate_enabled</td><td>可能擋賣（停損／收盤可 bypass）</td></tr><tr><td>評分</td><td>四框架 scorecard</td><td>儀表板與當沖排序；非直接下單</td></tr><tr><td>Ask</td><td>evidence_ids 驗證失敗</td><td>棄權「我不確定」</td></tr></tbody></table>
+  <table><thead><tr><th>層級</th><th>判斷點</th><th>結果</th></tr></thead><tbody><tr><td>產品安全</td><td>day_trading_archived 且 RUN_MODE=trade</td><td>拒絕實單（需 DAY_TRADING_UNFREEZE）</td></tr><tr><td>模式</td><td>trade / watch / report</td><td>實單 vs 虛擬訊號</td></tr><tr><td>進場價格</td><td>in_entry_range / 回落買回</td><td>是否觸發進場嘗試</td></tr><tr><td>LLM 進場</td><td>sentiment、day_trade 分數門檻</td><td>允許或封鎖（configurable；EtfFollow 可選）</td></tr><tr><td>風控</td><td>資金／張數／黑名單／日損／冷卻／漲幅上限</td><td>調整數量或封鎖</td></tr><tr><td>出場</td><td>停損、移動停利、目標賣、收盤清倉</td><td>觸發賣出</td></tr><tr><td>LLM 出場閘</td><td>llm_sell_gate_enabled</td><td>可能擋賣（停損／收盤可 bypass）</td></tr><tr><td>評分</td><td>四框架 scorecard</td><td>儀表板與當沖排序；非直接下單</td></tr><tr><td>Ask</td><td>evidence_ids 驗證失敗</td><td>棄權「我不確定」</td></tr></tbody></table>
 
   <h3>4.4 Ask 流程</h3>
   <pre class="mermaid">flowchart TB
@@ -247,14 +249,13 @@ ul { padding-left: 1.2rem; }
 
 <section id="gaps">
   <h2>5. 缺少／缺口</h2>
-  <table><thead><tr><th>嚴重度</th><th>缺口</th><th>影響</th></tr></thead><tbody><tr><td>Done (P0)</td><td>Ask snapshot adapters（technical／chips／etf／macro）</td><td>已由 bot.ask_adapters 只讀接通；仍需本地先有快取</td></tr><tr><td>Done (P0)</td><td>ETF 評分遮蔽 fundamental／etf_consensus</td><td>compute_scorecard(instrument_type=etf) 已分流</td></tr><tr><td>Critical</td><td>DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地</td><td>as_of／來源譜系／跨格式 SSOT 不完整</td></tr><tr><td>High</td><td>Ask 仍缺 news／web_search 即時 adapters</td><td>新聞類問題仍依賴預寫 memory／evidence</td></tr><tr><td>High</td><td>planned prompts 未接線：classify_news、supply_chain_impact、analyst_real_sentiment</td><td>文件與實作預期落差</td></tr><tr><td>High</td><td>EtfFollowStrategy 略過 LLM 進場閘</td><td>與「AI 閘門統一」敘事不一致</td></tr><tr><td>High</td><td>當沖 trade 模式預設封存</td><td>易誤以為 bot 會實單，實際僅訊號</td></tr><tr><td>Medium</td><td>Ask 問答當下不抓外網</td><td>本地未先跑 watch-data-fetch／pipeline 則證據空</td></tr><tr><td>Medium</td><td>RiskPostTradeHandler 未接線</td><td>成交後風控僅策略內同步</td></tr><tr><td>Low</td><td>EVENT_CHAIN_SMILE_SCREEN 預設關閉</td><td>量化補齊後不會自動選股</td></tr><tr><td>Low</td><td>新掛牌主動 ETF 可能 no_data_yet</td><td>共識持股暫時低估</td></tr></tbody></table>
+  <table><thead><tr><th>嚴重度</th><th>缺口</th><th>影響</th></tr></thead><tbody><tr><td>Done (P0)</td><td>Ask snapshot adapters（technical／chips／etf／macro）</td><td>已由 bot.ask_adapters 只讀接通；仍需本地先有快取</td></tr><tr><td>Done (P0)</td><td>ETF 評分遮蔽 fundamental／etf_consensus</td><td>compute_scorecard(instrument_type=etf) 已分流</td></tr><tr><td>Done (P1)</td><td>Ask 本地 news adapter</td><td>讀 data/news 日快取；web_search 仍不在問答當下抓網</td></tr><tr><td>Done (P1)</td><td>classify_news 接線；其餘 planned 歸檔</td><td>auto_llm → classified_materials；supply_chain／analyst 移 archive</td></tr><tr><td>Done (P1)</td><td>EtfFollow 可選 LLM 進場閘</td><td>ETF_FOLLOW_LLM_GATE=true 可對齊 ConfigurableStrategy</td></tr><tr><td>Critical</td><td>DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地</td><td>as_of／來源譜系／跨格式 SSOT 不完整</td></tr><tr><td>High</td><td>當沖 trade 模式預設封存</td><td>易誤以為 bot 會實單，實際僅訊號</td></tr><tr><td>Medium</td><td>Ask 問答當下不抓外網</td><td>本地未先跑 watch-data-fetch／pipeline 則證據空</td></tr><tr><td>Medium</td><td>Ask web_search adapter 未做</td><td>需即時網搜的問題仍棄權或依賴既有 memory</td></tr><tr><td>Medium</td><td>RiskPostTradeHandler 未接線</td><td>成交後風控僅策略內同步</td></tr><tr><td>Low</td><td>EVENT_CHAIN_SMILE_SCREEN 預設關閉</td><td>量化補齊後不會自動選股</td></tr><tr><td>Low</td><td>新掛牌主動 ETF 可能 no_data_yet</td><td>共識持股暫時低估</td></tr></tbody></table>
 
   <h3>6. 建議優先順序（後續）</h3>
   <ol>
-    <li>planned prompts：接線或移入 archive，並更新 prompts/README</li>
-    <li>文件標註 EtfFollow 故意略過 LLM entry，或改為可選閘門</li>
     <li>落地 DATA_ARCHITECTURE_REDESIGN（as_of／retrieved_at）與 RiskPostTradeHandler</li>
-    <li>Ask news／web adapters（仍維持問答不現場爬網時，改為讀本地新聞快取）</li>
+    <li>Ask web_search：若允許問答當下搜尋，須明確 freshness／品質閘</li>
+    <li>視需求重啟 archive 內 supply_chain_impact／analyst_real_sentiment 管線</li>
   </ol>
 </section>
 

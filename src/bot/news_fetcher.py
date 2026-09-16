@@ -201,6 +201,20 @@ def _save_cache(items: List[NewsItem], date: dt.date, root: Optional[Path]) -> P
     return p
 
 
+def load_cached_news_only(
+    *,
+    root: Optional[Path] = None,
+    date: Optional[dt.date] = None,
+    limit: int = 200,
+) -> List[NewsItem]:
+    """只讀本地日快取，快取不存在時回空清單（不打外網）。"""
+    day = date or now_tw().date()
+    cached = _load_cache(day, root)
+    if not cached:
+        return []
+    return cached[:limit]
+
+
 def fetch_today_news(
     *,
     limit: int = 150,
@@ -248,5 +262,6 @@ __all__ = [
     "NewsItem",
     "fetch_cnyes",
     "fetch_today_news",
+    "load_cached_news_only",
     "news_to_compact_text",
 ]

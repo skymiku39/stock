@@ -56,6 +56,7 @@ from bot.llm_analyzer import (
     logic_check,
     validate_presentation_payload,
 )
+from bot.llm_log import get_call_logger
 from bot.mops_scraper import MaterialInfo, fetch_material_info
 from bot.news_fetcher import NewsItem, fetch_today_news
 from bot.utils import get_logger, mk_folder, now_tw
@@ -900,6 +901,7 @@ def _try_research_ticker(
     web_block: str,
     client: GeminiClient,
     logger: logging.Logger,
+    root: Optional[Path] = None,
     global_upcoming_text: str = "(無)",
     global_recent_text: str = "(無)",
     presentation_block: str = "",
@@ -942,6 +944,7 @@ def _try_research_ticker(
     raw, info = gemini_call(
         "research_ticker",
         client=client,
+        root=root,
         metadata={"ticker": ticker, "task": "research_ticker"},
         ticker=ticker,
         name=name or "Unknown",
@@ -1091,6 +1094,7 @@ def auto_analyze_ticker(
         past=calendar_data.get("past") or [],
         materials=materials, news=news, web_block=web_block,
         client=client, logger=log,
+        root=root,
         global_upcoming_text=str(calendar_data.get("global_upcoming_text") or "(無)"),
         global_recent_text=str(calendar_data.get("global_recent_text") or "(無)"),
         presentation_block=pipeline_text,
@@ -1159,7 +1163,12 @@ def auto_analyze_ticker(
             log.info("[%s] 自動素材不足 (%d 字)，跳過 LLM", ticker, len(composed))
             return None
         analysis = analyze_presentation(
-            composed, ticker=ticker, client=client, logger=log,
+            composed,
+            ticker=ticker,
+            client=client,
+            call_logger=get_call_logger(root=root),
+            root=root,
+            logger=log,
         )
         if not analysis.enabled:
             return None
@@ -1212,7 +1221,14 @@ def auto_analyze_ticker(
 
     if chips is not None and analysis is not None:
         try:
-            lc = logic_check(analysis, chips, client=client, logger=log)
+            lc = logic_check(
+                analysis,
+                chips,
+                client=client,
+                call_logger=get_call_logger(root=root),
+                root=root,
+                logger=log,
+            )
             payload["logic_check"] = {
                 "verdict": lc.verdict,
                 "reasoning": lc.reasoning,
@@ -1223,6 +1239,21 @@ def auto_analyze_ticker(
             }
         except Exception:
             log.exception("[%s] auto logic_check 失敗", ticker)
+
+    if materials:
+        try:
+            from bot.news_classify import classify_material_batch
+
+            payload["classified_materials"] = classify_material_batch(
+                ticker,
+                materials,
+                client=client,
+                logger=log,
+                limit=3,
+            )
+        except Exception:
+            log.exception("[%s] classify_news enrichment 失敗", ticker)
+            payload["classified_materials"] = []
 
     try:
         _save_cache(ticker, root, payload)
@@ -1470,7 +1501,7 @@ def _name_hint_for(ticker: str, root: Path) -> str:
         pass
     try:
         from bot.stock_db import get_db
-        info = get_db().get_stock_info(ticker)
+        info = get_db(root=root).get_stock_info(ticker)
         if info and info.name:
             return info.name
     except Exception:

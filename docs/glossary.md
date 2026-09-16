@@ -72,7 +72,7 @@ Bot 的 `STOP_LOSS_PCT`、`TAKE_PROFIT_PCT`、`TRAILING_STOP_PCT` 皆以**淨利
 | `STRATEGY_TYPE` | 類別 | 說明 |
 |-----------------|------|------|
 | `configurable`（預設） | `ConfigurableStrategy` | env 漲幅區間 + LLM 閘門 + 回落買回 |
-| `etf_follow` | `EtfFollowStrategy` | 主動 ETF 共識跟單 |
+| `etf_follow` | `EtfFollowStrategy` | 主動 ETF 共識跟單（預設略過 LLM 進場閘；`ETF_FOLLOW_LLM_GATE=true` 可對齊） |
 
 > 舊值 `default` 會自動對應為 `configurable`。
 

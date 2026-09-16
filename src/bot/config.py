@@ -226,6 +226,8 @@ class Settings(BaseSettings):
     llm_sell_gate_bypass_afternoon: bool = True
     llm_refresh_on_exit: bool = True
     llm_sell_min_confidence: float = 0.5
+    # ETF 跟單策略預設不經 LLM 進場閘（共識訊號為主）；true 時與 configurable 對齊
+    etf_follow_llm_gate: bool = False
     # 盤中定時 + 成交事件觸發：刷新 auto_llm 並產出 intraday_live_review
     llm_intraday_review_enabled: bool = False
     llm_intraday_review_interval_min: int = 60
@@ -290,6 +292,10 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     # 允許 auto_llm 在無 research_ticker prompt 時退回 analyze_presentation
     auto_llm_allow_legacy: bool = False
+
+    # --- 記憶管理 ---
+    # Dashboard 未設定 token 時維持唯讀；實際管理操作仍需明確驗證。
+    memory_admin_token: str = ""
 
     # --- 自動化研究管線 ---
     pipeline_chip_lookback_days: int = 5

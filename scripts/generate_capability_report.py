@@ -178,12 +178,14 @@ def mermaid(code: str) -> str:
 
 
 PLANNED_PROMPTS = {
-    "classify_news",
-    "supply_chain_impact",
-    "analyst_real_sentiment",
+    # 空集合：未接線設計稿改放 prompts/archive/
 }
 
-ACTIVE_EXTRA = {"query_plan", "ask_answer"}  # 程式已接線，README 可能滯後
+ACTIVE_EXTRA = {
+    "query_plan",
+    "ask_answer",
+    "classify_news",
+}  # 程式已接線，README 可能滯後
 
 
 def section_analysis() -> str:
@@ -311,13 +313,15 @@ def section_flows() -> str:
   ER --> LG[LlmGate.allow_entry]
   LG --> RG[RiskGuard]
   EF --> SIG[ETF follow 訊號]
-  SIG --> RG
+  SIG --> LG2[LlmGate.allow_entry 可選]
+  LG2 --> RG[RiskGuard]
   RG --> ORD[下單或虛擬 would-buy]
   CS --> EX[出場: 停損/移動停利/目標/收盤]
   EX --> LGX[LlmGate.allow_exit 可選]
 ''')}
   <p><strong>重要差異</strong>：<code>ConfigurableStrategy</code> 進場必經 <code>LlmGate</code>；
-  <code>EtfFollowStrategy</code> 進場<strong>不經</strong> LLM 閘門，僅經 RiskGuard。</p>
+  <code>EtfFollowStrategy</code> 預設略過 LLM 進場閘（共識訊號為主），設
+  <code>ETF_FOLLOW_LLM_GATE=true</code> 可對齊。</p>
 
   {table(
       ["層級", "判斷點", "結果"],
@@ -325,7 +329,7 @@ def section_flows() -> str:
           ["產品安全", "day_trading_archived 且 RUN_MODE=trade", "拒絕實單（需 DAY_TRADING_UNFREEZE）"],
           ["模式", "trade / watch / report", "實單 vs 虛擬訊號"],
           ["進場價格", "in_entry_range / 回落買回", "是否觸發進場嘗試"],
-          ["LLM 進場", "sentiment、day_trade 分數門檻", "允許或封鎖（僅 configurable）"],
+          ["LLM 進場", "sentiment、day_trade 分數門檻", "允許或封鎖（configurable；EtfFollow 可選）"],
           ["風控", "資金／張數／黑名單／日損／冷卻／漲幅上限", "調整數量或封鎖"],
           ["出場", "停損、移動停利、目標賣、收盤清倉", "觸發賣出"],
           ["LLM 出場閘", "llm_sell_gate_enabled", "可能擋賣（停損／收盤可 bypass）"],
@@ -361,18 +365,20 @@ def section_gaps() -> str:
            "已由 bot.ask_adapters 只讀接通；仍需本地先有快取"],
           ["Done (P0)", "ETF 評分遮蔽 fundamental／etf_consensus",
            "compute_scorecard(instrument_type=etf) 已分流"],
+          ["Done (P1)", "Ask 本地 news adapter",
+           "讀 data/news 日快取；web_search 仍不在問答當下抓網"],
+          ["Done (P1)", "classify_news 接線；其餘 planned 歸檔",
+           "auto_llm → classified_materials；supply_chain／analyst 移 archive"],
+          ["Done (P1)", "EtfFollow 可選 LLM 進場閘",
+           "ETF_FOLLOW_LLM_GATE=true 可對齊 ConfigurableStrategy"],
           ["Critical", "DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地",
            "as_of／來源譜系／跨格式 SSOT 不完整"],
-          ["High", "Ask 仍缺 news／web_search 即時 adapters",
-           "新聞類問題仍依賴預寫 memory／evidence"],
-          ["High", "planned prompts 未接線：classify_news、supply_chain_impact、analyst_real_sentiment",
-           "文件與實作預期落差"],
-          ["High", "EtfFollowStrategy 略過 LLM 進場閘",
-           "與「AI 閘門統一」敘事不一致"],
           ["High", "當沖 trade 模式預設封存",
            "易誤以為 bot 會實單，實際僅訊號"],
           ["Medium", "Ask 問答當下不抓外網",
            "本地未先跑 watch-data-fetch／pipeline 則證據空"],
+          ["Medium", "Ask web_search adapter 未做",
+           "需即時網搜的問題仍棄權或依賴既有 memory"],
           ["Medium", "RiskPostTradeHandler 未接線",
            "成交後風控僅策略內同步"],
           ["Low", "EVENT_CHAIN_SMILE_SCREEN 預設關閉",
@@ -384,10 +390,9 @@ def section_gaps() -> str:
 
   <h3>6. 建議優先順序（後續）</h3>
   <ol>
-    <li>planned prompts：接線或移入 archive，並更新 prompts/README</li>
-    <li>文件標註 EtfFollow 故意略過 LLM entry，或改為可選閘門</li>
     <li>落地 DATA_ARCHITECTURE_REDESIGN（as_of／retrieved_at）與 RiskPostTradeHandler</li>
-    <li>Ask news／web adapters（仍維持問答不現場爬網時，改為讀本地新聞快取）</li>
+    <li>Ask web_search：若允許問答當下搜尋，須明確 freshness／品質閘</li>
+    <li>視需求重啟 archive 內 supply_chain_impact／analyst_real_sentiment 管線</li>
   </ol>
 </section>
 """

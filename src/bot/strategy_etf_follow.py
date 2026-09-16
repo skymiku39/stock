@@ -176,17 +176,32 @@ class EtfFollowStrategy(BaseStrategy):
             and symbol not in self.positions
         ):
             if -1.0 < pct_chg < self.max_pct_chg_on_entry:
-                lots = self._calc_lots(price, sig)
-                if lots > 0:
-                    self.logger.info(
-                        "[跟單進場] %s %s 漲幅 %.2f%% price=%.2f lots=%d (%s)",
-                        symbol, sig.name, pct_chg, price, lots, sig.note,
-                    )
-                    self._place_buy(
-                        symbol, price, lots,
-                        custom_field=sig.signal_type[:6],
-                        pct_chg=pct_chg,
-                    )
+                llm_summary = ""
+                allow_buy = True
+                if getattr(self.settings, "etf_follow_llm_gate", False):
+                    verdict = self.llm_gate.allow_entry(symbol, price, pct_chg)
+                    if not verdict.allowed:
+                        self.logger.info(
+                            "[跟單進場拒絕] %s 漲幅 %.2f%% — LLM 閘門: %s",
+                            symbol, pct_chg, verdict.reason,
+                        )
+                        allow_buy = False
+                    else:
+                        llm_summary = verdict.summary
+                if allow_buy:
+                    lots = self._calc_lots(price, sig)
+                    if lots > 0:
+                        self.logger.info(
+                            "[跟單進場] %s %s 漲幅 %.2f%% price=%.2f lots=%d (%s)%s",
+                            symbol, sig.name, pct_chg, price, lots, sig.note,
+                            f" llm={llm_summary}" if llm_summary else "",
+                        )
+                        self._place_buy(
+                            symbol, price, lots,
+                            custom_field=sig.signal_type[:6],
+                            pct_chg=pct_chg,
+                            llm_gate=llm_summary,
+                        )
 
         # ---- 出場 (停損 / 移動停利 / 收盤全出) ----
         if cur_time < self.settings.exit_time:

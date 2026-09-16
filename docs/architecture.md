@@ -189,7 +189,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 | 類型 | 類別 | 進場特色 |
 |------|------|----------|
 | `configurable`（預設） | `ConfigurableStrategy` | env 漲幅區間 + LLM 進場閘門 + 回落買回 |
-| `etf_follow` | `EtfFollowStrategy` | ETF 共識訊號 + 漲幅區間 |
+| `etf_follow` | `EtfFollowStrategy` | ETF 共識訊號 + 漲幅區間（預設不經 LLM 進場閘；見 `ETF_FOLLOW_LLM_GATE`） |
 
 **出場規則（BaseStrategy 共用，皆以淨利 % 判斷）**：
 - 使用者目標賣出：若 `SELL_PROFIT_TARGETS` 有該檔門檻，須達標才允許自動賣出
