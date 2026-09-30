@@ -37,6 +37,7 @@ from urllib.parse import quote_plus, urlparse
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, mk_folder, now_tw
 
 try:
@@ -69,6 +70,7 @@ class SearchResult:
     source: str = ""           # ddg / google_news
     site: str = ""             # 例 "udn.com"
     published_at: str = ""     # ISO；只有新聞才有
+    source_document_id: str = ""
 
 
 @dataclass
@@ -80,6 +82,7 @@ class PageContent:
     text: str = ""
     fetched_at: str = ""
     error: str = ""
+    source_document_id: str = ""
 
 
 @dataclass
@@ -147,6 +150,35 @@ def _site_from_url(url: str) -> str:
         return ""
 
 
+def _materialize_search_results(
+    root: Optional[Path],
+    source_document_id: str,
+    results: List[SearchResult],
+    logger: logging.Logger,
+) -> None:
+    """把已保存的搜尋 raw response 接到 research/evidence/claim layer。"""
+    if root is None or not source_document_id or not results:
+        return
+    try:
+        from bot.web_search_research import materialize_web_search_slice
+
+        result = materialize_web_search_slice(
+            root=Path(root),
+            source_document_id=source_document_id,
+            items=results,
+        )
+        if result.status == "failed":
+            logger.warning(
+                "搜尋 research slice 失敗 source=%s: %s",
+                source_document_id,
+                result.error,
+            )
+    except Exception:
+        # 搜尋 raw 與 adapter 結果仍可用；slice 失敗必須可由 audit 發現，
+        # 但不能把一次 research 寫入失敗偽裝成「沒有搜尋結果」。
+        logger.exception("搜尋 research slice 寫入失敗 source=%s", source_document_id)
+
+
 # ----------------------------------------------------------------------
 # DuckDuckGo HTML 搜尋
 # ----------------------------------------------------------------------
@@ -161,6 +193,7 @@ def search_web(
     timeout: int = 12,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> List[SearchResult]:
     """走 DuckDuckGo HTML 端點抓搜尋結果。
 
@@ -169,6 +202,7 @@ def search_web(
     log = logger or get_logger("web-search")
     sess = session or _new_session()
     results: List[SearchResult] = []
+    raw_document_id = ""
     try:
         resp = sess.post(
             _DDG_HTML_URL,
@@ -178,6 +212,22 @@ def search_web(
         if resp.status_code != 200:
             log.warning("DDG HTTP %d for q=%r", resp.status_code, query)
             return []
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                raw_document = SourceRegistry(Path(root)).capture_document(
+                    "duckduckgo_search",
+                    resp.content,
+                    source_url=_DDG_HTML_URL,
+                    source_ref=query,
+                    title=f"DuckDuckGo 搜尋: {query}",
+                    kind="search_response",
+                    suffix="html",
+                    mime_type="text/html; charset=utf-8",
+                    metadata={"query": query, "max_results": max_results},
+                )
+                raw_document_id = raw_document.document_id
+            except Exception:
+                log.debug("DuckDuckGo raw 保存失敗", exc_info=True)
         html_text = resp.text
     except Exception:
         log.exception("DDG 搜尋失敗 q=%r", query)
@@ -197,7 +247,7 @@ def search_web(
                 continue
             results.append(SearchResult(
                 title=title, url=href, snippet=snippet,
-                source="ddg", site=_site_from_url(href),
+                source="ddg", site=_site_from_url(href), source_document_id=raw_document_id,
             ))
             if len(results) >= max_results:
                 break
@@ -214,11 +264,12 @@ def search_web(
                 continue
             results.append(SearchResult(
                 title=title, url=href, snippet=snippet,
-                source="ddg", site=_site_from_url(href),
+                source="ddg", site=_site_from_url(href), source_document_id=raw_document_id,
             ))
             if len(results) >= max_results:
                 break
 
+    _materialize_search_results(root, raw_document_id, results, log)
     log.info("DDG q=%r -> %d 筆", query, len(results))
     return results
 
@@ -239,16 +290,34 @@ def search_news(
     timeout: int = 12,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> List[SearchResult]:
     """走 Google News RSS 抓相關新聞。免 API key。"""
     log = logger or get_logger("web-search")
     sess = session or _new_session()
     url = _GOOGLE_NEWS_RSS.format(q=quote_plus(query))
+    raw_document_id = ""
     try:
         resp = sess.get(url, timeout=timeout)
         if resp.status_code != 200:
             log.warning("Google News HTTP %d for q=%r", resp.status_code, query)
             return []
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                raw_document = SourceRegistry(Path(root)).capture_document(
+                    "google_news_rss",
+                    resp.content,
+                    source_url=url,
+                    source_ref=query,
+                    title=f"Google News RSS: {query}",
+                    kind="search_response",
+                    suffix="xml",
+                    mime_type="application/rss+xml",
+                    metadata={"query": query, "max_results": max_results},
+                )
+                raw_document_id = raw_document.document_id
+            except Exception:
+                log.debug("Google News raw 保存失敗", exc_info=True)
         xml_text = resp.text
     except Exception:
         log.exception("Google News 抓取失敗 q=%r", query)
@@ -280,9 +349,11 @@ def search_news(
             source="google_news",
             site=_clean_text(source) or _site_from_url(link),
             published_at=published_iso,
+            source_document_id=raw_document_id,
         ))
         if len(results) >= max_results:
             break
+    _materialize_search_results(root, raw_document_id, results, log)
     log.info("Google News q=%r -> %d 筆", query, len(results))
     return results
 
@@ -308,6 +379,7 @@ def fetch_page_text(
     timeout: int = 12,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> PageContent:
     """抓網頁的主要文字 (僅取 <article>/<main>/<body> 中明顯段落)。"""
     log = logger or get_logger("web-search")
@@ -318,6 +390,22 @@ def fetch_page_text(
         if resp.status_code != 200:
             content.error = f"HTTP {resp.status_code}"
             return content
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                source_document = SourceRegistry(Path(root)).capture_document(
+                    "web_page",
+                    resp.content,
+                    source_url=url,
+                    source_ref=url,
+                    title=url,
+                    kind="page_response",
+                    suffix="html",
+                    mime_type="text/html; charset=utf-8",
+                    metadata={"url": url, "max_chars": max_chars},
+                )
+                content.source_document_id = source_document.document_id
+            except Exception:
+                log.debug("網頁原始回應保存失敗: %s", url, exc_info=True)
         resp.encoding = resp.apparent_encoding or "utf-8"
         body = resp.text
     except Exception as e:
@@ -451,13 +539,17 @@ def research_ticker(
     seen_urls: set[str] = set()
 
     for q in queries:
-        for r in search_news(q, max_results=max_results_per_query, session=sess, logger=log):
+        for r in search_news(
+            q, max_results=max_results_per_query, session=sess, logger=log, root=root,
+        ):
             if r.url in seen_urls:
                 continue
             seen_urls.add(r.url)
             all_results.append(r)
         time.sleep(0.5)
-        for r in search_web(q, max_results=max_results_per_query, session=sess, logger=log):
+        for r in search_web(
+            q, max_results=max_results_per_query, session=sess, logger=log, root=root,
+        ):
             if r.url in seen_urls:
                 continue
             seen_urls.add(r.url)
@@ -473,7 +565,7 @@ def research_ticker(
         host = _site_from_url(r.url)
         if any(b in host for b in ("twitter.com", "facebook.com", "youtube.com", "tiktok.com")):
             continue
-        page = fetch_page_text(r.url, session=sess, logger=log)
+        page = fetch_page_text(r.url, session=sess, logger=log, root=root)
         if page.text:
             pages.append(page)
         if len(pages) >= max_pages:

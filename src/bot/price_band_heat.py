@@ -19,10 +19,13 @@ from bot.market_movers import (
     MIS_INDEX_URL,
     MoverRow,
     _ex_ch_for_batch,
+    _parse_mis_response,
     _parse_mis_items,
     _session,
+    filter_current_mis_rows,
     list_scan_tickers,
 )
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, now_tw
 
 DEFAULT_PRICE_LOW = 9.0
@@ -46,6 +49,8 @@ class PriceBandHeatRow:
     market_volume_rank: int = 0
     tick2_pct: Optional[float] = None
     quote_time: str = ""
+    quote_date: str = ""
+    price_basis: str = ""
     in_watchlist: bool = False
 
 
@@ -59,6 +64,8 @@ class PriceBandHeatResult:
     band_count: int = 0
     batch_count: int = 0
     duration_sec: float = 0.0
+    source_date: str = ""
+    stale_count: int = 0
     rows: List[PriceBandHeatRow] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
@@ -111,7 +118,32 @@ def _scan_all_quotes(
                 params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
                 timeout=20,
             )
-            merged.update(_parse_mis_items(resp.json().get("msgArray") or []))
+            if root is not None and getattr(resp, "content", b""):
+                try:
+                    as_of = now_tw().date().isoformat()
+                    SourceRegistry(Path(root)).capture_document(
+                        "twse_mis_price_band",
+                        resp.content,
+                        source_url=MIS_API_URL,
+                        source_ref=f"{as_of}:batch-{idx + 1}",
+                        title=f"TWSE MIS 價格帶行情批次 {idx + 1}",
+                        kind="http_response",
+                        suffix="json",
+                        mime_type=str(
+                            getattr(resp, "headers", {}).get("Content-Type", "")
+                            or "application/json"
+                        ),
+                        as_of=as_of,
+                        quality_status=(
+                            "ok"
+                            if 200 <= int(getattr(resp, "status_code", 200)) < 300
+                            else "invalid"
+                        ),
+                        metadata={"batch_index": idx, "batch_size": len(batch)},
+                    )
+                except Exception:
+                    logger.debug("TWSE MIS 價格帶 raw 保存失敗", exc_info=True)
+            merged.update(_parse_mis_items(_parse_mis_response(resp)))
         except Exception as exc:  # noqa: BLE001
             msg = f"批次 {idx + 1}/{len(batches)} 失敗: {exc}"
             logger.warning(msg)
@@ -142,10 +174,12 @@ def fetch_price_band_heat(
     high = max(price_low, price_high)
     watch_set = set(watch_symbols or DEFAULT_WATCH_SYMBOLS)
 
+    fetched_at = now_tw()
     result = PriceBandHeatResult(
-        asof=now_tw().isoformat(timespec="seconds"),
+        asof=fetched_at.isoformat(timespec="seconds"),
         price_low=low,
         price_high=high,
+        source_date=fetched_at.date().isoformat(),
     )
     sess = session or _session()
     merged, scanned, batch_count, errors = _scan_all_quotes(
@@ -159,6 +193,11 @@ def fetch_price_band_heat(
     result.scanned = scanned
     result.batch_count = batch_count
     result.errors.extend(errors)
+    merged, result.stale_count = filter_current_mis_rows(merged, fetched_at.date())
+    if result.stale_count:
+        result.errors.append(
+            f"已忽略 {result.stale_count} 筆非 {result.source_date} 的 MIS 報價"
+        )
     result.quoted = sum(1 for r in merged.values() if r.price is not None)
 
     by_volume = sorted(
@@ -187,6 +226,8 @@ def fetch_price_band_heat(
             market_volume_rank=market_rank.get(row.ticker, 0),
             tick2_pct=_tick2_pct(row.price),
             quote_time=row.quote_time,
+            quote_date=row.quote_date,
+            price_basis=row.price_basis,
             in_watchlist=row.ticker in watch_set,
         ))
 

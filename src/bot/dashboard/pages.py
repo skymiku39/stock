@@ -23,6 +23,7 @@ from bot.env_io import (  # noqa: E402
     EnvField,
     env_path,
     grouped_fields,
+    llm_provider_ready,
     load_env,
     save_env,
     validate,
@@ -77,6 +78,7 @@ from bot.stock_db import (  # noqa: E402
     StockDB,
     StockInfo,
     WatchlistRow,
+    backup_stock_db,
     default_db_path,
     get_db,
     reset_db_singleton,
@@ -109,6 +111,7 @@ from bot.dashboard.common import (
     _safe_read_csv,
     _ticker_local_data_summary,
 )
+from bot.dashboard.memory_page import page_memory_admin  # noqa: E402
 
 
 # ======================================================================
@@ -137,13 +140,13 @@ FEATURE_GRID = [
     ("言行反查", "用籌碼面驗證管理階層是否言行一致 (出貨/吸籌)"),
     ("Prompt 版本化管理", "所有 LLM prompt 集中於 prompts/*.yaml，可在 UI 直接編輯"),
     ("LLM 呼叫全紀錄", "每次 LLM 呼叫的 input/output/延遲/tokens 寫入 JSONL 供審計"),
-    ("ETF 持股自動抓取", "依 URL 配置 HTTP 下載 + Gemini 自動抽取持股 JSON"),
+    ("ETF 持股自動抓取", "依 URL 配置 HTTP 下載 + deterministic parser，必要時才用 Gemini fallback"),
     ("籌碼面自動拉取", "TWSE OpenAPI 自動抓三大法人/借券/融資/鉅額交易"),
     ("一鍵研究管線", "ETF×籌碼×法說×LLM×每日簡報全部串連執行"),
     ("評分量表系統", "九個 factor × 四時間框架 (當沖/短/中/長) 加權，自動產出建議"),
     ("個股總覽 Watchlist", "表格式列出多檔股票，依時間框分數排序篩選"),
     ("目前持股分析", "用本地成交紀錄彙總 FIFO 成本、市值、損益與曝險權重"),
-    ("個股深入分析", "單檔股票六分頁：分析、原資料、分析數據、購買策略、現況、歷史"),
+    ("個股深入分析", "單檔股票十一分頁：分析、基本面、技術面、籌碼面、股利政策、季報 Q1-Q4、美股連動、原始資料、購買策略、目前狀況、歷史狀況"),
 ]
 
 MODES = [
@@ -256,7 +259,11 @@ def page_overview() -> None:
     if q5.button("跟單訊號", use_container_width=True):
         st.session_state.page = "跟單訊號"
         st.rerun()
-    if q6.button("主動 ETF 追蹤 🤖", use_container_width=True, help="此頁的「立即抓取所有」會呼叫 Gemini。"):
+    if q6.button(
+        "主動 ETF 追蹤 🤖",
+        use_container_width=True,
+        help="先使用來源專用 deterministic parser；只有 parser 無法核對時才需要 Gemini fallback。",
+    ):
         st.session_state.page = "主動 ETF 追蹤"
         st.rerun()
     if q7.button("🤖 LLM 法說分析", use_container_width=True, help="此頁所有「用 Gemini 分析 / 執行反查」按鈕都會呼叫 Gemini。"):
@@ -770,6 +777,7 @@ def page_preflight() -> None:
                     S(),
                     do_real_login=do_login,
                     test_ca_activate=test_ca and do_login,
+                    project_root=PROJECT_ROOT,
                 )
                 st.session_state["preflight_report"] = report_to_dict(report)
             except Exception as e:
@@ -883,9 +891,10 @@ def page_simulation() -> None:
     from bot.llm_gate import LlmGate
     from bot.sim_monitor import SIM_TEMPLATES, fund_state_from_signals, load_risk_state
 
-    env_values = load_env()
+    project_env = env_path(PROJECT_ROOT)
+    env_values = load_env(project_env)
     try:
-        settings = Settings()
+        settings = Settings(_env_file=str(project_env))
     except Exception as exc:
         st.error(f"無法載入 Settings: {exc}")
         return
@@ -919,13 +928,13 @@ def page_simulation() -> None:
     with t1:
         if st.button("階段 A: watch 驗證 (1 萬)", use_container_width=True):
             merged = {**env_values, **SIM_TEMPLATES["watch_10k"]}
-            save_env(merged)
+            save_env(merged, project_env)
             st.success("已套用 watch 模板")
             st.rerun()
     with t2:
         if st.button("階段 B: Shioaji 模擬 (1 萬)", use_container_width=True):
             merged = {**env_values, **SIM_TEMPLATES["shioaji_sim_10k"]}
-            save_env(merged)
+            save_env(merged, project_env)
             st.success("已套用 trade+SIMULATION 模板")
             st.rerun()
 
@@ -977,8 +986,8 @@ def page_simulation() -> None:
                 "快取時間": snap.fetched_at or "-",
             })
         st.dataframe(pd.DataFrame(gate_rows), use_container_width=True)
-        if not settings.gemini_api_key:
-            st.caption("未設定 GEMINI_API_KEY；請先執行 stock-auto-research --llm-only 預熱快取。")
+        if not settings.llm_enabled:
+            st.caption("目前未設定可用的 LLM 提供者；請先設定 LLM_PROVIDER 與端點。")
 
     with tab_risk:
         risk_data = load_risk_state(risk_path)
@@ -1340,11 +1349,11 @@ def page_etf_tracker() -> None:
     else:
         st.info("此 ETF 尚無對應日期的持股檔。可在下方匯入 / 編輯。")
 
-    with st.expander("自動從投信網頁抓持股 (🤖 使用 Gemini 抽取)", expanded=False):
+    with st.expander("自動從投信網頁抓持股 (deterministic 優先)", expanded=False):
         st.caption(
             "於下方填入每一檔 ETF 的官方持股頁 URL (或留空關閉)，"
-            "按「🤖 立即抓取所有」會：HTTP 下載 → 轉純文字 → **呼叫 Gemini "
-            "`extract_etf_holdings` prompt (消耗 LLM)** → 存為當日 CSV。"
+            "按「立即抓取所有」會：HTTP 下載 → 保存 raw → 優先使用來源專用 parser "
+            "→ 存為當日 CSV；只有 parser 契約失敗時才會使用 Gemini `extract_etf_holdings`。"
         )
         edited_rows = []
         for e in etfs:
@@ -1371,49 +1380,53 @@ def page_etf_tracker() -> None:
             st.rerun()
 
         if cf.button(
-            "🤖 立即抓取所有 (有 URL 的)",
+            "立即抓取所有 (有 URL 的)",
             type="primary",
             key="fetch_all",
             help=(
-                "對每檔有 URL 的 ETF 逐一呼叫 Gemini `extract_etf_holdings` "
-                "從 HTML 抽出結構化持股 JSON。每檔約 1 次 LLM call。"
+                "每檔先嘗試 deterministic parser；只有來源頁無法通過契約時，"
+                "才會呼叫 Gemini `extract_etf_holdings`。"
                 "\n\n" + LLM_HINT_DIRECT
             ),
         ):
             env_values = load_env()
             api_key = env_values.get("GEMINI_API_KEY", "")
             model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
-            if not api_key:
-                st.error("請先在「組態設定」填入 GEMINI_API_KEY")
-            else:
-                from bot.etf_holdings_fetcher import fetch_all_active_etfs
-                from bot.llm_analyzer import GeminiClient
+            llm_ready = llm_provider_ready(env_values)
+            from bot.etf_holdings_fetcher import fetch_all_active_etfs
+            from bot.llm_analyzer import GeminiClient
 
-                client = GeminiClient(api_key=api_key, model=model)
-                status = st.status("抓取 ETF 持股", expanded=True)
-                status.write(f"準備處理 {len(etfs_with_url)} 檔有 URL 的 ETF。")
-                status.write("每檔會下載來源頁面，並呼叫 Gemini 抽取結構化持股。")
-                try:
-                    results = fetch_all_active_etfs(
-                        client, root=PROJECT_ROOT,
-                    )
-                    status.update(
-                        label=f"ETF 持股抓取完成：{len(results)} 檔",
-                        state="complete",
-                        expanded=False,
-                    )
-                except Exception as exc:
-                    status.update(label="ETF 持股抓取失敗", state="error", expanded=True)
-                    raise exc
-                rows = [{
+            client = GeminiClient(api_key=api_key, model=model, root=PROJECT_ROOT)
+            status = st.status("抓取 ETF 持股", expanded=True)
+            status.write(f"準備處理 {len(etfs_with_url)} 檔有 URL 的 ETF。")
+            status.write(
+                "先使用 deterministic parser；"
+                + ("parser 失敗時可使用所選 LLM fallback。" if llm_ready
+                   else "未設定 LLM，parser 失敗的來源會保留 raw 並標記未完成。")
+            )
+            try:
+                results = fetch_all_active_etfs(
+                    client, root=PROJECT_ROOT,
+                )
+                status.update(
+                    label=f"ETF 持股抓取完成：{len(results)} 檔",
+                    state="complete",
+                    expanded=False,
+                )
+            except Exception as exc:
+                status.update(label="ETF 持股抓取失敗", state="error", expanded=True)
+                raise exc
+            rows = [{
                     "代號": r.etf.symbol,
                     "名稱": r.etf.name,
                     "成功": r.success,
                     "持股數": r.holdings_count,
                     "錯誤": r.error,
+                    "Research": r.research_status,
+                    "Research錯誤": r.research_error,
                     "存檔": str(r.saved_path) if r.saved_path else "",
                 } for r in results]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     with st.expander("匯入 / 編輯持股 CSV", expanded=False):
         st.caption(
@@ -1744,7 +1757,7 @@ def _render_earnings_source_panel(
                         from bot.auto_llm import patch_material_detail_in_cache
                         from bot.mops_scraper import fetch_material_detail
                         with st.spinner("自 MOPS 抓取詳情…"):
-                            text = fetch_material_detail(detail_url)
+                            text = fetch_material_detail(detail_url, root=PROJECT_ROOT)
                         if text:
                             st.session_state[cache_key] = text
                             patch_material_detail_in_cache(
@@ -1795,7 +1808,7 @@ def _render_earnings_source_panel(
         st.text(preview or "(無)")
 
 
-def _render_auto_research_tab(api_key: str, model: str) -> None:
+def _render_auto_research_tab(api_key: str, model: str, llm_ready: bool) -> None:
     """LLM 法說分析頁 → 「🤖 自動研究」分頁的內容。
 
     使用者只需要輸入個股代號 → 一鍵自動跑完
@@ -1848,7 +1861,7 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
 
     btn_run = st.button(
         "🤖 開始自動研究", type="primary",
-        disabled=not api_key, key="auto_research_run",
+        disabled=not llm_ready, key="auto_research_run",
     )
     if btn_run:
         tickers: List[str] = []
@@ -1873,7 +1886,7 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
         from bot.auto_llm import auto_research_ticker
         from bot.llm_analyzer import GeminiClient
 
-        client = GeminiClient(api_key=api_key, model=model)
+        client = GeminiClient(api_key=api_key, model=model, root=PROJECT_ROOT)
         results: List[Dict] = []
         progress = st.progress(
             0.0,
@@ -2064,7 +2077,12 @@ def page_llm_analysis() -> None:
 
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
-    model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = (
+        env_values.get("CODEX_APP_SERVER_MODEL", "gpt-6-sol")
+        if env_values.get("LLM_PROVIDER", "gemini") == "codex_app_server"
+        else env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
+    )
+    llm_ready = llm_provider_ready(env_values)
 
     try:
         from bot.conference_calendar import (
@@ -2086,15 +2104,15 @@ def page_llm_analysis() -> None:
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        f"Gemini API Key: {_badge('已設定', 'green') if api_key else _badge('未設定', 'gray')}",
+        f"LLM 提供者: {_badge(env_values.get('LLM_PROVIDER', 'gemini'), 'green') if llm_ready else _badge('未設定', 'gray')}",
         unsafe_allow_html=True,
     )
     c2.markdown(f"模型: `{model}`")
     c3.markdown(f"行事曆快取: `{cal_last or '尚未更新'}`")
 
-    if not api_key:
+    if not llm_ready:
         st.warning(
-            "請先到「組態設定」頁填入 `GEMINI_API_KEY`。"
+            "請先到「組態設定」頁設定可用的 LLM 提供者。"
             "可在 https://aistudio.google.com 免費取得。"
         )
 
@@ -2106,7 +2124,7 @@ def page_llm_analysis() -> None:
     ])
 
     with tab_auto:
-        _render_auto_research_tab(api_key, model)
+        _render_auto_research_tab(api_key, model, llm_ready)
 
     with tab_paste:
         # ------ 自動載入貼文字分析結果 ------
@@ -2128,12 +2146,12 @@ def page_llm_analysis() -> None:
         run = st.button(
             "🤖 用 Gemini 分析",
             type="primary",
-            disabled=not (api_key and text),
+            disabled=not (llm_ready and text),
             help=LLM_HINT_DIRECT,
         )
         if run:
             from bot.llm_analyzer import GeminiClient, analyze_presentation
-            client = GeminiClient(api_key=api_key, model=model)
+            client = GeminiClient(api_key=api_key, model=model, root=PROJECT_ROOT)
             with st.spinner("Gemini 正在解析貼上的法說內容，並輸出結構化 JSON..."):
                 analysis = analyze_presentation(text, ticker=ticker, client=client)
             st.session_state["last_llm_analysis"] = analysis
@@ -2231,7 +2249,7 @@ def page_llm_analysis() -> None:
                                 )
                                 with st.spinner("下載中…"):
                                     pt = download_presentation(
-                                        e.presentation_url, dest,
+                                        e.presentation_url, dest, root=PROJECT_ROOT,
                                     )
                                 if pt and pt.text:
                                     st.session_state[pdf_key] = pt.text
@@ -2261,7 +2279,9 @@ def page_llm_analysis() -> None:
                 from bot.mops_scraper import fetch_material_info, fetch_material_detail
                 mat_stats: Dict[str, Any] = {}
                 with st.spinner(f"自 MOPS 抓取 {mt} 的重大訊息..."):
-                    materials = fetch_material_info(mt, stats=mat_stats)
+                    materials = fetch_material_info(
+                        mt, stats=mat_stats, root=PROJECT_ROOT,
+                    )
                 if materials:
                     oa = int(mat_stats.get("openapi_count", 0))
                     mp = int(mat_stats.get("mops_count", 0))
@@ -2302,7 +2322,9 @@ def page_llm_analysis() -> None:
                                     key=f"mops_mat_detail_{mt}_{i}",
                                 ):
                                     with st.spinner("抓取中…"):
-                                        text = fetch_material_detail(m.detail_url)
+                                        text = fetch_material_detail(
+                                            m.detail_url, root=PROJECT_ROOT,
+                                        )
                                     if text:
                                         st.session_state[mat_key] = text
                                         from bot.auto_llm import (
@@ -2428,7 +2450,7 @@ def page_llm_analysis() -> None:
                     block_trade_net=block,
                     notes=note,
                 )
-                client = GeminiClient(api_key=api_key, model=model) if api_key else None
+                client = GeminiClient(api_key=api_key, model=model, root=PROJECT_ROOT) if llm_ready else None
                 with st.spinner("用籌碼摘要反查 LLM 結論一致性..."):
                     result = logic_check(last_analysis, chips, client)
                 st.session_state["last_logic_check_result"] = result
@@ -2472,10 +2494,11 @@ def page_pipeline() -> None:
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
     model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
+    llm_ready = llm_provider_ready(env_values)
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        f"Gemini API Key: {_badge('已設定', 'green') if api_key else _badge('未設定', 'red')}",
+        f"LLM 提供者: {_badge(env_values.get('LLM_PROVIDER', 'gemini'), 'green') if llm_ready else _badge('未設定', 'red')}",
         unsafe_allow_html=True,
     )
     c2.markdown(f"模型: `{model}`")
@@ -2492,7 +2515,7 @@ def page_pipeline() -> None:
         "抓籌碼面",
         value=env_values.get("PIPELINE_FETCH_CHIPS", "true").lower() == "true",
     )
-    run_llm = c.toggle("LLM 法說分析", value=bool(api_key))
+    run_llm = c.toggle("LLM 法說分析", value=llm_ready)
     gen_brief = d.toggle(
         "產出每日簡報",
         value=env_values.get("PIPELINE_GENERATE_BRIEF", "true").lower() == "true",
@@ -2524,7 +2547,7 @@ def page_pipeline() -> None:
         key="pipe_pres_text",
     )
 
-    will_call_llm = (bool(run_llm) or bool(gen_brief)) and bool(api_key)
+    will_call_llm = (bool(run_llm) or bool(gen_brief)) and llm_ready
     btn_label = (
         "🤖 立即執行管線 (含 LLM 呼叫)"
         if will_call_llm
@@ -2557,16 +2580,19 @@ def page_pipeline() -> None:
                 label="manual_paste",
             ))
 
+        from bot.config import Settings
+        llm_settings = Settings(_env_file=str(PROJECT_ROOT / ".env"))  # type: ignore[call-arg]
         config = PipelineConfig(
             project_root=PROJECT_ROOT,
             gemini_api_key=api_key,
             gemini_model=model,
+            llm_settings=llm_settings,
             focus_tickers=focus,
             chip_lookback_days=int(days),
             fetch_etf_holdings=bool(fetch_etf),
             fetch_chips=bool(fetch_chips),
-            run_llm_analysis=bool(run_llm) and bool(api_key),
-            generate_brief=bool(gen_brief) and bool(api_key),
+            run_llm_analysis=bool(run_llm) and llm_ready,
+            generate_brief=bool(gen_brief) and llm_ready,
             min_consensus_for_focus=int(min_cons),
             presentation_inputs=presentations,
         )
@@ -3716,18 +3742,19 @@ def _render_portfolio_analysis_section(
 
         api_key = env_values.get("GEMINI_API_KEY", "")
         model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
-        if not api_key:
-            st.warning("尚未設定 `GEMINI_API_KEY`，可以先蒐集資料包，但無法產生 LLM 投組分析。")
+        llm_ready = llm_provider_ready(env_values)
+        if not llm_ready:
+            st.warning("尚未設定可用的 LLM 提供者，可以先蒐集資料包，但無法產生 LLM 投組分析。")
         if st.button(
             _llm_button_label("分析目前持股"),
             use_container_width=True,
-            disabled=not api_key,
+            disabled=not llm_ready,
             key="portfolio_llm_analyze",
             help=LLM_HINT_DIRECT,
         ):
             from bot.llm_analyzer import GeminiClient, gemini_call
 
-            client = GeminiClient(api_key=api_key, model=model)
+            client = GeminiClient(api_key=api_key, model=model, root=PROJECT_ROOT)
             with st.spinner("Gemini 正在讀取資料包並分析投組..."):
                 raw, info = gemini_call(
                     "portfolio_analysis",
@@ -4266,9 +4293,9 @@ def page_ticker_detail() -> None:
                 "**LLM 法說分析** — 本次自動 LLM 關閉；若要補分析，請勾選 `自動 LLM` "
                 "或到 `LLM 法說分析` 頁手動貼逐字稿"
             )
-        elif not _le().get("GEMINI_API_KEY"):
+        elif not llm_provider_ready(_le()):
             missing.append(
-                "**LLM 法說分析** — 請到 `組態設定` 填入 `GEMINI_API_KEY`，"
+                "**LLM 法說分析** — 請到 `組態設定` 設定可用的 LLM 提供者，"
                 "再勾選 `自動 LLM`；若有完整法說逐字稿可到 `LLM 法說分析` 頁手動貼"
             )
         else:
@@ -4402,7 +4429,10 @@ def page_ticker_detail() -> None:
                         f"{q.get('price', 0):.2f}",
                         f"{q.get('pct_change', 0):+.2f}%",
                     )
-            st.caption(f"asof: {macro.get('asof_date', '-')} ｜ USDTWD={macro.get('usdtwd', 0):.3f}")
+            st.caption(
+                f"asof: {macro.get('asof_date', '-')} ｜ "
+                f"USDTWD={float(macro.get('usdtwd') or 0):.3f}"
+            )
 
         st.markdown("##### 對應美股客戶 / 供應鏈夥伴")
         if related:
@@ -6269,7 +6299,7 @@ def page_board() -> None:
         "把 `price_history` 整張表推到雲端 worksheet (覆蓋整張)，"
         "另一台電腦或手機可 Pull 回本地。完整設定請見「資料庫 / 雲端同步」頁。"
     )
-    cfg = load_config_from_env()
+    cfg = load_config_from_env(PROJECT_ROOT)
     sc1, sc2, sc3 = st.columns(3)
     sc1.markdown(
         f"雲端狀態: {_badge('啟用', 'green') if cfg.enabled else _badge('未設定', 'gray')}",
@@ -6288,9 +6318,11 @@ def page_board() -> None:
         if sc3.button("⬇ Pull price_history (覆蓋本地)",
                       use_container_width=True, key="board_pull"):
             try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-pull")
                 sync = GoogleSheetSync(cfg, db=db)
                 with st.spinner("Pulling price_history..."):
                     r = sync.pull("price_history")
+                st.caption(f"Pull 前備份：`{backup}`")
                 st.markdown(_format_sync_result(r))
                 st.rerun()
             except Exception as e:
@@ -6313,6 +6345,8 @@ def _open_db_for_page() -> StockDB:
     target = _resolved_db_path()
     cached = st.session_state.get("_db_handle")
     if cached is None or cached.path != target:
+        if cached is not None:
+            cached.close()
         reset_db_singleton()
         cached = StockDB.open(path=target)
         st.session_state["_db_handle"] = cached
@@ -6371,7 +6405,7 @@ def page_database() -> None:
 
     # ---- 雲端同步 ----
     st.markdown("### Google Sheets 雲端同步")
-    cfg = load_config_from_env()
+    cfg = load_config_from_env(PROJECT_ROOT)
     cc1, cc2, cc3 = st.columns([2, 2, 1])
     cc1.markdown(
         f"Sheet ID: {_badge('已設定', 'green') if cfg.sheet_id else _badge('未設定', 'gray')}",
@@ -6406,6 +6440,14 @@ def page_database() -> None:
     if not cfg.enabled:
         st.warning("雲端同步未啟用 — 上方欄位填齊後才能 push/pull。")
     else:
+        row_level_sync = st.checkbox(
+            "使用逐列合併模式",
+            value=True,
+            help=(
+                "依各 table 主鍵合併兩端資料，適合 price_history / 月營收等歷史表；"
+                "時間相同但內容不同時保留本地並回報衝突。若需舊行為請取消勾選。"
+            ),
+        )
         cs1, cs2, cs3, cs4 = st.columns(4)
         if cs1.button("🔌 測試連線", use_container_width=True):
             try:
@@ -6419,9 +6461,11 @@ def page_database() -> None:
 
         if cs2.button("⬇ Pull 全部", help="把雲端覆蓋到本地", use_container_width=True):
             try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-pull")
                 sync = GoogleSheetSync(cfg, db=db)
                 with st.spinner("Pulling from Google Sheets..."):
                     results = sync.pull_all()
+                st.caption(f"Pull 前備份：`{backup}`")
                 for r in results:
                     st.markdown(_format_sync_result(r))
             except Exception as e:
@@ -6438,12 +6482,16 @@ def page_database() -> None:
             except Exception as e:
                 st.error(f"Push 失敗: {e}")
 
-        if cs4.button("🔄 智能同步", help="依 updated_at 自動判斷方向",
+        if cs4.button(
+            "🔄 智能同步",
+            help=("逐列合併" if row_level_sync else "依 updated_at 自動判斷方向"),
                       use_container_width=True):
             try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-sync")
                 sync = GoogleSheetSync(cfg, db=db)
                 with st.spinner("Syncing..."):
-                    results = sync.sync_all()
+                    results = sync.sync_all(row_level=row_level_sync)
+                st.caption(f"同步前備份：`{backup}`")
                 for r in results:
                     st.markdown(_format_sync_result(r))
             except Exception as e:
@@ -6453,17 +6501,31 @@ def page_database() -> None:
         tcol1, tcol2, tcol3, tcol4 = st.columns([2, 1, 1, 1])
         picked = tcol1.selectbox("選擇 table", list(SYNCABLE_TABLES))
         if tcol2.button("⬇ Pull", key="single_pull", use_container_width=True):
-            sync = GoogleSheetSync(cfg, db=db)
-            r = sync.pull(picked)
-            st.markdown(_format_sync_result(r))
+            try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-pull")
+                sync = GoogleSheetSync(cfg, db=db)
+                r = sync.pull(picked)
+                st.caption(f"Pull 前備份：`{backup}`")
+                st.markdown(_format_sync_result(r))
+            except Exception as e:
+                st.error(f"Pull 失敗（未寫入本地）：{e}")
         if tcol3.button("⬆ Push", key="single_push", use_container_width=True):
             sync = GoogleSheetSync(cfg, db=db)
             r = sync.push(picked)
             st.markdown(_format_sync_result(r))
         if tcol4.button("🔄 Sync", key="single_sync", use_container_width=True):
-            sync = GoogleSheetSync(cfg, db=db)
-            r = sync.sync(picked)
-            st.markdown(_format_sync_result(r))
+            try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-sync")
+                sync = GoogleSheetSync(cfg, db=db)
+                r = (
+                    sync.sync_row_level(picked)
+                    if row_level_sync
+                    else sync.sync(picked)
+                )
+                st.caption(f"同步前備份：`{backup}`")
+                st.markdown(_format_sync_result(r))
+            except Exception as e:
+                st.error(f"同步失敗（未執行本地寫入）：{e}")
 
     st.markdown("---")
 
@@ -6835,6 +6897,8 @@ def page_intraday() -> None:
                 "技術分": r.get("technical_score", 50),
                 "今日%": r.get("today_pct_change", 0),
                 "量比": r.get("volume_ratio", 0),
+                "資料品質": r.get("data_quality", "unavailable"),
+                "資料基準日": r.get("data_asof", ""),
                 "動作": r.get("action", "HOLD"),
                 "美股連動": r.get("us_market_score", 50),
                 "ADR 溢價%": prem if prem is not None else float("nan"),
@@ -6928,6 +6992,11 @@ def page_market_movers() -> None:
             for err in payload["errors"]:
                 st.caption(f"• {err}")
 
+    if payload.get("stale_count"):
+        st.warning(
+            f"已拒絕 {payload['stale_count']} 筆非今日報價；本頁只顯示 {payload.get('source_date') or '今日'} 資料。"
+        )
+
     if not rows:
         st.warning("尚無有效報價（可能非盤中、或 MIS 暫時無資料）。")
         return
@@ -6942,6 +7011,7 @@ def page_market_movers() -> None:
             "成交量": r.get("volume"),
             "昨收": r.get("prev_close"),
             "價格基準": r.get("price_basis", ""),
+            "報價日期": r.get("quote_date", ""),
             "報價時間": r.get("quote_time", ""),
         })
     df = pd.DataFrame(table_rows)
@@ -7072,7 +7142,9 @@ def _render_intraday_live_tracking_table(
             "初始今日%": row.get("initial_pct_change", 0),
             "早盤量比": row.get("initial_volume_ratio"),
             "慢速量比": row.get("current_volume_ratio"),
+            "技術量比": row.get("technical_volume_ratio"),
             "技術來源": row.get("technical_source", ""),
+            "技術資料日": row.get("technical_last_date", ""),
             "規則檢討": row.get("correctness", ""),
             "狀態": row.get("status", ""),
             "理由": row.get("reason", ""),
@@ -7219,11 +7291,11 @@ def page_intraday_live() -> None:
     st.markdown("### LLM 即時推演 / 檢討")
     latest_review = load_live_review(PROJECT_ROOT, today)
     env_values = load_env()
-    api_ready = bool(env_values.get("GEMINI_API_KEY"))
+    api_ready = llm_provider_ready(env_values)
     ran_manual_llm = False
 
     if not api_ready:
-        st.info("尚未設定 GEMINI_API_KEY；可以看自動追蹤表，但無法手動刷新 LLM 推演。")
+        st.info("尚未設定可用的 LLM 提供者；可以看自動追蹤表，但無法手動刷新 LLM 推演。")
 
     if st.button(
         "🤖 手動刷新 LLM 即時推演 / 檢討",
@@ -7244,7 +7316,12 @@ def page_intraday_live() -> None:
         from bot.prompt_registry import get_registry
 
         settings = S()
-        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
+        client = GeminiClient(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            settings=settings,
+            root=PROJECT_ROOT,
+        )
         registry = get_registry(PROJECT_ROOT / "prompts")
         registry.reload()
         with st.spinner("刷新新資料並請 LLM 檢討早盤判斷..."):
@@ -7569,6 +7646,8 @@ def page_next_day_watch() -> None:
                 "強勢分": r.get("strength_score", 0),
                 "今日%": r.get("today_pct_change", 0),
                 "量比": r.get("volume_ratio", 0),
+                "資料品質": r.get("data_quality", "unavailable"),
+                "資料基準日": r.get("data_asof", ""),
                 "題材": r.get("theme", ""),
                 "事件": r.get("event", ""),
                 "進場邏輯": r.get("entry_logic", ""),
@@ -7783,6 +7862,11 @@ def page_hot_stock_futures() -> None:
             for err in band_payload["errors"]:
                 st.caption(f"• {err}")
 
+    if band_payload.get("stale_count"):
+        st.warning(
+            f"已拒絕 {band_payload['stale_count']} 筆非今日報價；本頁只顯示 {band_payload.get('source_date') or '今日'} 資料。"
+        )
+
     if not band_rows:
         st.info("此價格區間內尚無有效報價（可能非盤中）。")
         return
@@ -7891,8 +7975,14 @@ def page_macro() -> None:
 
     cs[0].caption(
         f"asof: {data.get('asof_date', '-')} ｜ "
-        f"USDTWD={data.get('usdtwd', 0):.3f} ｜ "
+        f"USDTWD={float(data.get('usdtwd') or 0):.3f} ｜ "
         f"{'快取' if data.get('cached') else '即時抓取'}"
+    )
+    source_dates = sorted({str(v) for v in (data.get("source_dates") or {}).values() if v})
+    st.caption(
+        "來源實際日期: "
+        + (", ".join(source_dates) if source_dates else "未知")
+        + "（不同市場交易日可能不同，請以各列來源日為準）"
     )
 
     # ---- 指數 ----
@@ -7919,6 +8009,7 @@ def page_macro() -> None:
             "類別": info.get("role", ""),
             "收盤 (USD)": round(info.get("price", 0), 2),
             "漲跌 %": round(info.get("pct_change", 0), 2),
+            "來源日": info.get("source_date", ""),
             "母股": info.get("parent_tw_ticker", ""),
         })
     df = pd.DataFrame(rows)
@@ -7957,8 +8048,9 @@ def page_macro() -> None:
 
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
-    if not api_key:
-        st.info("尚未設定 GEMINI_API_KEY，無法產出 LLM 簡報")
+    llm_ready = llm_provider_ready(env_values)
+    if not llm_ready:
+        st.info("尚未設定可用的 LLM 提供者，無法產出 LLM 簡報")
     else:
         if st.button(
             "🤖 呼叫 Gemini 產出簡報",
@@ -7971,6 +8063,7 @@ def page_macro() -> None:
             client = GeminiClient(
                 api_key=api_key,
                 model=env_values.get("GEMINI_MODEL", "gemini-2.5-flash"),
+                root=PROJECT_ROOT,
             )
             with st.spinner("Gemini 正在撰寫美股/ADR 對台股影響簡報..."):
                 raw, info = gemini_call(

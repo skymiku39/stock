@@ -1,12 +1,13 @@
 """Dashboard navigation and main Streamlit app shell."""
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 from pathlib import Path
 
 import streamlit as st
-from pathlib import Path
 
 from bot.dashboard.common import (
     DASHBOARD_UI_BUILD,
@@ -18,9 +19,18 @@ from bot.dashboard.common import (
 )
 from bot.dashboard import pages as dash_pages
 from bot.dashboard.cache_helpers import cached_env_values, cached_llm_today_stats
-from bot.env_io import env_path
+from bot.env_io import env_path, llm_provider_ready
 from bot.process_runner import get_runner, get_scheduler_runner
 from bot.prompt_registry import get_registry
+
+
+def _read_scheduler_status() -> dict:
+    path = PROJECT_ROOT / "data" / "scheduler_status.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _render_sidebar_quick_controls() -> None:
@@ -47,8 +57,8 @@ def _render_sidebar_quick_controls() -> None:
             "同一天已有報告時會跳過，避免重複呼叫 Gemini。"
         ),
     )
-    if include_reports and not env_values.get("GEMINI_API_KEY"):
-        st.sidebar.caption("尚未設定 GEMINI_API_KEY；當沖報告會無法產生 LLM 簡報。")
+    if include_reports and not llm_provider_ready(env_values):
+        st.sidebar.caption("尚未設定可用的 LLM 提供者；當沖報告會無法產生 LLM 簡報。")
 
     c1, c2 = st.sidebar.columns(2)
     if c1.button("啟動自動更新", disabled=scheduler_running, use_container_width=True):
@@ -67,6 +77,21 @@ def _render_sidebar_quick_controls() -> None:
     if scheduler_running and scheduler_record:
         elapsed = time.time() - scheduler_record.started_at
         st.sidebar.caption(f"更新 PID {scheduler_record.pid} · {_human_duration(elapsed)}")
+        status = _read_scheduler_status()
+        # `uv run` / console-script 啟動時，wrapper PID 可能和 scheduler
+        # 子行程 PID 不同；只要狀態檔是有效的就顯示真實 heartbeat。
+        if status:
+            state = str(status.get("state") or "unknown")
+            last_job = str(status.get("last_job") or "尚未執行任務")
+            last_at = str(status.get("last_job_at") or status.get("heartbeat_at") or "")
+            status_pid = status.get("pid") or "?"
+            st.sidebar.caption(
+                f"排程狀態: {state} · worker PID {status_pid} · 最近任務: {last_job} {last_at}"
+            )
+            if status.get("last_success") is False or state == "degraded":
+                st.sidebar.warning(f"排程最近一次任務失敗：{status.get('last_error') or '請查看日誌'}")
+        else:
+            st.sidebar.caption("排程正在啟動，等待第一個心跳...")
 
     mode_options = ["watch", "report", "trade"]
     default_mode = env_values.get("RUN_MODE", "watch")
@@ -78,8 +103,16 @@ def _render_sidebar_quick_controls() -> None:
         key="quick_bot_mode",
         help="watch=看盤監測；report=公開資料報表；trade=依設定交易。",
     )
+    simulation = str(env_values.get("SIMULATION", "true")).strip().lower() not in {"false", "0", "no"}
+    real_trade_quick_start = bot_mode == "trade" and not simulation
+    if real_trade_quick_start:
+        st.sidebar.warning("真實 trade 不允許從快速啟動進入；請到「啟動 / 監控」完成交易可行性檢查。")
     b1, b2 = st.sidebar.columns(2)
-    if b1.button("啟動 BOT", disabled=bot_running, use_container_width=True):
+    if b1.button(
+        "啟動 BOT",
+        disabled=bot_running or real_trade_quick_start,
+        use_container_width=True,
+    ):
         rec = bot_runner.start(run_mode=bot_mode)
         st.sidebar.success(f"BOT 已啟動 PID {rec.pid}")
         st.rerun()
@@ -121,6 +154,7 @@ PAGES = {
     "資料庫 / 雲端同步": dash_pages.page_database,
     "Prompt 管理": dash_pages.page_prompts,
     "LLM 呼叫紀錄": dash_pages.page_llm_log,
+    "記憶與證據管理": dash_pages.page_memory_admin,
     "日誌檢視": dash_pages.page_logs,
     "通知測試": dash_pages.page_notifier,
     "策略與文件": dash_pages.page_docs,
@@ -137,7 +171,7 @@ NAV_GROUPS = {
     ],
     "⚡ 執行與紀錄": ["啟動 / 監控", "模擬交易", "🛡 風控中心", "交易可行性檢查", "交易紀錄", "報表分析"],
     "⚙️ 系統與診斷": ["組態設定", "資料庫 / 雲端同步", "Prompt 管理",
-                  "LLM 呼叫紀錄", "日誌檢視", "通知測試", "策略與文件"],
+                  "LLM 呼叫紀錄", "記憶與證據管理", "日誌檢視", "通知測試", "策略與文件"],
 }
 
 PAGES["台股行事曆"] = dash_pages.page_market_calendar
@@ -162,6 +196,12 @@ except Exception:
 
 
 def main_app() -> None:
+    # Streamlit 可從任意工作目錄啟動；dashboard 內仍有相容層會使用
+    # env_path()/load_env()/Settings() 的相對路徑。先固定 cwd，避免設定、
+    # LLM audit、快取或舊版頁面把資料寫到啟動者的目錄。
+    if Path.cwd().resolve() != PROJECT_ROOT.resolve():
+        os.chdir(PROJECT_ROOT)
+
     st.set_page_config(
         page_title="Stock Bot Dashboard",
         page_icon="📈",
@@ -208,9 +248,9 @@ def main_app() -> None:
 
     try:
         env_values_for_sb = cached_env_values()
-        if env_values_for_sb.get("GEMINI_API_KEY"):
+        if llm_provider_ready(env_values_for_sb):
             st.sidebar.markdown(
-                _badge("🤖 LLM 已啟用 (會收費)", "purple"),
+                _badge(f"🤖 LLM 已啟用 ({env_values_for_sb.get('LLM_PROVIDER', 'gemini')})", "purple"),
                 unsafe_allow_html=True,
             )
         else:

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.llm_analyzer import DEFAULT_MODEL, GeminiClient
 from bot.utils import get_logger
@@ -18,6 +20,7 @@ DEFAULT_PROMPT = (
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-gemini-test",
         description="Verify GEMINI_API_KEY, model selection, and a basic Gemini API call.",
@@ -44,9 +47,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=0.0,
         help="Generation temperature for the smoke test.",
     )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    settings = Settings()
+    root = args.root.resolve() if args.root else Path.cwd()
+    settings = Settings(_env_file=str(root / ".env"))  # type: ignore[call-arg]
     api_key = settings.gemini_api_key.strip()
     model = args.model.strip() or settings.gemini_model.strip() or DEFAULT_MODEL
 
@@ -55,7 +63,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Example: GEMINI_API_KEY=your_google_ai_studio_key")
         return 2
 
-    logger = get_logger("gemini-smoke")
+    logger = get_logger("gemini-smoke", log_dir=root / "log")
     client = GeminiClient(api_key=api_key, model=model, logger=logger)
     if not client.enabled:
         print("Gemini client is disabled. Check google-genai installation and API key.")

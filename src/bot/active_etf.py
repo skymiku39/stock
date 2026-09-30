@@ -29,6 +29,7 @@ from bot.utils import get_logger, mk_folder, now_tw
 
 if TYPE_CHECKING:
     from bot.broker import SjBroker
+    from bot.stock_db import StockDB
 
 
 # ----------------------------------------------------------------------
@@ -36,8 +37,9 @@ if TYPE_CHECKING:
 # ----------------------------------------------------------------------
 
 # 依 2025-2026 公開資訊與 TWSE「主動式 ETF」專區整理。
-# holdings_url 採用 etfinfo.tw 的標準化端點 — 該站每日同步各投信公告的 PCF / 持股清單，
-# 比直接打散在 12+ 投信官網 (URL 格式都不一樣) 更可靠且更易於 LLM 解析。
+# 預設 ETF holdings_url 採用 etfinfo.tw 的標準化端點 — 該站目前提供完整 SSR
+# 持股陣列，先走 deterministic parser；比直接打散在 12+ 投信官網 (URL 格式都不一樣)
+# 更容易重播與驗證。MoneyDJ URL 保留作為手動覆寫／舊來源 fallback，不可把 top-N 當完整快照。
 # 使用者可在「主動 ETF 追蹤」頁覆寫成各家投信的官方頁。
 _ETFINFO_HOLDINGS = "https://www.etfinfo.tw/etf/{symbol}/holdings"
 # MoneyDJ ETF 成分股頁 (前十大持股 + 區域/產業配置)。
@@ -86,23 +88,23 @@ DEFAULT_ACTIVE_ETFS: List[Dict[str, str]] = [
     {"symbol": "00997A", "name": "主動群益美國增長", "issuer": "群益投信", "region": "美國", "freq": "季配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00997A")},
     {"symbol": "00998A", "name": "主動復華金融股息", "issuer": "復華投信", "region": "全球", "freq": "季配",
-     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00998A")},
+     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00998A")},
     {"symbol": "00400A", "name": "主動國泰動能高息", "issuer": "國泰投信", "region": "台灣", "freq": "月配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00400A")},
     {"symbol": "00401A", "name": "主動摩根台灣鑫收", "issuer": "摩根投信", "region": "台灣", "freq": "月配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00401A")},
     {"symbol": "00402A", "name": "主動安聯美國科技", "issuer": "安聯投信", "region": "美國", "freq": "-",
-     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00402A")},
+     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00402A")},
     {"symbol": "00403A", "name": "主動統一升級50", "issuer": "統一投信", "region": "台灣", "freq": "季配",
      "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00403A")},
     {"symbol": "00404A", "name": "主動聯博全球非投", "issuer": "聯博投信", "region": "全球", "freq": "月配",
-     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00404A")},
+     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00404A")},
     {"symbol": "00405A", "name": "主動富邦台灣龍耀", "issuer": "富邦投信", "region": "台灣", "freq": "-",
-     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00405A")},
+     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00405A")},
     {"symbol": "00406A", "name": "主動中信台灣收益", "issuer": "中國信託投信", "region": "台灣", "freq": "月配",
-     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00406A")},
+     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00406A")},
     {"symbol": "00407A", "name": "主動凱基台灣", "issuer": "凱基投信", "region": "台灣", "freq": "不配息",
-     "holdings_url": _MONEYDJ_HOLDINGS.format(symbol="00407A")},
+     "holdings_url": _ETFINFO_HOLDINGS.format(symbol="00407A")},
     # 明星共同基金（非 ETF）：納入共識持股追蹤，代號採基富通 ALI006。
     {"symbol": "ALI006", "name": "安聯台灣科技基金", "issuer": "安聯投信", "region": "台灣", "freq": "-",
      "holdings_url": _MONEYDJ_FUND_HOLDINGS.format(fund_id="acdd04")},
@@ -194,6 +196,96 @@ def load_active_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
         except Exception:
             pass
     return [ActiveEtf(**r) for r in DEFAULT_ACTIVE_ETFS]
+
+
+def sync_etf_meta_to_db(
+    root: Path,
+    *,
+    db: Optional["StockDB"] = None,
+    etfs: Optional[Iterable[ActiveEtf]] = None,
+) -> Dict[str, Any]:
+    """把主動式 ETF 設定物化到 canonical ``etf_meta`` 表。
+
+    ``active_etfs.json``／內建清單是應用設定，不是外部市場證據。因此這裡
+    明確使用 ``quality_status=unknown``、不填 ``source_record_id``，只讓
+    Dashboard、同步層與其他模組共享同一份 metadata；Evidence 層不應把它
+    當成可引用的市場事實。
+
+    若資料庫已有 exact 外部來源（``source_record_id`` 或非 ``config://``
+    的 ``source_url``），保留該列，避免設定同步覆蓋較高品質資料。
+    函式可重複執行；相同設定不會改寫 ``updated_at``。
+    """
+    from bot.stock_db import EtfMeta, StockDB
+
+    project_root = Path(root)
+    own_db = db is None
+    database = db or StockDB.open(root=project_root)
+    config_source = (
+        "config://active_etfs.json"
+        if list_path(project_root).exists()
+        else "config://default_active_etfs"
+    )
+    created = 0
+    updated = 0
+    unchanged = 0
+    preserved_external = 0
+    skipped = 0
+
+    try:
+        items = list(etfs) if etfs is not None else load_active_etfs(project_root)
+        for etf in items:
+            symbol = str(etf.symbol or "").strip()
+            if not symbol:
+                skipped += 1
+                continue
+            existing = database.get_etf_meta(symbol)
+            if existing and (
+                bool(existing.source_record_id)
+                or (
+                    bool(existing.source_url)
+                    and not existing.source_url.startswith("config://")
+                )
+            ):
+                preserved_external += 1
+                continue
+
+            desired = {
+                "name": str(etf.name or ""),
+                "manager": str(etf.issuer or ""),
+                "holdings_url": str(etf.holdings_url or ""),
+                "source_url": config_source,
+                "source_date": "",
+                "quality_status": "unknown",
+                "source_record_id": "",
+                "note": "derived from local active ETF configuration; not external evidence",
+            }
+            if existing and all(
+                str(getattr(existing, field, "") or "") == value
+                for field, value in desired.items()
+            ):
+                unchanged += 1
+                continue
+
+            database.upsert_etf_meta(
+                EtfMeta(symbol=symbol, **desired)
+            )
+            if existing:
+                updated += 1
+            else:
+                created += 1
+    finally:
+        if own_db:
+            database.close()
+
+    return {
+        "source": config_source,
+        "total": len(items),
+        "created": created,
+        "updated": updated,
+        "unchanged": unchanged,
+        "preserved_external": preserved_external,
+        "skipped": skipped,
+    }
 
 
 def save_active_etfs(etfs: Iterable[ActiveEtf], root: Optional[Path] = None) -> Path:
@@ -368,6 +460,7 @@ __all__ = [
     "load_holdings",
     "save_active_etfs",
     "save_holdings",
+    "sync_etf_meta_to_db",
     "snapshots_to_records",
 ]
 

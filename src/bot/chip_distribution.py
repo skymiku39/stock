@@ -37,6 +37,7 @@ from bot.cloud_file_cache import (
     restore_file_from_cloud,
     restore_tree_from_cloud,
 )
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -187,6 +188,28 @@ def fetch_distribution_all(
             pass
     try:
         resp = sess.get(URL_TDCC, timeout=60)
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                raw_content = resp.content
+                is_json = raw_content.lstrip().startswith((b"[", b"{"))
+                SourceRegistry(Path(root)).capture_document(
+                    "tdcc_distribution",
+                    raw_content,
+                    source_url=URL_TDCC,
+                    source_ref=f"distribution:{today.isoformat()}",
+                    title=f"TDCC 股權分散表 {today.isoformat()}",
+                    kind="http_response",
+                    suffix="json" if is_json else "csv",
+                    mime_type=str(
+                        getattr(resp, "headers", {}).get("Content-Type", "")
+                        or ("application/json" if is_json else "text/csv")
+                    ),
+                    as_of=today.isoformat(),
+                    quality_status="ok" if resp.status_code == 200 else "invalid",
+                    metadata={"endpoint": URL_TDCC},
+                )
+            except Exception:
+                log.debug("TDCC raw 保存失敗", exc_info=True)
         if resp.status_code != 200:
             log.warning("TDCC HTTP %d", resp.status_code)
             return []

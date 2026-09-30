@@ -13,11 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from bot.config import Settings
+from bot.cli_encoding import configure_console
 from bot.preflight import report_to_dict, run_preflight
-from bot.utils import get_logger
+from bot.utils import get_logger, log_root
 
 
 _STATUS_ICON = {
@@ -39,6 +41,7 @@ _SECTION_TITLES = {
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-preflight",
         description="檢查現在是否能下台股單 (含真實 Shioaji 登入測試)",
@@ -55,22 +58,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--json", action="store_true",
         help="輸出 JSON 格式 (給 CI / Telegram 用)",
     )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="專案設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    # Windows console UTF-8 強制
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
-    logger = get_logger("stock-preflight")
-    settings = Settings()
-    report = run_preflight(
-        settings,
-        do_real_login=not args.no_login,
-        test_ca_activate=args.test_ca,
-        logger=logger,
-    )
+    root = args.root.resolve() if args.root else Path.cwd()
+    with log_root(root):
+        logger = get_logger("stock-preflight")
+        settings = Settings(_env_file=str(root / ".env"))  # type: ignore[call-arg]
+        report = run_preflight(
+            settings,
+            do_real_login=not args.no_login,
+            test_ca_activate=args.test_ca,
+            project_root=root,
+            logger=logger,
+        )
 
     exit_code = 0 if not report.has_fail() else 2
 

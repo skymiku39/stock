@@ -48,7 +48,7 @@ pip install uv
 ### 2.2 克隆或進入專案
 
 ```powershell
-cd d:\skymiku\stock
+cd C:\skymiku\stock
 ```
 
 ### 2.3 安裝依賴
@@ -76,7 +76,7 @@ Copy-Item .env.example .env
 # trade  = 自動交易
 # watch  = Shioaji 看盤不下單
 # report = TWSE 公開延遲資料報表，不需 API key
-RUN_MODE=trade
+RUN_MODE=watch
 REPORT_POLL_SECONDS=5
 REPORT_OUTPUT_DIR=data/reports
 
@@ -114,7 +114,7 @@ TELEGRAM_CHAT_ID=
 - `.env` 已在 `.gitignore` 中，不會被提交到 Git
 - `CA_PATH` 使用正斜線 `/` 分隔路徑（Windows 也適用）
 - **第一次務必設定 `SIMULATION=true`**，確認系統正常後再改為 `false`
-- 只看盤不下單請用 `RUN_MODE=watch`；完全不使用 Shioaji API 請用 `RUN_MODE=report`
+- 只看盤不下單請用 `RUN_MODE=watch`（**程式與 `.env.example` 預設**）；完全不使用 Shioaji API 請用 `RUN_MODE=report`；`trade` 需明確設定且當沖實單預設封存
 
 ## Step 4: 設定 Telegram 通知（選填）
 
@@ -159,10 +159,10 @@ $env:RUN_MODE="watch"; uv run stock-bot
 
 此模式使用 Shioaji 即時行情，但不啟用 CA，也不送出委託。
 
-### 6.3 自動交易/模擬交易模式
+### 6.3 自動交易/模擬交易模式（非預設）
 
 ```powershell
-# 確認 .env 中 SIMULATION=true
+# 確認 .env 中 RUN_MODE=trade 且 SIMULATION=true；當沖實單另需解凍
 uv run stock-bot
 ```
 
@@ -177,7 +177,7 @@ uv run stock-bot
 ## 目錄結構說明
 
 ```
-d:\skymiku\stock\
+C:\skymiku\stock\
   .env                 ← 你的設定（不會被 Git 追蹤）
   .env.example         ← 設定範本
   .gitignore           ← Git 忽略規則

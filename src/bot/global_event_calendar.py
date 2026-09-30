@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.global_events_fetcher import fetch_all_global_events
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, mk_folder, now_tw
 
 CALENDAR_DIR_REL = "data/calendar"
@@ -139,7 +140,25 @@ def _save_events(rows: List[Dict[str, Any]], root: Optional[Path]) -> Path:
         "fetched_at": now_tw().isoformat(timespec="seconds"),
         "entries": rows,
     }
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        SourceRegistry(root or Path.cwd()).capture_document(
+            "global_events",
+            serialized,
+            source_url="local://global-event-calendar",
+            source_ref="global_tech_events.json",
+            title="全球科技事件合併快照",
+            kind="event_snapshot",
+            suffix="json",
+            mime_type="application/json",
+            as_of=now_tw().date().isoformat(),
+            metadata={"entry_count": len(rows)},
+        )
+    except Exception:
+        logging.getLogger("global-events").debug(
+            "全球事件快照 provenance 保存失敗", exc_info=True,
+        )
+    p.write_text(serialized, encoding="utf-8")
     mirror_file_to_cloud(p, root=root)
     return p
 

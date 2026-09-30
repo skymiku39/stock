@@ -1,6 +1,7 @@
 """Tests for price_band_heat."""
 from __future__ import annotations
 
+import datetime as dt
 from unittest.mock import MagicMock, patch
 
 from bot.market_movers import MoverRow
@@ -16,22 +17,23 @@ def test_is_dr_like():
 def test_fetch_price_band_heat_ranks_by_volume(mock_scan):
     mock_scan.return_value = (
         {
-            "2538": MoverRow(ticker="2538", name="基隆", price=10.15, volume=200, pct_chg=0.5),
-            "2323": MoverRow(ticker="2323", name="士林電", price=11.2, volume=5000, pct_chg=3.0),
-            "2330": MoverRow(ticker="2330", name="台積電", price=1000.0, volume=99999, pct_chg=1.0),
-            "9105": MoverRow(ticker="9105", name="致富-DR", price=9.74, volume=40000, pct_chg=5.0),
+            "2538": MoverRow(ticker="2538", name="基隆", price=10.15, volume=200, pct_chg=0.5, quote_date="2026-09-16"),
+            "2323": MoverRow(ticker="2323", name="士林電", price=11.2, volume=5000, pct_chg=3.0, quote_date="2026-09-16"),
+            "2330": MoverRow(ticker="2330", name="台積電", price=1000.0, volume=99999, pct_chg=1.0, quote_date="2026-09-16"),
+            "9105": MoverRow(ticker="9105", name="致富-DR", price=9.74, volume=40000, pct_chg=5.0, quote_date="2026-09-16"),
         },
         4,
         1,
         [],
     )
-    result = fetch_price_band_heat(
-        price_low=9.0,
-        price_high=12.5,
-        limit=10,
-        exclude_dr=True,
-        session=MagicMock(),
-    )
+    with patch("bot.price_band_heat.now_tw", return_value=dt.datetime(2026, 9, 16, 10, 0)):
+        result = fetch_price_band_heat(
+            price_low=9.0,
+            price_high=12.5,
+            limit=10,
+            exclude_dr=True,
+            session=MagicMock(),
+        )
     assert result.band_count == 2
     assert result.rows[0].ticker == "2323"
     assert result.rows[0].band_rank == 1

@@ -172,6 +172,7 @@ def build_snapshot(
     auto_fill_missing: bool = True,
     auto_llm: bool = True,
     macro_cache_only: bool = False,
+    allow_live_sources: bool = True,
 ) -> TickerSnapshot:
     """整合所有資料源，組出單一個股快照。
 
@@ -180,6 +181,8 @@ def build_snapshot(
             不因本地缺資料而自動補抓外部資料源。
         auto_llm: False 時不在 snapshot 組裝期間自動呼叫 Gemini。
         macro_cache_only: True 時 macro 只讀本地快取，避免快速頁面卡在外部 API。
+        allow_live_sources: False 時不從 MOPS／行事曆組合即時素材；供
+            ``!ask`` 等唯讀熱路徑使用。
     """
     log = get_logger("ticker-view")
     snap = TickerSnapshot(
@@ -304,7 +307,16 @@ def build_snapshot(
     elif snap.chip_summary is None:
         # 退而求其次：直接讀今日 cache (若有)
         try:
-            daily = fetch_daily_chips(now_tw().date(), root=project_root, use_cache=True)
+            from bot.chips_fetcher import (
+                cached_chip_source_document_ids,
+                latest_cached_chip_date,
+            )
+
+            cached_date = latest_cached_chip_date(now_tw().date(), root=project_root)
+            daily = fetch_daily_chips(
+                now_tw().date(), root=project_root, use_cache=True,
+                cache_only=not auto_fill_missing,
+            )
             row = daily.get(ticker)
             if row:
                 snap.chip_summary = {
@@ -316,6 +328,11 @@ def build_snapshot(
                     "margin_buy_change_pct": 0.0,
                     "short_borrow_change_pct": 0.0,
                     "block_trade_net": 0.0,
+                    "end_date": (cached_date or now_tw().date()).isoformat(),
+                    "source_document_ids": cached_chip_source_document_ids(
+                        [cached_date] if cached_date else [], root=project_root,
+                    ),
+                    "source_date_status": "aligned",
                     "rows": [dataclasses.asdict(row)],
                 }
         except Exception:
@@ -482,6 +499,7 @@ def build_snapshot(
             pipeline_analysis=snap.llm_analysis,
             auto_llm=auto_llm,
             name_hint=snap.name,
+            allow_live_sources=allow_live_sources,
             logger=log,
         )
         if bundle.get("analysis") is not None and snap.llm_analysis is None:
@@ -494,7 +512,7 @@ def build_snapshot(
     try:
         if snap.name or (snap.fundamentals and snap.fundamentals.name):
             from bot.stock_db import StockInfo, get_db
-            db = get_db()
+            db = get_db(root=project_root)
             existing = db.get_stock_info(ticker)
             name_to_save = snap.name or (snap.fundamentals.name if snap.fundamentals else "")
             if existing is None or existing.name != name_to_save:

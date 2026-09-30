@@ -1,0 +1,10 @@
+{
+  "symbol": "00980A",
+  "as_of": "2026-09-19",
+  "holdings": [
+    {"ticker": "2330", "name": "TSMC", "weight_pct": 10.5},
+    {"ticker": "2330", "name": "TSMC Dup", "weight_pct": 5.0}
+  ]
+}
+
+

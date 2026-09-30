@@ -74,6 +74,26 @@ def _make_tick(
 class TestWatchModeNoOrders:
     """watch 模式不應呼叫 broker 的下單方法。"""
 
+    def test_project_root_is_propagated_to_strategy_side_effects(
+        self, tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "stock-project"
+        root.mkdir()
+        settings = _make_settings()
+
+        strategy = ConfigurableStrategy(
+            broker=MagicMock(),
+            settings=settings,
+            project_root=root,
+        )
+
+        assert strategy._project_root == root.resolve()
+        assert strategy.risk.project_root == root.resolve()
+        assert strategy.llm_gate.project_root == root.resolve()
+        assert strategy.intraday_advisor.project_root == root.resolve()
+        assert Path(strategy.recorder.output_dir) == root / "data"
+        assert Path(strategy.signal_recorder.output_dir) == root / "data" / "reports"
+
     def test_place_buy_records_signal_not_order(self) -> None:
         settings = _make_settings(run_mode="watch")
         broker = MagicMock()

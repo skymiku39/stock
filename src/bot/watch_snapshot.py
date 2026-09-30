@@ -12,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.hot_stock_futures import fetch_hot_stock_futures
 from bot.price_band_heat import (
     DEFAULT_PRICE_HIGH,
@@ -84,7 +85,12 @@ def save_watch_snapshot(
     summary["files"].append(str(band_path))
     summary["band_count"] = band.band_count
 
-    futures = fetch_hot_stock_futures(limit=futures_limit, direction="volume", logger=log)
+    futures = fetch_hot_stock_futures(
+        limit=futures_limit,
+        direction="volume",
+        logger=log,
+        root=project,
+    )
     summary["errors"].extend(futures.errors)
     fut_path = out_dir / f"{ts}_hot_stock_futures.csv"
     fut_fields = [
@@ -124,6 +130,7 @@ def save_watch_snapshot(
 
 
 def main() -> None:
+    configure_console()
     parser = argparse.ArgumentParser(description="儲存只看不買觀察快照")
     parser.add_argument("--low", type=float, default=DEFAULT_PRICE_LOW)
     parser.add_argument("--high", type=float, default=DEFAULT_PRICE_HIGH)

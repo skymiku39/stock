@@ -21,13 +21,15 @@ def bootstrap_event_bus(
     project_root: Optional[Path] = None,
 ) -> InMemoryEventBus:
     """初始化程序內事件匯流排與橫切 handler。"""
-    root = project_root or Path.cwd()
+    root = (project_root or Path.cwd()).resolve()
     chain = enable_chain_smile_screen
     if chain is None:
         from bot.config import Settings
 
-        chain = Settings().event_chain_smile_screen
+        chain = Settings(_env_file=str(root / ".env")).event_chain_smile_screen  # type: ignore[call-arg]
+    bus = get_event_bus(project_root=root)
     return wire_application_handlers(
+        bus,
         enable_jsonl=enable_jsonl,
         jsonl_path=jsonl_path,
         enable_chain_smile_screen=chain,
@@ -35,14 +37,16 @@ def bootstrap_event_bus(
     )
 
 
-def get_or_create_bus() -> InMemoryEventBus:
+def get_or_create_bus(*, project_root: Optional[Path] = None) -> InMemoryEventBus:
     """取得已 bootstrap 的匯流排（若尚未建立則自動 bootstrap）。"""
-    bus = get_event_bus()
+    root = (project_root or Path.cwd()).resolve()
+    bus = get_event_bus(project_root=root)
     from bot.config import Settings
 
+    settings = Settings(_env_file=str(root.resolve() / ".env"))  # type: ignore[call-arg]
     wire_application_handlers(
         bus,
-        enable_chain_smile_screen=Settings().event_chain_smile_screen,
-        project_root=Path.cwd(),
+        enable_chain_smile_screen=settings.event_chain_smile_screen,
+        project_root=root,
     )
     return bus

@@ -22,6 +22,7 @@ import datetime as dt
 
 import pandas as pd
 
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.env_io import load_env
 from bot.events import DailyKlineFetched, QuantDataFetchCompleted
@@ -31,6 +32,7 @@ from bot.fundamentals_refresh import run_refresh_queue, seed_refresh_queue
 from bot.market_meta import load_market_map
 from bot.smile_curve_backtest_cli import _ensure_daily_data, _normalize_symbol
 from bot.stock_db import StockDB, default_db_path
+from bot.technicals import capture_normalized_kline_rows
 from bot.ticker_view import build_snapshot
 from bot.utils import get_logger, now_tw
 
@@ -45,7 +47,8 @@ def resolve_symbols(
     if raw:
         parts = [_normalize_symbol(s) for s in raw.split(",") if s.strip()]
         return list(dict.fromkeys(parts))
-    env = load_env()
+    project = (root or Path.cwd()).resolve()
+    env = load_env(project / ".env")
     from_env = [
         _normalize_symbol(s)
         for s in (env.get("SYMBOLS") or Settings().symbols or "").split(",")
@@ -122,7 +125,8 @@ def _backfill_yfinance_if_sparse(
 
     from bot.technicals import _cache_dir, _coerce_df, _save_df_to_db
 
-    df = _coerce_df(pd.DataFrame(rows))
+    new_df = _coerce_df(pd.DataFrame(rows))
+    df = new_df.copy()
     cache_path = _cache_dir(ticker, root) / "daily_kline.csv"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists():
@@ -133,7 +137,36 @@ def _backfill_yfinance_if_sparse(
             pass
     df = df.drop_duplicates(subset=["date"], keep="last").sort_values("date")
     df.to_csv(cache_path, index=False, encoding="utf-8")
-    _save_df_to_db(ticker, df, root=root, logger=logger)
+    source_document_id, source_url, retrieved_at = capture_normalized_kline_rows(
+        root=root,
+        ticker=ticker,
+        rows=rows,
+        market=market,
+        start_date=start,
+        end_date=end,
+        db=db,
+        logger=logger,
+    )
+    from bot.cloud_file_cache import mirror_file_to_cloud
+    mirror_file_to_cloud(cache_path, root=root)
+    _save_df_to_db(
+        ticker,
+        new_df,
+        root=root,
+        logger=logger,
+        provenance_by_date={
+            str(row.get("date") or ""): {
+                "source": "yfinance",
+                "source_document_id": source_document_id,
+                "source_url": source_url,
+                "source_date": f"{start}:{end}",
+                "retrieved_at": retrieved_at,
+                "quality_status": "partial",
+            }
+            for row in rows
+            if row.get("date")
+        },
+    )
     logger.info("%s yfinance 備援日 K → %d 筆", ticker, len(df))
     return len(df)
 
@@ -193,7 +226,7 @@ def fetch_watch_quant_data(
         try:
             from bot.company_update import main as company_main
             log.info("=== [1/5] 公司基本資料 ===")
-            rc = company_main([])
+            rc = company_main(["--root", str(project)])
             summary["steps"].append({"name": "company", "ok": rc == 0})
         except Exception as exc:  # noqa: BLE001
             msg = f"company_update: {exc}"
@@ -217,6 +250,8 @@ def fetch_watch_quant_data(
         msg = f"daily_k: {exc}"
         log.exception(msg)
         summary["errors"].append(msg)
+    finally:
+        db.close()
 
     log.info("=== [3/5] 基本面 ===")
     try:
@@ -288,6 +323,7 @@ def fetch_watch_quant_data(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         description="補齊監控池量化交易 / 微笑曲線樣本資料",
     )
@@ -299,16 +335,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--skip-macro", action="store_true")
     parser.add_argument("--kline-only", action="store_true", help="只補日 K（含 yfinance 備援）")
     parser.add_argument("--json", action="store_true", help="印 JSON 摘要")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="專案資料根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    symbols = resolve_symbols(args.symbols or None)
-    logger = get_logger("watch-data-fetch")
+    project = args.root.resolve() if args.root else Path.cwd()
+    symbols = resolve_symbols(args.symbols or None, root=project)
+    logger = get_logger("watch-data-fetch", log_dir=project / "log")
     from bot.app_bootstrap import get_or_create_bus
 
-    publisher = get_or_create_bus()
+    publisher = get_or_create_bus(project_root=project)
     logger.info("目標代號: %s", ",".join(symbols))
     if args.kline_only:
-        project = Path.cwd()
         db = StockDB.open(path=default_db_path(project))
         end_s = args.end or now_tw().date().isoformat()
         summary = {
@@ -335,6 +377,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 errors=tuple(summary["errors"]),
             ),
         )
+        db.close()
     else:
         summary = fetch_watch_quant_data(
             symbols,
@@ -343,10 +386,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             chip_days=args.chip_days,
             skip_company=args.skip_company,
             skip_macro=args.skip_macro,
+            root=project,
             logger=logger,
             publisher=publisher,
         )
-    out_dir = Path.cwd() / "data" / "watch_snapshots"
+    out_dir = project / "data" / "watch_snapshots"
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / f"quant_fetch_{now_tw().strftime('%Y%m%d_%H%M%S')}.json"
     report_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -90,12 +90,20 @@ class BaseStrategy(ABC):
         publisher: Optional[EventPublisher] = None,
         *,
         wire_handlers: bool = True,
+        project_root: Optional[Path] = None,
     ):
         self.broker = broker
         self.settings = settings
+        self._project_root = (project_root or Path.cwd()).resolve()
+        # 保留未指定 root 時的既有依賴注入語意；測試與外部呼叫端可
+        # 透過各自的 RiskGuard fixture/default 管理工作目錄。只有明確
+        # 指定 project_root 時，才把它傳給有持久化副作用的元件。
+        dependency_root = self._project_root if project_root is not None else None
         self._market_source = market_source
         self.logger = logger or get_logger("strategy")
-        self._publisher: EventPublisher = publisher or get_event_bus()
+        self._publisher: EventPublisher = publisher or get_event_bus(
+            project_root=self._project_root,
+        )
 
         # 部位管理
         self.positions: Dict[str, PositionInfo] = {}
@@ -137,11 +145,17 @@ class BaseStrategy(ABC):
         self._last_price: Dict[str, float] = {}
 
         # 交易紀錄 (trade 模式)
-        self.recorder = TradeRecorder()
+        self.recorder = TradeRecorder(
+            output_dir=str(self._project_root / "data"),
+        )
 
         # 訊號紀錄 (watch/report 模式)
         self.signal_recorder = SignalRecorder(
-            output_dir=settings.report_output_dir,
+            output_dir=str(
+                Path(settings.report_output_dir)
+                if Path(settings.report_output_dir).is_absolute()
+                else self._project_root / settings.report_output_dir
+            ),
         )
 
         # 通知
@@ -151,7 +165,11 @@ class BaseStrategy(ABC):
         )
 
         # 風險 / 資金控制 (所有實際下單都會經過)
-        self.risk = RiskGuard(settings=settings, logger=self.logger)
+        self.risk = RiskGuard(
+            settings=settings,
+            logger=self.logger,
+            project_root=dependency_root,
+        )
         self._fund_used = self.risk.fund_used
 
         # LLM 進出場閘門 (賣出前 AI 分析等)
@@ -159,10 +177,11 @@ class BaseStrategy(ABC):
             settings=settings,
             risk=self.risk,
             logger=self.logger,
+            project_root=dependency_root,
         )
         self.intraday_advisor = IntradayLlmAdvisor(
             settings,
-            project_root=Path.cwd(),
+            project_root=self._project_root,
             risk=self.risk,
             llm_gate=self.llm_gate,
             logger=self.logger,
@@ -202,7 +221,7 @@ class BaseStrategy(ABC):
 
         report = run_startup_safety_checks(
             self.settings,
-            project_root=Path.cwd(),
+            project_root=self._project_root,
             broker=self.broker,
             risk=self.risk,
         )
@@ -217,7 +236,7 @@ class BaseStrategy(ABC):
             self.logger.info("啟動安全檢查通過")
 
         self._fund_used = self.risk.fund_used
-        _, bot_positions = load_bot_portfolio(Path.cwd())
+        _, bot_positions = load_bot_portfolio(self._project_root)
         monitored = set(self.settings.symbols or [])
         for symbol, ppos in bot_positions.items():
             if symbol not in monitored or ppos.qty <= 0:
@@ -499,7 +518,7 @@ class BaseStrategy(ABC):
             before = set(self.settings.symbols or [])
             merge_watch_symbols_into_settings(
                 self.settings,
-                Path.cwd(),
+                self._project_root,
                 reason=reason,
                 refresh_live_quotes=refresh_live_quotes,
                 logger=self.logger,

@@ -24,7 +24,7 @@
 - **Telegram 通知** -- 買賣/停損停利/收盤摘要即時推播到手機
 - **模擬模式** -- `SIMULATION=true` 即可使用模擬環境測試
 - **Web 儀表板** -- `stock-dashboard` 啟動 Streamlit 介面，一站瀏覽所有功能
-- **主動式 ETF 跟單** -- 28+ 檔主動式 ETF + 安聯台灣科技基金 (ALI006) 持股快照、共識加碼/新建倉/抬轎候選計算
+- **主動式 ETF 跟單** -- 內建 **27 檔主動式 `*A` ETF + ALI006（安聯台灣科技基金）＝ 28 筆** 持股追蹤清單（見 `src/bot/active_etf.py` 的 `DEFAULT_ACTIVE_ETFS`；可被 `data/active_etfs.json` 覆寫）
 - **MOPS 法說會爬蟲** -- 抓法人說明會行事曆與個股重大訊息
 - **🤖 全自動法說研究** -- 自動抓行事曆 + 上網搜尋 (DuckDuckGo + Google News) + 鉅亨新聞 + LLM 結構化分析，不需貼逐字稿
 - **法說會行事曆自動快取** -- 上月 / 本月 / 下月 / +2 月四個月份自動每日更新，dashboard 進入即用
@@ -40,9 +40,9 @@
 - **K 線型態判讀** -- 單根 K 棒自動分類為 16 種型態 (大/中/小紅黑K、鎚子/倒鎚、紡錘、十字/T/倒T/一字線)，附偏多偏空與市場訊號
 - **Q1～Q4 季報節奏** -- 滾動 EPS、季度營收聚合、季節性焦點框架
 - **一鍵研究管線** -- `stock-auto-research` 把 ETF×籌碼×法說×LLM×每日簡報全部串連
-- **K 線看板 (Stock Board)** -- 三種顯示模式 (縮圖 grid / 並排大圖 / 單檔專注)、9 段時間範圍 (1 個月 ~ 10 年 / 自訂日期)、可手動 Y 軸縮放、批次分月往前抓 1/2/3/5/10 年歷史，並直接推送到 Google Sheets
+- **K 線看板 (Stock Board)** -- 三種顯示模式 (縮圖 grid / 並排大圖 / 單檔專注)、10 段時間範圍 (1 個月 ~ 10 年 / 全部 / 自訂日期)、可手動 Y 軸縮放、批次分月往前抓 1/2/3/5/10 年歷史，並直接推送到 Google Sheets
 - **個股總覽 Watchlist** -- 表格化呈現多檔個股，四時間框架評分排序篩選
-- **個股深入分析** -- 單檔股票完整 KPI + 4 張量表卡 + 6 個分頁 (分析/原資料/分析數據/購買策略/現況/歷史)
+- **個股深入分析** -- 單檔股票完整 KPI + 4 張量表卡 + 11 個分頁 (分析/基本面/技術面/籌碼面/股利/季報/美股連動/原始資料/購買策略/目前狀況/歷史狀況)
 - **評分量表系統** -- 九個 factor × 四時間框架 (當沖/短/中/長) 加權算分，附完整策略 (進場/停損/停利/部位)
 - **本地 SQLite 冷/溫資料庫** -- 集中管理公司基本面、ETF Meta、月營收、季報、watchlist、**歷史日 K 線**；Cache-Aside 降低 API 用量
 - **歷史 K 線入庫** -- TWSE 抓到的 OHLCV 自動寫入 `price_history` table，跨機可同步、可離線分析
@@ -56,7 +56,8 @@
 | **台股** (上市 / 上櫃) | 真實/模擬交易 | ✅ (透過永豐 Shioaji) | Shioaji 即時行情 + TWSE / TPEx OpenAPI (日K、月營收、估值、季報、籌碼皆涵蓋上市與上櫃) |
 | **美股 / ADR** | 純分析 | ❌ | yfinance (盤後快照) |
 | **加權指 / SOX / VIX** | 純分析 (跨市場連動) | ❌ | yfinance |
-| 期貨、選擇權、興櫃 | — | ❌ (未實作) | — |
+| 台指期（僅行情／正逆價差分析） | 純分析 | ❌（不含期貨下單） | TAIFEX DailyMarketReportFut；支援 raw/research/evidence/claim 追溯 |
+| 選擇權、興櫃 | — | ❌ (未實作) | — |
 
 ### Preflight 交易可行性（7 個分區）
 
@@ -90,6 +91,20 @@ uv run stock-preflight --json         # 給 CI / 通知用
 ```
 
 Exit code：`0` 無 fail／`2` 有阻擋項（人類可讀與 `--json` 相同）。
+
+研究、證據與可選服務使用另一個不碰網路、不呼叫 LLM、不寫入資料庫的整合檢查：
+
+```powershell
+uv run stock-system-preflight --root C:\skymiku\stock --json
+uv run stock-system-preflight --root C:\skymiku\stock --imports
+```
+
+它會唯讀檢查 SQLite integrity、raw SHA-256、FTS、provenance orphan、research
+缺口，以及 Gemini／Google Sheets 設定狀態。缺少可選服務只會標示 `info`；真正的
+資料完整性錯誤才會以 exit code `2` 阻擋。需要實際 API／來源驗證時，仍要另外執行
+`stock-gemini-test`、`stock-validate --cloud` 或 `stock-validate --shioaji`。
+若目前有舊版 Dashboard 佔用 `.venv\Scripts` 的入口檔，也可直接使用
+`uv run --no-sync python -m bot.system_preflight_cli --root C:\skymiku\stock --json`。
 
 或在儀表板 **⚡ 執行與紀錄 → 🩺 交易可行性檢查** 點「立刻檢查」，
 會顯示 **7 個分區**（環境 / CA / 連線 / 帳戶 / 風控 / 時間 / **持倉安全**）、
@@ -249,20 +264,20 @@ LLM_SELL_GATE_ENABLED=true
 | `watch` | Shioaji 即時行情 | ✅ | ❌ | ❌ | `data/reports/signals_*.csv` + `report_*.csv` |
 | `report` | TWSE 公開延遲資料 | ❌ | ❌ | ❌ | `data/reports/signals_*.csv` + `report_*.csv` |
 
-### trade — 自動交易 (預設)
-
-- 完整的 Shioaji 登入流程，需要 API Key + Secret Key
-- 實單模式需啟用電子憑證 (CA)
-- 策略觸發進出場條件時真正送出委託
-- `SIMULATION=true` 時使用 Shioaji 模擬環境
-
-### watch — 看盤模式
+### watch — 看盤模式（預設 `RUN_MODE=watch`）
 
 - 使用 Shioaji 行情 API 接收即時 Tick 資料
 - **不啟用 CA、不會送出任何委託**
 - 觸發進出場條件時記錄 would-buy / would-sell 訊號
 - 虛擬部位會追蹤停損、移動停利與收盤出場
-- 適合先觀察策略表現，確認邏輯再切換到 trade 模式
+- 適合日常觀察；程式與 `.env.example` 預設皆為 `watch`
+
+### trade — 自動交易（需明確設定；當沖實單預設封存）
+
+- 完整的 Shioaji 登入流程，需要 API Key + Secret Key
+- 實單模式需啟用電子憑證 (CA)；且當沖 trade 預設封存，需 `DAY_TRADING_UNFREEZE=true` 才可能啟動
+- 策略觸發進出場條件時真正送出委託
+- `SIMULATION=true` 時使用 Shioaji 模擬環境
 
 ### report — 報表分析模式
 
@@ -324,7 +339,7 @@ cp .env.example .env
 
 | 變數 | 說明 | 預設值 |
 |------|------|--------|
-| `RUN_MODE` | 執行模式 (`trade` / `watch` / `report`) | `trade` |
+| `RUN_MODE` | 執行模式 (`trade` / `watch` / `report`) | `watch` |
 | `MARKET_SOURCE` | 行情來源 (留空自動判斷) | (自動) |
 | `REPORT_POLL_SECONDS` | report 模式輪詢間隔 (秒) | `5` |
 | `REPORT_OUTPUT_DIR` | 報表輸出目錄 | `data/reports` |
@@ -334,7 +349,7 @@ cp .env.example .env
 | `CA_PASSWORD` | 憑證密碼 | (trade 實單必填) |
 | `PERSON_ID` | 身分證字號 | (trade 實單必填) |
 | `SIMULATION` | 模擬模式 | `true` |
-| `SYMBOLS` | 監控股票 (逗號分隔) | `2330,0050` |
+| `SYMBOLS` | 監控股票 (逗號分隔) | `.env.example` 範例預設 `2330,0050`；Settings 未載入 env 時 fallback 為空 |
 | `ENTER_CUTOFF_TIME` | 停止進場時間 | `09:30` |
 | `EXIT_TIME` | 全部出場時間 | `13:15` |
 | `STOP_LOSS_PCT` | 停損百分比 | `-3.0` |
@@ -349,14 +364,14 @@ cp .env.example .env
 ## 使用方式
 
 ```bash
-# 自動交易模式 (預設)
+# 看盤模式（預設 RUN_MODE=watch；需要 .env 中的 API Key）
 uv run stock-bot
-
-# 看盤模式 (需要 .env 中的 API Key)
-RUN_MODE=watch uv run stock-bot
 
 # 報表模式 (不需要 API Key)
 RUN_MODE=report SYMBOLS=2330,0050 uv run stock-bot
+
+# 自動交易模式（需明確設定；當沖實單另需解凍）
+RUN_MODE=trade uv run stock-bot
 ```
 
 PowerShell 使用者：
@@ -372,37 +387,22 @@ $env:RUN_MODE="report"; $env:SYMBOLS="2330,0050"; uv run stock-bot
 
 ```bash
 uv run stock-dashboard
-# 或
+# 或（shim：轉呼叫 bot.dashboard.main_app / run）
 uv run streamlit run src/bot/dashboard.py
 ```
 
-啟動後瀏覽器會自動打開 `http://localhost:8501`，左側選單分成八頁：
+啟動後瀏覽器會打開本機 Streamlit 頁面。**頁面名稱、數量與導覽分組以
+`src/bot/dashboard/nav.py` 的 `PAGES`／`NAV_GROUPS` 為權威現況**（含晚點插入的
+「台股行事曆」）；能力盤點報告也從此掃描，勿以本 README 的舊表為準。
 
-| 頁面 | 功能 |
-|------|------|
-| 功能總覽 | 三模式說明 + 核心功能格 + 快速入口 |
-| 組態設定 | 表單編輯 `.env`，存檔自動驗證 + `.env.bak` 備份 |
-| 啟動 / 監控 | 一鍵啟動 trade/watch/report，即時 tail log，可隨時停止 |
-| **🩺 交易可行性檢查** | 一鍵體檢：API Token 下單權限 / CA / 簽署狀態 / RUN_MODE / 盤中時間 / 風控設定 |
-| **🛡 風控中心** | 今日資金/部位/損益、12 道閘門設定、Kill Switch 拉閘按鈕、被擋下的進場紀錄 |
-| 報表分析 | 自動列出 `data/reports/` 的 report/signal CSV，含篩選、走勢圖、下載 |
-| 交易紀錄 | 列出 `data/trades_*.csv`，自動加總買賣金額並繪圖 |
-| **⚡ 今日當沖戰情室** | 鉅亨網新聞 → LLM 萃取題材 → 候選股 → 當沖分排序 → LLM 戰情簡報 (主題驅動選股) |
-| **🌙 明日當沖關注** | 盤後/凌晨跑：題材延續 + 今日強勢承接 + 明日法說事件 → next_day_score 排序 → LLM 明日預備清單 (draft / update 雙版本) |
-| **📊 K 線看板** | 三模式 (縮圖 grid / 並排大圖 / 單檔專注) + 9 段時間範圍 (1m~10y / 自訂) + 手動 Y 軸 + 多面板選擇 (K/量/MACD/RSI/KD/布林) + 分月批次往前抓 1~10 年 + Push price_history 到 Sheets + 摘要表「K 線型態」欄 (16 種型態自動判讀) |
-| **個股總覽** | 自訂 Watchlist 表格，四時間框架 × 9 factor 加權評分 (含美股連動)、排序、過濾、CSV 匯出 |
-| **個股深入分析** | 單檔 360 度視角，11 個分頁：分析 / 基本面 / **技術面 (含 K 線型態判讀 + 近 10 根型態表)** / 籌碼面 / 股利政策 / 季報 Q1-Q4 / **美股連動** / 原始資料 / 購買策略 / 目前狀況 / 歷史狀況 |
-| 自動化管線 | 一鍵跑完 ETF + 籌碼 + 法說 + **美股** + LLM + 每日簡報 + 跨市場簡報 |
-| **美股 / 跨市場** | S&P/NASDAQ/SOX/VIX/加權 + 重點美股 + ADR 溢價 + LLM 跨市場簡報 + 供應鏈對照表編輯 |
-| 主動 ETF 追蹤 | 28+ 檔主動式 ETF + ALI006 安聯台灣科技基金、URL 設定、一鍵自動抓取、CSV 匯入、Top10 權重圖 |
-| 跟單訊號 | 共識持股、共識新建倉、共識加碼、持股變動明細 |
-| LLM 法說分析 | Gemini 解析法說會、抓 MOPS 行事曆、自動抓籌碼面+言行反查 |
-| Prompt 管理 | 編輯 prompts/*.yaml，render 預覽，即時生效 |
-| LLM 呼叫紀錄 | 瀏覽每筆 LLM 呼叫的 input/output/延遲/tokens，可篩選 prompt_id |
-| 日誌檢視 | 瀏覽 `log/*.log`，支援 tail N 行 + 自動刷新 |
-| 通知測試 | 直接從 UI 發送 Telegram 測試訊息 |
-| **資料庫 / 雲端同步** | 瀏覽 / 編輯 SQLite 各 table、CSV 匯入、Google Sheets 雙向同步 |
-| 策略與文件 | 內建 README / docs / strategy.py 原始碼閱讀器 |
+常用頁面摘要（非完整清單）：
+
+| 區塊 | 代表性頁面 |
+|------|-----------|
+| 🔍 研究與分析 | 功能總覽、今日當沖戰情室／即時追蹤、明日當沖關注、K 線看板、個股總覽／深入分析、自動化管線 |
+| 📡 監控與訊號 | 美股／跨市場、熱門個股期貨、跟單訊號、主動 ETF 追蹤（27 `*A` + ALI006＝28）、LLM 法說分析、台股行事曆 |
+| ⚡ 執行與紀錄 | 啟動／監控、模擬交易、風控中心、交易可行性檢查、交易紀錄、報表分析 |
+| ⚙️ 系統與診斷 | 組態、資料庫／雲端同步、Prompt／LLM 紀錄、記憶與證據、日誌、通知、文件 |
 
 ### 策略切換
 
@@ -477,7 +477,7 @@ uv run stock-calendar-update --upcoming 14  # 抓完印出未來 14 天的法說
 dashboard「台股行事曆」、`stock-auto-research --llm-only`、明日當沖關注與 LLM 個股研究都會使用這些快取。
 全球科技事件預設 12 小時內視為新鮮 (可用 `GLOBAL_EVENTS_MAX_AGE_HOURS` 調整)。
 
-排程建議 (Windows Task Scheduler / cron 每天 06:30)：
+單次／替代排程範例（若已啟用常駐 `stock-scheduler`，不要再重複排這組命令）：
 ```
 uv run stock-calendar-update --upcoming 14
 uv run stock-auto-research --llm-only --upcoming
@@ -661,14 +661,14 @@ uv run stock-nextday --scan-limit 80       # 強勢承接掃描範圍 80 檔
    - 每日快取於 `data/macro/macro_YYYY-MM-DD.json`，避免重複打 API
 
 2. **對照層** (`data/supply_chain.json`)
-   - 預設內建 11 家美股龍頭對應的台股供應鏈 (`NVDA → 2330/3231/2382/3017/6669/3037/3711/...`、`AAPL → 2317/3008/2382/2474/2354/...`)
-   - 每條對應有 `weight` 與 `role`，用於 us_market factor 加權平均
+   - 本機 JSON：美股代號 → 台股供應鏈條目（含 `weight`／`role`），供 us_market factor 與跨市場頁編輯
+   - 與 `prompts/archive/supply_chain_impact.yaml` **不同**：後者是尚未接線的 LLM 設計稿（見 `prompts/archive/README.md`），不是本檔的管線實作
    - 可在儀表板「美股 / 跨市場」頁直接編輯 JSON 並儲存
 
 3. **分析層 (LLM)**
    - `prompts/us_market_brief.yaml` — 把美股盤後資料 + 供應鏈對照丟給 Gemini，產出「對台股早盤影響」中文簡報，含偏多/偏空標的清單
-   - `prompts/supply_chain_impact.yaml` — （規劃中）給單篇美股財報/新聞 + 供應鏈，輸出結構化 JSON
-   - `prompts/analyst_real_sentiment.yaml` — （規劃中）外資報告語意 vs 實際買賣超反指標分析
+   - `prompts/archive/supply_chain_impact.yaml` — 已封存設計稿；尚無美股→台股供應鏈 LLM 管線接線
+   - `prompts/archive/analyst_real_sentiment.yaml` — 已封存設計稿；外資報告語意流程未建置
 
 **CLI 排程化**
 
@@ -699,16 +699,17 @@ uv run stock-scheduler --dry-run  # 只印排程計畫，不實際執行
 
 - **macro** 任務：定期呼叫 `stock-macro-update` 刷新行情/總經 (預設每 30 分，不打 LLM)。
 - **research** 任務：定期呼叫 `stock-auto-research` 跑完整研究管線 (預設每 240 分，含 LLM 簡報)。
-  也會自動回頭重抓**新掛牌 ETF** 的持股，一旦來源公開即補齊 CSV。
+  預設每輪最多完整研究 12 檔缺少或過期快取的個股，並輪替延後名單；12 小時有效快取會略過。
+  可用 `SCHEDULER_RESEARCH_MAX_TICKERS` 調整，設為 `0` 代表不設上限。也會回頭重抓**新掛牌 ETF**持股。
 - **company** 任務：定期呼叫 `stock-company-update` 補齊公司基本資料 (名稱/**產業別**/上市日，預設一天一次)。
   解決持股分析與查資料頁面大量顯示「未分類」、名稱空白的問題。
 - **fundamentals** 任務：定期呼叫 `stock-fundamentals-refresh` 慢速刷新基本面佇列 (預設每 360 分)。
 - **cloud_sync** 任務：定期呼叫 `stock-cloud-sync` 同步 Google Sheets (需設定 `GOOGLE_*`，見 `docs/cloud_sync_setup.md`)。
 - **monitor** 托管 (選用，`SCHEDULER_SUPERVISE_MONITOR=true`)：開盤自動啟動 `stock-bot` 監測子行程、收盤自動停止。
 - 各任務間隔、是否只在交易時段執行，皆由 `.env` 的 `SCHEDULER_*` 控制 (見 `.env.example`)。
+- 排程器以作業系統檔案鎖避免第二個程序重複執行；Windows 常駐工作設定見 [docs/automation-plan.md](docs/automation-plan.md)。
 
-> 要 24/7 常駐，建議用 Windows 工作排程器在登入時啟動 `uv run stock-scheduler`，
-> 或每 N 分鐘觸發 `uv run stock-scheduler --once`。
+> 請在「登入時常駐 daemon」與「外部定時觸發 `--once`」兩種模式中擇一。此 Windows 環境採用登入時常駐；不要同時設定兩種觸發。
 
 ### 零股下單流程測試 (stock-oddlot-test)
 
@@ -757,16 +758,18 @@ uv run stock-oddlot-test --no-sell            # 只測買進
 每張時間框卡片會在 UI 顯示：總分、建議行動 (`強烈買進` / `買進` / `觀望` / `減碼` / `賣出`)、
 各 factor 分數明細、進場/停損/停利/部位/盈虧比/進場邏輯文字。
 
-### 儀表板導覽 (4 大區塊)
+### 儀表板導覽（權威現況）
 
-側欄已重新分組：
+側欄分組以 `src/bot/dashboard/nav.py` 的 `NAV_GROUPS` 為準（摘要）：
 
 ```
-🔍 研究與分析  → 功能總覽 / **今日當沖戰情室** / **📊 K 線看板** / 個股總覽 / 個股深入分析 / 自動化管線
-📡 監控與訊號  → 美股 / 跨市場 / 跟單訊號 / 主動 ETF 追蹤 / LLM 法說分析
-⚡ 執行與紀錄  → 啟動 / 監控 / 交易紀錄 / 報表分析
-⚙️  系統與診斷  → 組態設定 / 資料庫雲端 / Prompt 管理 / LLM 呼叫紀錄 / 日誌 / 通知 / 文件
+🔍 研究與分析  → 功能總覽 / 今日當沖戰情室 / 今日當沖即時追蹤 / 明日當沖關注 / K 線看板 / 盤中強弱排行 / 個股總覽 / 目前持股分析 / 個股深入分析 / 自動化管線
+📡 監控與訊號  → 美股 / 跨市場 / 熱門個股期貨 / 跟單訊號 / 主動 ETF 追蹤 / LLM 法說分析 / 台股行事曆
+⚡ 執行與紀錄  → 啟動 / 監控 / 模擬交易 / 風控中心 / 交易可行性檢查 / 交易紀錄 / 報表分析
+⚙️  系統與診斷  → 組態設定 / 資料庫雲端 / Prompt 管理 / LLM 呼叫紀錄 / 記憶與證據 / 日誌 / 通知 / 文件
 ```
+
+頁面計數與名稱請以程式掃描結果或 `docs/reports/system_capability_report.html` 為準，勿依賴本 README 舊表。
 
 ### Prompt 管理 (prompts/*.yaml)
 
@@ -821,24 +824,22 @@ src/bot/
   scoring.py               # 評分量表系統 (4 時間框 × 9 factor，含美股連動)
   ticker_view.py           # 個股 360 度 TickerSnapshot 整合 (含 macro/us_related/adr)
   watchlist.py             # JSON-backed 個股 Watchlist 管理
-  dashboard.py             # Streamlit Web 儀表板 (含個股 360 度 10 分頁)
+  dashboard.py             # Streamlit 入口 shim（轉呼叫 bot.dashboard）
+  dashboard/               # 實際頁面與導覽（nav.py 為頁面權威清單）
   env_io.py                # 儀表板的 .env 讀寫/驗證工具
   process_runner.py        # 儀表板的 stock-bot 子行程管理 (啟動/停止/tail log)
   stock_db.py              # 集中管理冷/溫資料的 SQLite 資料庫 + DAO (含 price_history) (Cache-Aside)
   cloud_sync.py            # Google Sheets 雙向同步 (push / pull / 智能 sync，含 price_history)
 prompts/                   # 見 prompts/README.md（含 planned / archive）
+prompts/archive/           # 已封存、不被 PromptRegistry 載入的設計稿
 data/
-  supply_chain.json            # 美股 → 台股供應鏈對照表
+  supply_chain.json            # 美股 → 台股供應鏈對照表（資料層；非 archived prompt）
   macro/                       # 每日美股/ADR 快取 JSON
-tests/
+tests/                     # 代表性單元／整合測試（完整清單以 tests/ 目錄為準，勿以本表為完整 inventory）
   test_config.py           # Settings 解析測試
   test_strategy.py         # 策略模式測試
-  test_market_source.py    # TWSE 資料解析測試
-  test_broker.py           # Broker 行為測試
-  test_signal_recorder.py  # 訊號錄製與報表測試
-  test_fundamentals.py     # 基本面/技術面/集保/季報模組單元測試
-  test_stock_db.py         # SQLite DAO / Cache-Aside 測試
-  test_cloud_sync.py       # Google Sheets 同步 (mock) 測試
+  test_capability_report.py # 能力盤點報告離線／audit-json 契約
+  ...                      # 其餘模組測試見 tests/
 ```
 
 ## K 線看板 (Stock Board)
@@ -853,10 +854,10 @@ tests/
 | **並排大圖** | 選 2~4 檔做完整 K + 量比較；可手動 Y 軸統一刻度 |
 | **單檔專注** | 進入「完整 K 線工作台」，含時間範圍/Y軸/面板選擇/往前抓取等所有控制 |
 
-### 時間範圍 (9 段)
+### 時間範圍 (10 段)
 
 `近 1 個月` / `近 3 個月` / `近 6 個月` (預設) / `近 1 年` / `近 2 年` / `近 3 年` / `近 5 年` / `近 10 年` / `全部` / `自訂日期`。
-單檔專注模式 (含「個股深入分析 → 技術面」) 還可選 **自訂起訖日**。
+單檔專注模式 (含「個股深入分析 → 技術面」) 可選上述含 **自訂起訖日** 的完整 10 段；K 線看板縮圖／並排模式則不含「自訂日期」。
 
 ### 面板選擇
 
@@ -937,6 +938,7 @@ uv sync --extra cloud
 ```bash
 uv run stock-db-backup              # → data/backups/stock_YYYYMMDD_HHMMSS.db
 uv run stock-db-backup --json       # CI / 腳本用
+uv run stock-db-backup --root C:\\skymiku\\stock --json  # 從其他 CWD 執行
 ```
 
 `STOCK_DB_PATH`（若設定）會被所有 CLI／dashboard／管線統一使用；未設定則為 `data/stock.db`。
@@ -995,7 +997,7 @@ dashboard 的「個股深入分析」頁採用 **3D + 催化劑** 視角，把�
 | **大戶 / 超大戶 / 散戶持股比例** | `chip_distribution.DistributionWeekly` | **TDCC 集保戶股權分散表** |
 | 大戶結構解讀 (吸籌 / 出貨 / 中性) | `chip_distribution.interpret_distribution` | 週度趨勢計算 |
 | 大戶 vs 散戶趨勢線圖 | dashboard 籌碼面分頁 | Altair |
-| 主動 ETF 共識持有與加碼 | `etf_consensus` | 28+ 檔主動式 ETF + ALI006 |
+| 主動 ETF 共識持有與加碼 | `etf_consensus` | 27 檔 `*A` + ALI006（共 28） |
 
 ### 四、配股配息：衡量資金回報與成熟度
 
@@ -1103,6 +1105,7 @@ class MyCustomStrategy(BaseStrategy):
 - **[docs/setup.md](docs/setup.md)** -- 安裝與開戶設定（權威安裝指南）
 - **[docs/architecture.md](docs/architecture.md)** -- 系統架構與模組職責
 - **[docs/operations.md](docs/operations.md)** -- 日常運維、排程與 log
+- **[docs/automation-plan.md](docs/automation-plan.md)** -- Windows 常駐排程器、工作觸發與研究批次上限
 - **[docs/glossary.md](docs/glossary.md)** -- 全專案術語對照表（代號、損益、停損停利、持倉、風控層級）
 - **[docs/trading-rules.md](docs/trading-rules.md)** -- 自動買賣規則（ConfigurableStrategy / EtfFollowStrategy / 出場規則）
 - **[docs/profit-plan.md](docs/profit-plan.md)** -- 資金與風險規劃

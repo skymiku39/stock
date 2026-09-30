@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.cloud_file_cache import mirror_file_to_cloud
 from bot.config import Settings
 from bot.market_macro import (
@@ -21,45 +22,56 @@ from bot.market_macro import (
     load_supply_chain,
     macro_to_dict,
 )
-from bot.utils import get_logger
+from bot.utils import get_logger, log_root
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-macro-update",
         description="抓美股 / 加權指 / ADR 溢價 (可選 LLM 跨市場簡報)",
     )
     parser.add_argument("--no-cache", action="store_true", help="強制重抓，不使用日快取")
     parser.add_argument("--brief", action="store_true", help="呼叫 Gemini 產出跨市場簡報")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("macro-update")
-    settings = Settings()
-    project_root = Path.cwd()
+    project_root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("macro-update", log_dir=project_root / "log")
+    settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
 
     logger.info("=== 抓 macro 開始 ===")
-    snap = fetch_macro_snapshot(
-        root=project_root,
-        force_refresh=args.no_cache,
-        use_cache=not args.no_cache,
-        logger=logger,
-    )
+    with log_root(project_root):
+        snap = fetch_macro_snapshot(
+            root=project_root,
+            force_refresh=args.no_cache,
+            use_cache=not args.no_cache,
+            logger=logger,
+        )
     logger.info(
         "完成: %d 指數, %d 個股, %d ADR 溢價, USDTWD=%.3f",
-        len(snap.indices), len(snap.stocks), len(snap.adr_premiums), snap.usdtwd,
+        len(snap.indices), len(snap.stocks), len(snap.adr_premiums), snap.usdtwd or 0.0,
     )
 
     if not args.brief:
         return 0
 
-    api_key = settings.gemini_api_key
-    if not api_key:
-        logger.warning("GEMINI_API_KEY 未設定，無法產出簡報")
+    if not settings.llm_enabled:
+        logger.warning("尚未設定可用的 LLM 提供者，無法產出簡報")
         return 1
 
     from bot.llm_analyzer import GeminiClient, gemini_call
 
-    client = GeminiClient(api_key=api_key, model=settings.gemini_model, logger=logger)
+    client = GeminiClient(
+        api_key=settings.gemini_api_key,
+        model=settings.gemini_model,
+        logger=logger,
+        settings=settings,
+        root=project_root,
+    )
     if not client.enabled:
         logger.warning("LLM 啟用失敗")
         return 1

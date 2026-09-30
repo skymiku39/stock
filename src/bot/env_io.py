@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -25,6 +27,28 @@ class EnvField:
     help: str = ""
     options: List[str] = field(default_factory=list)
     secret: bool = False
+
+
+def llm_provider_ready(values: Dict[str, Any]) -> bool:
+    """Return whether the selected provider has enough local configuration."""
+    provider = str(values.get("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
+    if provider == "codex_app_server":
+        endpoint = urlparse(str(values.get("CODEX_APP_SERVER_URL", "") or "").strip())
+        model = str(values.get("CODEX_APP_SERVER_MODEL", "") or "").strip()
+        if endpoint.scheme != "ws" or not endpoint.hostname:
+            return False
+        try:
+            port = endpoint.port
+        except ValueError:
+            return False
+        if port is None:
+            return False
+        try:
+            loopback = ipaddress.ip_address(endpoint.hostname).is_loopback
+        except ValueError:
+            loopback = endpoint.hostname.lower() == "localhost"
+        return bool(loopback and model)
+    return bool(str(values.get("GEMINI_API_KEY", "") or "").strip())
 
 
 # ----------------------------------------------------------------------
@@ -373,6 +397,26 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(
         "ETF_MAX_PCT_CHG_ON_ENTRY", "進場最大漲幅 (%)", "策略", "float",
         default="4.0",
+    ),
+
+    # LLM provider
+    EnvField(
+        "LLM_PROVIDER", "LLM 提供者", "LLM 分析", "select",
+        default="gemini", options=["gemini", "codex_app_server"],
+        help="選擇 Gemini API 或本機 Codex App Server WebSocket",
+    ),
+    EnvField(
+        "CODEX_APP_SERVER_URL", "Codex App Server 位址", "LLM 分析", "str",
+        default="ws://127.0.0.1:4500",
+        help="僅使用本機 loopback WebSocket，例如 ws://127.0.0.1:4500",
+    ),
+    EnvField(
+        "CODEX_APP_SERVER_MODEL", "Codex 模型", "LLM 分析", "str",
+        default="gpt-6-sol",
+    ),
+    EnvField(
+        "CODEX_APP_SERVER_EFFORT", "Codex 推理強度", "LLM 分析", "select",
+        default="max", options=["low", "medium", "high", "xhigh", "max"],
     ),
 
     # Gemini LLM

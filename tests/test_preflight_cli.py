@@ -29,7 +29,7 @@ def _run_main(
     *,
     fails: bool = False,
 ) -> int:
-    monkeypatch.setattr("bot.preflight_cli.Settings", lambda: object())
+    monkeypatch.setattr("bot.preflight_cli.Settings", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         "bot.preflight_cli.run_preflight",
         lambda *args, **kwargs: _report(fails=fails),
@@ -70,3 +70,33 @@ def test_json_exit_0_without_fail(monkeypatch, capsys) -> None:
     payload = json.loads(out)
     assert payload["can_simulate"] is True
     assert payload["sections"]["safety"]
+
+
+def test_root_is_passed_to_settings_loader(monkeypatch, tmp_path) -> None:
+    seen = {}
+
+    def _settings(*args, **kwargs):
+        seen["env_file"] = kwargs.get("_env_file")
+        return object()
+
+    monkeypatch.setattr("bot.preflight_cli.Settings", _settings)
+    monkeypatch.setattr("bot.preflight_cli.run_preflight", lambda *a, **k: _report())
+    monkeypatch.setattr("bot.preflight_cli.get_logger", lambda name: object())
+    assert main(["--root", str(tmp_path), "--no-login", "--json"]) == 0
+    assert seen["env_file"] == str(tmp_path.resolve() / ".env")
+
+
+def test_root_is_passed_to_preflight_runner(monkeypatch, tmp_path) -> None:
+    seen = {}
+
+    monkeypatch.setattr("bot.preflight_cli.Settings", lambda *_args, **_kwargs: object())
+
+    def _run(*args, **kwargs):
+        seen["project_root"] = kwargs.get("project_root")
+        return _report()
+
+    monkeypatch.setattr("bot.preflight_cli.run_preflight", _run)
+    monkeypatch.setattr("bot.preflight_cli.get_logger", lambda name: object())
+
+    assert main(["--root", str(tmp_path), "--no-login", "--json"]) == 0
+    assert seen["project_root"] == tmp_path.resolve()

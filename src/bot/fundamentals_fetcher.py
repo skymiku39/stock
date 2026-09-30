@@ -31,6 +31,7 @@ from bot.cloud_file_cache import (
     read_json_cache as _read_cloud_json_cache,
     write_json_cache as _write_cloud_json_cache,
 )
+from bot.data_quality import persist_source_result, response_to_rows
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -123,6 +124,11 @@ class ValuationDaily:
     pb_ratio: float = 0.0
     dividend_yield: float = 0.0      # %
     dividend_year: str = ""          # 殖利率所屬股利所屬年度
+    source_url: str = ""
+    source_date: str = ""
+    retrieved_at: str = ""
+    quality_status: str = "unknown"
+    source_document_id: str = ""
 
 
 @dataclass
@@ -138,6 +144,11 @@ class DividendRecord:
     fill_date: str = ""              # 填息日
     fill_days: Optional[int] = None  # 填息所花天數
     payout_ratio: Optional[float] = None  # 盈餘分配率 %
+    source_url: str = ""
+    source_date: str = ""
+    retrieved_at: str = ""
+    quality_status: str = "unknown"
+    source_document_id: str = ""
 
 
 @dataclass
@@ -156,6 +167,12 @@ class QuarterlyFinancials:
     net_income: float = 0.0
     roe: Optional[float] = None
     note: str = ""
+    # exact raw provenance；舊手動匯入資料可保持空白，不猜來源。
+    source_url: str = ""
+    source_date: str = ""
+    retrieved_at: str = ""
+    quality_status: str = "unknown"
+    source_document_id: str = ""
 
 
 @dataclass
@@ -263,6 +280,75 @@ def _read_json_cache(path: Path, ttl_seconds: Optional[int] = None) -> Optional[
 
 def _write_json_cache(path: Path, data: Any) -> None:
     _write_cloud_json_cache(path, data, indent=2)
+
+
+def _cache_retrieved_at(path: Path) -> str:
+    """回傳快取檔案的本機保存時間，不能把現在時間冒充資料抓取時間。"""
+    try:
+        return dt.datetime.fromtimestamp(
+            path.stat().st_mtime,
+            tz=now_tw().tzinfo,
+        ).isoformat(timespec="seconds")
+    except OSError:
+        return ""
+
+
+def _merge_monthly_revenue(
+    existing: List[MonthlyRevenue],
+    fallback: List[MonthlyRevenue],
+) -> List[MonthlyRevenue]:
+    """合併個股與全市場月營收；個股歷史優先於全市場快照。"""
+    merged: Dict[tuple[int, int], MonthlyRevenue] = {
+        (row.year, row.month): row for row in fallback
+    }
+    merged.update({(row.year, row.month): row for row in existing})
+    return sorted(merged.values(), key=lambda row: (row.year, row.month))
+
+
+def _merge_dividend_records(
+    existing: List[DividendRecord],
+    fallback: List[DividendRecord],
+) -> List[DividendRecord]:
+    """合併股利年度快照；個股歷史優先於全市場回退資料。"""
+    merged: Dict[int, DividendRecord] = {row.year: row for row in fallback}
+    merged.update({row.year: row for row in existing})
+    return sorted(merged.values(), key=lambda row: row.year)
+
+
+def _merge_quarterly_records(
+    existing: List[QuarterlyFinancials],
+    fallback: List[QuarterlyFinancials],
+) -> List[QuarterlyFinancials]:
+    """合併季報；同年度同季度以個股快取／手動資料優先。"""
+    merged: Dict[tuple[int, int], QuarterlyFinancials] = {
+        (row.year, row.quarter): row for row in fallback
+    }
+    merged.update({(row.year, row.quarter): row for row in existing})
+    return sorted(merged.values(), key=lambda row: (row.year, row.quarter))
+
+
+def _aggregate_dividend_records(
+    rows: List[Dict[str, Any]],
+    ticker: str,
+) -> List[DividendRecord]:
+    """把全市場股利快照聚合成個股年度資料，不寫回個股快取。"""
+    by_year: Dict[int, DividendRecord] = {}
+    for raw in rows:
+        record = _parse_dividend(raw, ticker)
+        if record is None:
+            continue
+        current = by_year.get(record.year)
+        if current is None:
+            by_year[record.year] = record
+            continue
+        current.cash_dividend += record.cash_dividend
+        current.stock_dividend += record.stock_dividend
+        current.ex_dividend_date = current.ex_dividend_date or record.ex_dividend_date
+        current.ex_right_date = current.ex_right_date or record.ex_right_date
+    for record in by_year.values():
+        record.cash_dividend = round(record.cash_dividend, 4)
+        record.stock_dividend = round(record.stock_dividend, 4)
+    return sorted(by_year.values(), key=lambda row: row.year)
 
 
 def _parse_tw_datetime(value: Any) -> Optional[dt.datetime]:
@@ -376,28 +462,69 @@ def fetch_monthly_revenue_all(
     logger: Optional[logging.Logger] = None,
 ) -> List[Dict[str, Any]]:
     """抓 TWSE OpenAPI 全市場最新月營收 (回傳原始 list[dict])。"""
+    combined, _batches = _fetch_monthly_revenue_batches(
+        root=root,
+        session=session,
+        use_cache=use_cache,
+        cache_ttl=cache_ttl,
+        logger=logger,
+    )
+    return combined
+
+
+def _fetch_monthly_revenue_batches(
+    *,
+    root: Optional[Path] = None,
+    session: Optional[requests.Session] = None,
+    use_cache: bool = True,
+    cache_ttl: int = 6 * 3600,
+    logger: Optional[logging.Logger] = None,
+) -> tuple[List[Dict[str, Any]], List[tuple[str, List[Dict[str, Any]]]]]:
+    """抓月營收並保留每個 raw 回應的 exact source document ID。
+
+    ``fetch_monthly_revenue_all`` 維持既有的原始 rows API；個股 refresh 路徑
+    另使用這個 helper，才能把「哪一個市場 raw 文件」精確傳入 research slice。
+    """
     log = logger or get_logger("fundamentals")
     sess = session or _session()
     cache = _cache_root(root) / "monthly_revenue_all.json"
     if use_cache:
         cached = _read_json_cache(cache, ttl_seconds=cache_ttl)
         if cached is not None:
-            return cached
+            return cached, []
     combined: List[Dict[str, Any]] = []
+    batches: List[tuple[str, List[Dict[str, Any]]]] = []
+    successful_sources = 0
     for label, url in (("上市", URL_MONTHLY_REVENUE), ("上櫃", URL_TPEX_MONTHLY_REVENUE)):
         try:
             resp = sess.get(url, timeout=20)
-            if resp.status_code != 200:
-                log.warning("月營收(%s) HTTP %d", label, resp.status_code)
-                continue
-            data = resp.json()
-            if isinstance(data, list):
-                combined.extend(data)
+            result = response_to_rows(
+                resp,
+                source=f"monthly_revenue_{label}",
+                url=url,
+                min_rows=1,
+            )
+            source_document_id = persist_source_result(result, root=root)
+            if result.usable:
+                combined.extend(result.rows)
+                if source_document_id:
+                    batches.append((source_document_id, result.rows))
+                else:
+                    log.warning(
+                        "月營收(%s) raw 已取得但 provenance 未建立，"
+                        "不進行 canonical/research materialize",
+                        label,
+                    )
+                if result.rows:
+                    successful_sources += 1
+            else:
+                log.warning("月營收(%s) 品質=%s: %s", label, result.status, result.error)
         except Exception:
             log.exception("月營收(%s)抓取失敗", label)
-    if combined:
+    # 只成功單一市場時可供本次研究使用，但不覆蓋可能完整的舊快取。
+    if combined and successful_sources == 2:
         _write_json_cache(cache, combined)
-    return combined
+    return combined, batches
 
 
 def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
@@ -464,8 +591,14 @@ def fetch_monthly_revenue(
     3. 回傳依年月排序的清單。
     """
     log = logger or get_logger("fundamentals")
-    all_rev = fetch_monthly_revenue_all(
-        root=root, session=session, logger=log,
+    # 個股 refresh 必須取得本次 HTTP raw 的 exact manifest，不能只讀全市場
+    # rows cache 後猜 source_document_id。
+    project_root = Path(root) if root is not None else Path.cwd()
+    all_rev, source_batches = _fetch_monthly_revenue_batches(
+        root=root,
+        session=session,
+        use_cache=False,
+        logger=log,
     )
     matched = None
     for raw in all_rev:
@@ -488,6 +621,39 @@ def fetch_monthly_revenue(
             history = []
 
     if matched:
+        # 將同一個已登錄的 raw 文件重播到 canonical SQLite、research chunks、
+        # evidence 與 source claims。任何 provenance 缺口都只保留 file cache，
+        # 不臆造來源 ID。
+        from bot.monthly_revenue_research import ingest_monthly_revenue_from_source_document
+
+        for source_document_id, source_rows in source_batches:
+            if not source_document_id:
+                continue
+            has_ticker = False
+            for raw in source_rows:
+                try:
+                    candidate = _parse_one_revenue(raw)
+                except Exception:
+                    candidate = None
+                if candidate and candidate.ticker == ticker:
+                    has_ticker = True
+                    break
+            if not has_ticker:
+                continue
+            slice_result = ingest_monthly_revenue_from_source_document(
+                root=project_root,
+                source_document_id=source_document_id,
+                ticker=ticker,
+            )
+            if slice_result.status not in {"ok", "reused", "stale_skipped"}:
+                log.warning(
+                    "[%s] monthly revenue research slice %s: %s",
+                    ticker,
+                    slice_result.status,
+                    slice_result.error,
+                )
+            break
+
         key = (matched.year, matched.month)
         history = [h for h in history if (h.get("year"), h.get("month")) != key]
         history.append(asdict(matched))
@@ -525,34 +691,62 @@ def fetch_valuation_all(
         if cached is not None:
             return cached
     combined: List[Dict[str, Any]] = []
+    successful_sources = 0
     # 上市 BWIBBU
     try:
         resp = sess.get(URL_BWIBBU_ALL, timeout=20)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list):
-                combined.extend(data)
+        result = response_to_rows(
+            resp,
+            source="valuation_twse",
+            url=URL_BWIBBU_ALL,
+            min_rows=1,
+        )
+        source_document_id = persist_source_result(result, root=root)
+        if result.usable:
+            for raw in result.rows:
+                row = dict(raw)
+                row["_source_document_id"] = source_document_id or ""
+                row["_source_url"] = URL_BWIBBU_ALL
+                row["_retrieved_at"] = result.fetched_at
+                row["_quality_status"] = result.status
+                combined.append(row)
+            if result.rows:
+                successful_sources += 1
         else:
-            log.warning("Valuation(上市) HTTP %d", resp.status_code)
+            log.warning("Valuation(上市) 品質=%s: %s", result.status, result.error)
     except Exception:
         log.exception("Valuation(上市)抓取失敗")
     # 上櫃 — 正規化成與 BWIBBU 相容的欄位
     try:
         resp = sess.get(URL_TPEX_VALUATION, timeout=20)
-        if resp.status_code == 200:
-            for row in resp.json() or []:
+        result = response_to_rows(
+            resp,
+            source="valuation_tpex",
+            url=URL_TPEX_VALUATION,
+            min_rows=1,
+        )
+        source_document_id = persist_source_result(result, root=root)
+        if result.usable:
+            for row in result.rows:
                 combined.append({
                     "Code": row.get("SecuritiesCompanyCode"),
                     "Name": row.get("CompanyName"),
                     "PEratio": row.get("PriceEarningRatio"),
                     "PBratio": row.get("PriceBookRatio"),
                     "DividendYield": row.get("YieldRatio"),
+                    "Date": row.get("Date") or row.get("資料日期") or "",
+                    "_source_document_id": source_document_id or "",
+                    "_source_url": URL_TPEX_VALUATION,
+                    "_retrieved_at": result.fetched_at,
+                    "_quality_status": result.status,
                 })
+            if result.rows:
+                successful_sources += 1
         else:
-            log.warning("Valuation(上櫃) HTTP %d", resp.status_code)
+            log.warning("Valuation(上櫃) 品質=%s: %s", result.status, result.error)
     except Exception:
         log.exception("Valuation(上櫃)抓取失敗")
-    if combined:
+    if combined and successful_sources == 2:
         _write_json_cache(cache, combined)
     return combined
 
@@ -563,15 +757,52 @@ def _parse_valuation(raw: Dict[str, Any]) -> Optional[ValuationDaily]:
     code = str(raw.get("Code") or raw.get("證券代號") or "").strip()
     if not code:
         return None
+    raw_date = str(
+        raw.get("Date")
+        or raw.get("資料日期")
+        or raw.get("日期")
+        or ""
+    ).strip()
+    parsed_date = _normalize_source_date(raw_date) or ""
+    dividend_yield = _to_float(raw.get("DividendYield") or raw.get("殖利率(%)"))
+    # TWSE occasionally publishes a malformed extreme value (for example
+    # 102.66) in this field.  Preserve the raw row in the source archive and
+    # full-market response, but never expose the invalid value as a usable
+    # per-ticker valuation object.
+    if dividend_yield < -100.0 or dividend_yield > 100.0:
+        return None
     return ValuationDaily(
         ticker=code,
         name=str(raw.get("Name") or raw.get("證券名稱") or ""),
-        date=now_tw().date().isoformat(),
+        # 來源沒有日期時保留空白，不能用本機抓取日冒充觀測日。
+        date=parsed_date,
         pe_ratio=_to_float(raw.get("PEratio") or raw.get("本益比")),
         pb_ratio=_to_float(raw.get("PBratio") or raw.get("股價淨值比")),
-        dividend_yield=_to_float(raw.get("DividendYield") or raw.get("殖利率(%)")),
+        dividend_yield=dividend_yield,
         dividend_year=str(raw.get("FinancialYear") or raw.get("股利年度") or ""),
+        source_url=str(raw.get("_source_url") or ""),
+        source_date=str(raw.get("_source_date") or parsed_date),
+        retrieved_at=str(raw.get("_retrieved_at") or ""),
+        quality_status=str(raw.get("_quality_status") or "unknown"),
+        source_document_id=str(raw.get("_source_document_id") or ""),
     )
+
+
+def _normalize_source_date(raw: str) -> Optional[str]:
+    """把常見西元/民國日期轉成 ISO；未知格式回 None。"""
+    value = str(raw or "").strip().replace("/", "").replace("-", "")
+    if not value.isdigit():
+        return None
+    try:
+        if len(value) == 8:
+            year, month, day = int(value[:4]), int(value[4:6]), int(value[6:8])
+        elif len(value) == 7:
+            year, month, day = int(value[:3]) + 1911, int(value[3:5]), int(value[5:7])
+        else:
+            return None
+        return dt.date(year, month, day).isoformat()
+    except ValueError:
+        return None
 
 
 def fetch_valuation(
@@ -582,13 +813,47 @@ def fetch_valuation(
     logger: Optional[logging.Logger] = None,
 ) -> Optional[ValuationDaily]:
     """個股當日估值。"""
-    rows = fetch_valuation_all(root=root, session=session, logger=logger)
+    # 個股正式 refresh 不能只吃舊 JSON cache；必須取得本次 response 的
+    # exact source_document_id 才能寫入 canonical/evidence。
+    rows = fetch_valuation_all(
+        root=root, session=session, logger=logger, use_cache=False,
+    )
     for raw in rows:
         v = _parse_valuation(raw)
         if v and v.ticker == ticker:
             ticker_dir = _cache_root(root) / ticker
             mk_folder(str(ticker_dir))
             _write_json_cache(ticker_dir / "valuation_latest.json", asdict(v))
+            try:
+                from bot.stock_db import StockDB, ValuationDaily as CanonicalValuation
+                from bot.valuation_research import materialize_valuation_slice
+
+                database = StockDB.open(root=root)
+                try:
+                    canonical = CanonicalValuation(
+                        symbol=v.ticker,
+                        as_of=v.date,
+                        pe_ratio=v.pe_ratio,
+                        pb_ratio=v.pb_ratio,
+                        dividend_yield=v.dividend_yield,
+                        dividend_year=v.dividend_year,
+                        source_url=v.source_url,
+                        source_date=v.source_date,
+                        retrieved_at=v.retrieved_at,
+                        quality_status=v.quality_status,
+                        source_record_id=v.source_document_id,
+                    )
+                    database.upsert_valuation(canonical)
+                    if v.source_document_id:
+                        materialize_valuation_slice(
+                            root=Path(root) if root is not None else Path.cwd(),
+                            valuation=canonical,
+                            db=database,
+                        )
+                finally:
+                    database.close()
+            except Exception:
+                log.exception("[%s] valuation canonical/research materialize 失敗", ticker)
             return v
     cached = _read_json_cache(_cache_root(root) / ticker / "valuation_latest.json")
     if cached:
@@ -671,6 +936,32 @@ def _fetch_dividend_all_resilient(
     combined: List[Dict[str, Any]] = []
     failures: List[str] = []
     source_ok = 0
+    retrieved_at = now_tw().isoformat(timespec="seconds")
+
+    def capture_raw(source: str, url: str, response: Any, quality: str) -> str:
+        try:
+            from bot.source_registry import SourceRegistry
+
+            content = getattr(response, "content", b"") or b""
+            if not content:
+                content = str(getattr(response, "text", "") or "").encode("utf-8")
+            document = SourceRegistry(root or Path.cwd()).capture_document(
+                source,
+                content,
+                source_url=url,
+                source_ref=f"{source}:{now_tw().date().isoformat()}",
+                title=f"{source} 股利資料 {now_tw().date().isoformat()}",
+                kind="http_response",
+                suffix="json" if source.endswith("twse") else "csv",
+                mime_type="application/json" if source.endswith("twse") else "text/csv",
+                as_of=now_tw().date().isoformat(),
+                retrieved_at=retrieved_at,
+                quality_status=quality,
+            )
+            return document.document_id
+        except Exception:
+            log.debug("%s raw provenance 寫入失敗", source, exc_info=True)
+            return ""
 
     try:
         resp = sess.get(URL_DIVIDEND, timeout=20)
@@ -681,7 +972,17 @@ def _fetch_dividend_all_resilient(
             else:
                 data = resp.json()
                 if isinstance(data, list):
-                    combined.extend(data)
+                    source_document_id = capture_raw(
+                        "dividend_twse", URL_DIVIDEND, resp, "ok",
+                    )
+                    combined.extend({
+                        **dict(row),
+                        "_source_document_id": source_document_id,
+                        "_source_url": URL_DIVIDEND,
+                        "_source_date": now_tw().date().isoformat(),
+                        "_retrieved_at": retrieved_at,
+                        "_quality_status": "ok",
+                    } for row in data if isinstance(row, dict))
                     source_ok += 1
                 else:
                     failures.append("twse: unexpected JSON payload")
@@ -700,7 +1001,17 @@ def _fetch_dividend_all_resilient(
                 failures.append("tpex: source block")
                 log.warning("Dividend(tpex) source block detected")
             else:
-                combined.extend(_parse_tpex_dividend_csv(resp.text))
+                source_document_id = capture_raw(
+                    "dividend_tpex", URL_TPEX_DIVIDEND_CSV, resp, "ok",
+                )
+                combined.extend({
+                    **dict(row),
+                    "_source_document_id": source_document_id,
+                    "_source_url": URL_TPEX_DIVIDEND_CSV,
+                    "_source_date": now_tw().date().isoformat(),
+                    "_retrieved_at": retrieved_at,
+                    "_quality_status": "ok",
+                } for row in _parse_tpex_dividend_csv(resp.text))
                 source_ok += 1
         else:
             failures.append(f"tpex: HTTP {resp.status_code}")
@@ -783,6 +1094,11 @@ def _parse_dividend(raw: Dict[str, Any], ticker: str) -> Optional[DividendRecord
         ex_dividend_date=str(raw.get("CashExDividendTradingDate") or raw.get("除息日") or ""),
         ex_right_date=str(raw.get("StockExDividendTradingDate") or raw.get("除權日") or ""),
         fill_date=str(raw.get("FillDate") or ""),
+        source_url=str(raw.get("_source_url") or ""),
+        source_date=str(raw.get("_source_date") or ""),
+        retrieved_at=str(raw.get("_retrieved_at") or ""),
+        quality_status=str(raw.get("_quality_status") or "unknown"),
+        source_document_id=str(raw.get("_source_document_id") or ""),
     )
 
 
@@ -799,7 +1115,11 @@ def fetch_dividends(
     因此依「股利年度」彙總：現金、股票股利皆**加總**，舊年度需靠本地 history 累積。
     """
     log = logger or get_logger("fundamentals")
-    rows = fetch_dividend_all(root=root, session=session, logger=log)
+    # 正式個股 refresh 需取得本次原始 response 的 exact provenance；
+    # 舊 dividends_all.json 沒有 source_document_id 時不可直接升格。
+    rows = fetch_dividend_all(
+        root=root, session=session, logger=log, use_cache=False,
+    )
 
     # 依股利年度彙總本次抓到的多筆 (季配/年度) → 單一年度合計
     by_year: Dict[int, DividendRecord] = {}
@@ -815,6 +1135,13 @@ def fetch_dividends(
             agg.stock_dividend += rec.stock_dividend
             agg.ex_dividend_date = agg.ex_dividend_date or rec.ex_dividend_date
             agg.ex_right_date = agg.ex_right_date or rec.ex_right_date
+            if agg.source_document_id != rec.source_document_id:
+                # 同年度若跨多個來源／文件，不能猜一個代表來源。
+                agg.source_document_id = ""
+                agg.source_url = ""
+                agg.source_date = ""
+                agg.retrieved_at = ""
+                agg.quality_status = "partial"
     new_records = list(by_year.values())
     for r in new_records:
         r.cash_dividend = round(r.cash_dividend, 4)
@@ -842,6 +1169,41 @@ def fetch_dividends(
             out.append(DividendRecord(**h))
         except TypeError:
             continue
+
+    try:
+        from bot.dividend_research import materialize_dividend_slice
+        from bot.stock_db import DividendHistory, StockDB
+
+        database = StockDB.open(root=root)
+        try:
+            for item in out:
+                canonical = DividendHistory(
+                    symbol=item.ticker,
+                    year=item.year,
+                    cash_dividend=item.cash_dividend,
+                    stock_dividend=item.stock_dividend,
+                    ex_dividend_date=item.ex_dividend_date,
+                    ex_right_date=item.ex_right_date,
+                    fill_date=item.fill_date,
+                    fill_days=item.fill_days,
+                    payout_ratio=item.payout_ratio,
+                    source_url=item.source_url,
+                    source_date=item.source_date,
+                    retrieved_at=item.retrieved_at,
+                    quality_status=item.quality_status,
+                    source_record_id=item.source_document_id,
+                )
+                database.upsert_dividend_history(canonical)
+                if item.source_document_id:
+                    materialize_dividend_slice(
+                        root=Path(root) if root is not None else Path.cwd(),
+                        dividend=canonical,
+                        db=database,
+                    )
+        finally:
+            database.close()
+    except Exception:
+        log.exception("[%s] 股利 canonical/research materialize 失敗", ticker)
     return out
 
 
@@ -946,17 +1308,37 @@ def fetch_quarterly_financials_all(
     for market, sector, url in endpoints:
         try:
             resp = sess.get(url, timeout=20)
-            if resp.status_code != 200:
-                log.warning("季報 %s/%s HTTP %d", market, sector, resp.status_code)
+            result = response_to_rows(
+                resp,
+                source=f"quarterly_financials_{market}_{sector}",
+                url=url,
+                min_rows=1,
+            )
+            source_document_id = persist_source_result(result, root=root)
+            if not result.usable:
+                log.warning(
+                    "季報 %s/%s 品質=%s: %s",
+                    market, sector, result.status, result.error,
+                )
                 continue
-            data = resp.json()
-            if isinstance(data, list):
-                for row in data:
-                    if isinstance(row, dict):
-                        row = dict(row)
-                        row["_sector"] = sector
-                        row["_market"] = market
-                        combined.append(row)
+            for raw in result.rows:
+                # OpenAPI 回應尾端可能帶空白 footer/sentinel rows；
+                # 它們不是公司季報，不應進入品質稽核或快取資料集。
+                identity = (
+                    raw.get("公司代號") or raw.get("SecuritiesCompanyCode"),
+                    raw.get("年度") or raw.get("Year"),
+                    raw.get("季別") or raw.get("Season"),
+                )
+                if not any(str(value or "").strip() for value in identity):
+                    continue
+                row = dict(raw)
+                row["_sector"] = sector
+                row["_market"] = market
+                row["_source_document_id"] = source_document_id or ""
+                row["_source_url"] = url
+                row["_retrieved_at"] = result.fetched_at
+                row["_quality_status"] = result.status
+                combined.append(row)
         except Exception:
             log.exception("季報 %s/%s 抓取失敗", market, sector)
 
@@ -1014,6 +1396,10 @@ def _parse_quarterly_raw(raw: Dict[str, Any], ticker: str) -> Optional[Dict[str,
         "cum_op_income": op_income,
         "cum_net_income": net_income,
         "cum_eps": eps,
+        "source_document_id": str(raw.get("_source_document_id") or ""),
+        "source_url": str(raw.get("_source_url") or ""),
+        "retrieved_at": str(raw.get("_retrieved_at") or ""),
+        "quality_status": str(raw.get("_quality_status") or "unknown"),
     }
 
 
@@ -1066,6 +1452,11 @@ def _decumulate_quarterlies(
                 operating_income=op_income,
                 net_income=net_income,
                 note=note,
+                source_url=str(rec.get("source_url") or ""),
+                source_date=f"{year}Q{q}",
+                retrieved_at=str(rec.get("retrieved_at") or ""),
+                quality_status=str(rec.get("quality_status") or "unknown"),
+                source_document_id=str(rec.get("source_document_id") or ""),
             ))
     out.sort(key=lambda x: (x.year, x.quarter))
     return out
@@ -1114,7 +1505,48 @@ def fetch_quarterly_financials(
     if new_raw:
         _write_json_cache(raw_path, history)
 
-    return _decumulate_quarterlies(ticker, history)
+    quarterlies = _decumulate_quarterlies(ticker, history)
+
+    # 正式 refresh 不能只停留在 JSON cache；將可追溯結果寫入 canonical
+    # quarterly_report，並由 research slice 建立 evidence／claims。無 exact
+    # source_document_id 的舊快取仍可回傳給相容 API，但不會被冒充成已驗證來源。
+    try:
+        from bot.quarterly_research import materialize_quarterly_slice
+        from bot.stock_db import QuarterlyReport, StockDB
+
+        database = StockDB.open(root=root)
+        try:
+            for item in quarterlies:
+                report = QuarterlyReport(
+                    symbol=item.ticker,
+                    period=f"{item.year}Q{item.quarter}",
+                    eps=item.eps,
+                    revenue=item.revenue,
+                    gross_margin=item.gross_margin,
+                    op_margin=item.operating_margin,
+                    net_margin=item.net_margin,
+                    note=item.note,
+                    source_url=item.source_url,
+                    source_date=item.source_date,
+                    retrieved_at=item.retrieved_at,
+                    quality_status=item.quality_status,
+                    source_record_id=item.source_document_id,
+                )
+                database.upsert_quarterly_report(report)
+                if item.source_document_id:
+                    materialize_quarterly_slice(
+                        root=Path(root) if root is not None else Path.cwd(),
+                        report=report,
+                        db=database,
+                    )
+        finally:
+            database.close()
+    except Exception:
+        # canonical/research 落點失敗要記錄但不破壞既有 fetcher 回傳契約；
+        # audit 會透過缺少 canonical/evidence 顯示後續需要處理。
+        log.exception("[%s] 季報 canonical/research materialize 失敗", ticker)
+
+    return quarterlies
 
 
 # ----------------------------------------------------------------------
@@ -1188,6 +1620,61 @@ def build_fundamental_snapshot(
                 except Exception:
                     auto_quarterlies = []
 
+        # 全市場檔案是 refresh pipeline 已經成功取得、但尚未拆成個股檔案時的
+        # 唯讀回退。這裡不能呼叫 fetch_*：!ask 的 refresh=False 必須保證不打網路、
+        # 也不能把全市場快照誤寫成個股快取，避免熱路徑產生隱性副作用。
+        monthly_all_path = _cache_root(root) / "monthly_revenue_all.json"
+        monthly_rows = _read_json_cache(monthly_all_path) or []
+        fallback_revs: List[MonthlyRevenue] = []
+        for raw in monthly_rows:
+            try:
+                parsed = _parse_one_revenue(raw)
+            except Exception:
+                parsed = None
+            if parsed and parsed.ticker == ticker:
+                fallback_revs.append(parsed)
+        revs = _merge_monthly_revenue(revs, fallback_revs)
+
+        valuation_all_path = _cache_root(root) / "valuation_all.json"
+        if val is None:
+            valuation_rows = _read_json_cache(valuation_all_path) or []
+            for raw in valuation_rows:
+                try:
+                    parsed = _parse_valuation(raw)
+                except Exception:
+                    parsed = None
+                if parsed and parsed.ticker == ticker:
+                    val = parsed
+                    break
+
+        dividend_all_path = _cache_root(root) / "dividends_all.json"
+        dividend_rows = _read_json_cache(dividend_all_path) or []
+        divs = _merge_dividend_records(
+            divs,
+            _aggregate_dividend_records(dividend_rows, ticker),
+        )
+
+        quarterly_all_path = _cache_root(root) / "quarterly_financials_all.json"
+        quarterly_rows = _read_json_cache(quarterly_all_path) or []
+        fallback_raw: List[Dict[str, Any]] = []
+        for raw in quarterly_rows:
+            try:
+                parsed = _parse_quarterly_raw(raw, ticker)
+            except Exception:
+                parsed = None
+            if parsed:
+                fallback_raw.append(parsed)
+        fallback_quarterlies: List[QuarterlyFinancials] = []
+        if fallback_raw:
+            try:
+                fallback_quarterlies = _decumulate_quarterlies(ticker, fallback_raw)
+            except Exception:
+                fallback_quarterlies = []
+        auto_quarterlies = _merge_quarterly_records(
+            auto_quarterlies,
+            fallback_quarterlies,
+        )
+
     # 合併季報：自動抓取為底，使用者手動匯入優先 (覆蓋同年同季)
     manual_quarterlies = load_manual_quarterlies(ticker, root=root)
     quarterlies = _merge_quarterlies(auto_quarterlies, manual_quarterlies)
@@ -1200,10 +1687,30 @@ def build_fundamental_snapshot(
     divs = _enrich_dividends_with_payout(divs, quarterlies)
     divs = _enrich_dividends_with_fill_days(ticker, divs, root=root, logger=log)
 
+    cache_paths = [
+        _cache_root(root) / ticker / "monthly_revenue.json",
+        _cache_root(root) / ticker / "valuation_latest.json",
+        _cache_root(root) / ticker / "dividends.json",
+        _cache_root(root) / ticker / "quarterlies_raw.json",
+        _cache_root(root) / "monthly_revenue_all.json",
+        _cache_root(root) / "valuation_all.json",
+        _cache_root(root) / "dividends_all.json",
+        _cache_root(root) / "quarterly_financials_all.json",
+    ]
+    retrieved_at = max(
+        (_cache_retrieved_at(path) for path in cache_paths if path.exists()),
+        default="",
+    )
+
     return FundamentalSnapshot(
         ticker=ticker,
         name=name,
-        fetched_at=now_tw().isoformat(timespec="seconds"),
+        # refresh=True 代表本次抓取；refresh=False 則以快取檔案時間為準，
+        # 讓 freshness gate 不會把讀取時間誤當成來源更新時間。
+        fetched_at=(
+            now_tw().isoformat(timespec="seconds")
+            if refresh else retrieved_at
+        ),
         valuation=val,
         revenues=revs,
         dividends=divs,

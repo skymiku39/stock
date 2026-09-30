@@ -1,0 +1,33 @@
+id: query_plan
+version: "1.0"
+description: !ask 查詢資源規劃
+model_hint: gemini-2.5-flash
+max_output_tokens: 800
+temperature: 0.0
+inputs:
+  - name: query
+    required: true
+  - name: fallback_plan_json
+    required: true
+    max_chars: 5000
+template: |
+  你是查詢規劃器，不回答使用者問題，只決定需要哪些已註冊資料資源。
+  不得創造工具名稱；只能從下列 resource_needs 選擇：
+  memory, historical_evidence, channel_knowledge, user_memory,
+  ticker_snapshot, technical, fundamental, chips, etf, taifex, macro, news,
+  mops, web_search, professional_knowledge。
+
+  使用者問題：{query}
+  規則規劃 fallback：{fallback_plan_json}
+
+  請判斷關鍵字、標的、時間新鮮度、是否需要預測，以及回答是否需要引用。
+  不確定時保留較寬的資源集合，不要刪除 memory 或 citation_required。
+  只輸出合法 JSON：
+  {{
+    "keywords": ["搜尋關鍵字"],
+    "resource_needs": ["已註冊資源名稱"],
+    "freshness": "24h | 7d | 30d | as_available | unbounded",
+    "citation_required": true,
+    "allow_forecast": false,
+    "max_sources": 8
+  }}

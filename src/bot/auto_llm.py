@@ -35,6 +35,7 @@ import datetime as dt
 import json
 import logging
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +44,7 @@ from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.config import Settings
 from bot.conference_calendar import update_calendar, upcoming_tickers
 from bot.env_io import load_env
-from bot.evidence import make_evidence
+from bot.evidence import make_evidence, normalize_evidence_packet
 from bot.llm_analyzer import (
     ChipsContext,
     DEFAULT_MODEL,
@@ -80,12 +81,13 @@ DEFAULT_CHIP_DAYS_FOR_QUANT = 5
 def _gather_material_info(
     ticker: str,
     *,
+    root: Optional[Path],
     logger: logging.Logger,
     limit: int = 12,
 ) -> List[MaterialInfo]:
     """抓最近一年的 MOPS 重大訊息 (最近 N 筆)。"""
     try:
-        items = fetch_material_info(ticker, logger=logger)
+        items = fetch_material_info(ticker, logger=logger, root=root)
     except Exception:
         logger.exception("[%s] fetch_material_info 失敗", ticker)
         return []
@@ -222,7 +224,7 @@ def _download_recent_presentations(
             date_str = "unknown"
         dest = dest_dir / f"{ticker}_{date_str}_auto.pdf"
         try:
-            pt = download_presentation(url, dest, logger=logger)
+            pt = download_presentation(url, dest, logger=logger, root=root)
         except Exception:
             logger.exception("[%s] 自動下載法說簡報失敗: %s", ticker, url)
             continue
@@ -621,6 +623,151 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n...(已截斷)"
 
 
+def _replayable_source_document_id(root: Path, candidate: Any) -> str:
+    """只回傳仍可由本地 raw archive 回放的 exact source ID。"""
+    source_id = str(candidate or "").strip()
+    if not source_id.startswith("source-doc:"):
+        return ""
+    try:
+        from bot.source_registry import is_source_document_replayable
+        from bot.stock_db import StockDB
+
+        db = StockDB.open(root=root)
+        try:
+            source = db.get_source_document(source_id)
+            return source_id if is_source_document_replayable(root, source) else ""
+        finally:
+            db.close()
+    except Exception:
+        return ""
+
+
+def _registered_evidence_packet(
+    root: Path,
+    *,
+    evidence_id: str = "",
+    kind: str = "",
+    source_document_id: str = "",
+    source_ref: str = "",
+) -> Optional[Dict[str, Any]]:
+    """讀取已登錄的 evidence；找不到時回傳 None，不猜來源。"""
+    if not evidence_id and not (source_document_id and source_ref):
+        return None
+    try:
+        from bot.stock_db import StockDB
+
+        db = StockDB.open(root=root)
+        try:
+            row = db.get_evidence(evidence_id) if evidence_id else None
+            if row is None and source_document_id:
+                for candidate in db.list_evidence(source="cnyes", limit=1000):
+                    if candidate.source_document_id != source_document_id:
+                        continue
+                    if kind and candidate.kind != kind:
+                        continue
+                    if candidate.source_ref == source_ref:
+                        row = candidate
+                        break
+            if row is None:
+                return None
+            source_document_id = str(row.source_document_id or "").strip()
+            if source_document_id:
+                from bot.source_registry import is_source_document_replayable
+
+                source = db.get_source_document(source_document_id)
+                if not is_source_document_replayable(root, source):
+                    return None
+            packet = asdict(row)
+            packet["id"] = packet.pop("evidence_id")
+            try:
+                metadata = json.loads(packet.pop("metadata_json") or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            packet["metadata"] = metadata if isinstance(metadata, dict) else {}
+            packet["provenance_status"] = str(
+                packet["metadata"].get("provenance_status")
+                or ("exact" if packet.get("source_document_id") else "unresolved")
+            )
+            return packet
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def _select_verified_long_memory_evidence(
+    db: Any,
+    packets: Any,
+    *,
+    root: Optional[Path] = None,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Select evidence safe to attach to an automatic long-memory item.
+
+    An LLM schema-valid result is not by itself provenance-valid.  Keep only
+    evidence that is already in the central registry, explicitly marked
+    ``exact``/``composite_exact``, and whose raw document IDs still exist.
+    The rejected IDs are returned for audit metadata; callers may keep the
+    research output in its normal cache/history without promoting it.
+    """
+    if not isinstance(packets, list):
+        return [], ["<invalid-evidence-list>"]
+
+    from bot.source_registry import is_source_document_replayable
+
+    db_path = Path(db.path)
+    project_root = Path(root) if root is not None else (
+        db_path.parent.parent
+        if db_path.parent.name.lower() == "data"
+        else db_path.parent
+    )
+
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[str] = []
+    seen: set[str] = set()
+    for raw in packets:
+        if not isinstance(raw, dict):
+            rejected.append("<non-object-evidence>")
+            continue
+        item = normalize_evidence_packet(raw)
+        evidence_id = str(item.get("id") or "").strip()
+        if not evidence_id or evidence_id in seen:
+            if evidence_id:
+                rejected.append(evidence_id)
+            continue
+        seen.add(evidence_id)
+        row = db.get_evidence(evidence_id)
+        provenance = str(item.get("provenance_status") or "").strip().lower()
+        if row is None:
+            rejected.append(evidence_id)
+            continue
+        if provenance not in {"exact", "composite_exact"}:
+            rejected.append(evidence_id)
+            continue
+
+        metadata = item.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        document_ids: List[str] = []
+        primary = str(item.get("source_document_id") or "").strip()
+        if primary:
+            document_ids.append(primary)
+        linked = metadata.get("source_document_ids")
+        if isinstance(linked, list):
+            document_ids.extend(
+                str(value).strip() for value in linked if str(value).strip()
+            )
+        if not document_ids or any(
+            not is_source_document_replayable(
+                project_root, db.get_source_document(document_id)
+            )
+            for document_id in dict.fromkeys(document_ids)
+        ):
+            rejected.append(evidence_id)
+            continue
+        accepted.append(item)
+
+    return accepted, list(dict.fromkeys(rejected))
+
+
 def _calendar_lines(items: List[Any], *, include_url: bool = True) -> List[str]:
     lines: List[str] = []
     for e in items:
@@ -643,6 +790,7 @@ def _calendar_lines(items: List[Any], *, include_url: bool = True) -> List[str]:
 def _build_source_sections(
     ticker: str,
     *,
+    root: Path,
     materials: List[MaterialInfo],
     news: List[NewsItem],
     calendar_data: Dict[str, List[Any]],
@@ -655,7 +803,7 @@ def _build_source_sections(
     detail_max_chars: int = 3000,
 ) -> Dict[str, Any]:
     """組合結構化原始素材，供 dashboard 顯示與快取。"""
-    from bot.mops_scraper import fetch_material_detail
+    from bot.mops_scraper import ingest_material_detail
 
     upcoming = calendar_data.get("upcoming") or []
     past = calendar_data.get("past") or []
@@ -689,10 +837,30 @@ def _build_source_sections(
         if not url:
             continue
         try:
-            detail = fetch_material_detail(url, logger=logger, max_chars=detail_max_chars)
+            detail_result = ingest_material_detail(
+                url,
+                logger=logger,
+                max_chars=detail_max_chars,
+                root=root,
+                ticker=ticker,
+                materialize_research=True,
+            )
+            detail = detail_result.text
             if detail:
                 item["detail"] = detail
                 fetched += 1
+            # 以 ingest 結果提供的 exact research evidence 取代先前只依
+            # URL 建出的暫時 evidence；沒有 exact slice 時保留原始項目，
+            # 不臆造 source_document_id。
+            if detail_result.evidence_id:
+                packet = _registered_evidence_packet(
+                    root, evidence_id=detail_result.evidence_id,
+                )
+                if packet is not None:
+                    for index, existing in enumerate(evidence):
+                        if existing.get("source_ref") == url:
+                            evidence[index] = packet
+                            break
         except Exception:
             logger.exception("[%s] fetch_material_detail 失敗", ticker)
 
@@ -705,14 +873,34 @@ def _build_source_sections(
         for n in news[:15]
     ]
     for n in news[:15]:
+        news_ref = str(
+            getattr(n, "news_id", "")
+            or getattr(n, "url", "")
+            or getattr(n, "link", "")
+            or n.title
+        )
+        news_source_document_id = _replayable_source_document_id(
+            Path(root), getattr(n, "source_document_id", "") or ""
+        )
+        exact_news = _registered_evidence_packet(
+            Path(root),
+            kind="news",
+            source_document_id=news_source_document_id,
+            source_ref=news_ref,
+        )
+        if exact_news is not None:
+            evidence.append(exact_news)
+            continue
         evidence.append(make_evidence(
             "news",
             source="cnyes",
-            source_ref=str(getattr(n, "url", "") or getattr(n, "link", "") or n.title),
+            source_ref=news_ref,
             title=n.title,
             url=str(getattr(n, "url", "") or getattr(n, "link", "") or ""),
             observed_at=str(getattr(n, "published_at", "") or getattr(n, "date", "") or ""),
             excerpt=n.summary or n.title,
+            source_document_id=news_source_document_id,
+            provenance_status="exact" if news_source_document_id else "unresolved",
         ))
 
     web_items: List[Dict[str, str]] = []
@@ -730,6 +918,9 @@ def _build_source_sections(
                 title=p.title or "",
                 url=p.url,
                 excerpt=p.text or "",
+                source_document_id=_replayable_source_document_id(
+                    Path(root), getattr(p, "source_document_id", "") or ""
+                ),
             ))
 
     if pipeline_text:
@@ -869,11 +1060,16 @@ def load_cached_auto_analysis(
     if not ts:
         return data
     try:
-        fetched = dt.datetime.fromisoformat(ts.replace("Z", ""))
-        if (now_tw().replace(tzinfo=None) - fetched).total_seconds() > max_age_hours * 3600:
+        iso_value = str(ts).replace("Z", "+00:00")
+        fetched = dt.datetime.fromisoformat(iso_value)
+        current = now_tw()
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=current.tzinfo)
+        if (current - fetched).total_seconds() > max_age_hours * 3600:
             return None
-    except Exception:
-        pass
+    except (TypeError, ValueError, OverflowError):
+        # Invalid timestamps must not keep stale research cached indefinitely.
+        return None
     return data
 
 
@@ -911,7 +1107,9 @@ def _try_research_ticker(
     """嘗試呼叫 ``research_ticker`` prompt；若 registry 沒有此 prompt 回 None。"""
     try:
         from bot.prompt_registry import get_registry
-        reg = get_registry()
+        reg = get_registry(
+            (Path(root) / "prompts") if root is not None else None
+        )
         if reg.get("research_ticker") is None:
             return None
     except Exception:
@@ -985,13 +1183,17 @@ def _load_research_memory_context(
         from bot.memory_store import MemoryStore
         from bot.stock_db import StockDB
 
-        context = MemoryStore(StockDB.open(root=root)).build_context(
-            ticker,
-            scope_type="ticker",
-            scope_id=ticker,
-            max_chars=max_chars,
-            per_layer_limit=8,
-        )
+        memory_db = StockDB.open(root=root)
+        try:
+            context = MemoryStore(memory_db).build_context(
+                ticker,
+                scope_type="ticker",
+                scope_id=ticker,
+                max_chars=max_chars,
+                per_layer_limit=8,
+            )
+        finally:
+            memory_db.close()
         sections: List[str] = []
         for label, rows in (("短期", context.short), ("長期", context.long)):
             if not rows:
@@ -1037,6 +1239,9 @@ def auto_analyze_ticker(
         ``GEMINI_API_KEY`` 未設定或素材太少時回 None。
     """
     log = logger or get_logger("auto-llm")
+    settings = Settings(
+        _env_file=str(Path(root).resolve() / ".env") if root is not None else ".env"
+    )  # type: ignore[call-arg]
 
     if not force_refresh:
         cached = load_cached_auto_analysis(ticker, root, max_age_hours=max_age_hours)
@@ -1044,16 +1249,21 @@ def auto_analyze_ticker(
             return cached
 
     if client is None:
-        api_key = load_env().get("GEMINI_API_KEY", "")
-        if not api_key:
-            log.info("[%s] 未設 GEMINI_API_KEY，自動 LLM 跳過", ticker)
+        if not settings.llm_enabled:
+            log.info("[%s] 未設定可用的 LLM 提供者，自動 LLM 跳過", ticker)
             return None
-        client = GeminiClient(api_key=api_key, model=model, logger=log)
+        client = GeminiClient(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model or model,
+            logger=log,
+            settings=settings,
+            root=root,
+        )
     if not client.enabled:
-        log.info("[%s] GeminiClient 未啟用，自動 LLM 跳過", ticker)
+        log.info("[%s] LLM Client 未啟用，自動 LLM 跳過", ticker)
         return None
 
-    materials = _gather_material_info(ticker, logger=log)
+    materials = _gather_material_info(ticker, root=root, logger=log)
     news = _gather_news(ticker, name_hint=name_hint, root=root, logger=log)
     calendar_data: Dict[str, List[Any]] = (
         _gather_calendar(ticker, root=root, logger=log)
@@ -1207,6 +1417,7 @@ def auto_analyze_ticker(
     }
     payload["source_sections"] = _build_source_sections(
         ticker,
+        root=root,
         materials=materials,
         news=news,
         calendar_data=calendar_data,
@@ -1217,7 +1428,40 @@ def auto_analyze_ticker(
         logger=log,
     )
     payload["evidence"] = payload["source_sections"].get("evidence", [])
+    payload["evidence_ids"] = [
+        str(item.get("id") or "")
+        for item in payload["evidence"]
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
     payload["fetched_at"] = now_tw().isoformat(timespec="seconds")
+
+    # 先登錄本次研究實際使用的來源，再把 evidence ids 回填到
+    # research_ticker 的 LLM history。這使得長期記憶、cache 與 LLM audit
+    # 共享同一組來源識別；若後續升級記憶失敗，來源稽核仍然保留。
+    provenance_db = None
+    try:
+        from bot.evidence import persist_evidence_items
+        from bot.stock_db import StockDB
+
+        provenance_db = StockDB.open(root=root)
+        try:
+            persist_evidence_items(provenance_db, payload["evidence"])
+            research_info = (res or {}).get("info") if isinstance(res, dict) else {}
+            research_analysis_id = str(
+                (research_info or {}).get("analysis_id") or ""
+            )
+            if research_analysis_id:
+                provenance_db.update_llm_analysis_evidence(
+                    research_analysis_id,
+                    payload["evidence_ids"],
+                    quality_status=(
+                        "ok" if not payload.get("validation_errors") else "unknown"
+                    ),
+                )
+        finally:
+            provenance_db.close()
+    except Exception:
+        log.exception("[%s] 研究證據 registry／LLM 關聯回填失敗", ticker)
 
     if chips is not None and analysis is not None:
         try:
@@ -1263,37 +1507,63 @@ def auto_analyze_ticker(
     # 只有新版 research_ticker 且 schema validation 無錯誤時才升級成長期記憶。
     # legacy/fallback 仍保留 JSONL 與 auto_llm cache，但不進正式長期知識層。
     if res is not None and not payload.get("validation_errors"):
+        memory_db = None
         try:
             from bot.memory_store import MemoryStore
             from bot.stock_db import StockDB
 
             memory_db = StockDB.open(root=root)
-            fetched_at = str(payload.get("fetched_at") or now_tw().isoformat(timespec="seconds"))
-            MemoryStore(memory_db).put_long(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
-                memory_id=f"auto-research:{ticker}:{fetched_at}",
-                memory_type="research_summary",
-                scope_type="ticker",
-                scope_id=ticker,
-                subject=ticker,
-                summary=str(payload.get("summary") or ""),
-                keywords=[ticker, str(payload.get("sentiment") or ""), "research_ticker"],
-                importance=0.8,
-                confidence=float(payload.get("confidence") or 0.0),
-                quality_status="ok",
-                source="auto_llm",
-                source_ref=f"{ticker}:{fetched_at}",
-                source_record_id=f"auto-research:{ticker}:{fetched_at}",
-                evidence=payload.get("evidence") or [],
-                metadata={
-                    "prompt_id": payload.get("prompt_id", ""),
-                    "prompt_version": payload.get("prompt_version", ""),
-                    "model": payload.get("model", ""),
-                },
-                observed_at=fetched_at,
+            verified_evidence, rejected_evidence = _select_verified_long_memory_evidence(
+                memory_db,
+                payload.get("evidence") or [],
+                root=root,
             )
+            if not verified_evidence:
+                log.warning(
+                    "[%s] 長期研究記憶略過：沒有可回到 raw source 的 exact evidence "
+                    "(rejected=%d)",
+                    ticker,
+                    len(rejected_evidence),
+                )
+            else:
+                fetched_at = str(payload.get("fetched_at") or now_tw().isoformat(timespec="seconds"))
+                memory_quality = (
+                    "ok"
+                    if not rejected_evidence and len(verified_evidence) == len(payload.get("evidence") or [])
+                    else "partial"
+                )
+                MemoryStore(memory_db).put_long(
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+                    memory_id=f"auto-research:{ticker}:{fetched_at}",
+                    memory_type="research_summary",
+                    scope_type="ticker",
+                    scope_id=ticker,
+                    subject=ticker,
+                    summary=str(payload.get("summary") or ""),
+                    keywords=[ticker, str(payload.get("sentiment") or ""), "research_ticker"],
+                    importance=0.8,
+                    confidence=float(payload.get("confidence") or 0.0),
+                    quality_status=memory_quality,
+                    source="auto_llm",
+                    source_ref=f"{ticker}:{fetched_at}",
+                    source_record_id=f"auto-research:{ticker}:{fetched_at}",
+                    evidence=verified_evidence,
+                    metadata={
+                        "prompt_id": payload.get("prompt_id", ""),
+                        "prompt_version": payload.get("prompt_version", ""),
+                        "model": payload.get("model", ""),
+                        "memory_evidence_gate": {
+                            "accepted": len(verified_evidence),
+                            "rejected": rejected_evidence,
+                        },
+                    },
+                    observed_at=fetched_at,
+                )
         except Exception:
             log.exception("[%s] 長期研究記憶寫入失敗", ticker)
+        finally:
+            if memory_db is not None:
+                memory_db.close()
     return payload
 
 
@@ -1329,7 +1599,7 @@ def build_live_source_sections(
         upcoming = [e for e in all_conf if e.date >= today]
         past = [e for e in all_conf if e.date < today]
         past.sort(key=lambda e: e.date, reverse=True)
-        materials = fetch_material_info(ticker, logger=log)
+        materials = fetch_material_info(ticker, logger=log, root=root)
         if not upcoming and not past and not materials:
             return None
         mops_items = [
@@ -1392,6 +1662,7 @@ def resolve_llm_bundle(
     pipeline_analysis: Optional[Dict[str, Any]] = None,
     auto_llm: bool = False,
     name_hint: str = "",
+    allow_live_sources: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, Any]:
     """合併 pipeline 摘要與 auto_llm 原始素材。
@@ -1419,7 +1690,7 @@ def resolve_llm_bundle(
                 source_sections = dict(fresh.get("source_sections") or {})
     elif not _source_sections_has_content(source_sections) and cached_any:
         source_sections = dict(cached_any.get("source_sections") or {})
-    if not _source_sections_has_content(source_sections):
+    if allow_live_sources and not _source_sections_has_content(source_sections):
         live = build_live_source_sections(ticker, root, logger=log)
         if live:
             source_sections = live
@@ -1533,11 +1804,11 @@ def run_llm_research_batch(
 ) -> int:
     """對多檔個股跑 auto_research_ticker（供 stock-auto-research --llm-only 使用）。"""
     log = logger or get_logger("llm-research")
-    settings = Settings()
+    settings = Settings(_env_file=str(root.resolve() / ".env"))  # type: ignore[call-arg]
 
-    if not settings.gemini_api_key:
+    if not settings.llm_enabled:
         log.error(
-            "未設定 GEMINI_API_KEY；無法跑自動研究。請到 .env 或 dashboard「組態設定」填入。"
+            "尚未設定可用的 LLM 提供者；請檢查 .env 的 LLM_PROVIDER 與提供者設定。"
         )
         return 2
 

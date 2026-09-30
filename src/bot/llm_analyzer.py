@@ -14,11 +14,14 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from bot.llm_log import LlmCallLogger, get_call_logger
+from bot.llm_log import LlmCallLogger, analysis_record_id, get_call_logger
 from bot.prompt_registry import PromptRegistry, PromptTemplate, get_registry
 from bot.utils import get_logger
+from bot.config import Settings
+from bot.codex_app_server import CodexAppServerClient
 
 try:
     from google import genai  # type: ignore
@@ -56,6 +59,7 @@ class PresentationAnalysis:
     enabled: bool = True
     prompt_id: str = ""
     prompt_version: str = ""
+    validation_errors: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +82,7 @@ class LogicCheckResult:
     suggestion: str = "hold"
     prompt_id: str = ""
     prompt_version: str = ""
+    validation_errors: List[str] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------
@@ -86,27 +91,61 @@ class LogicCheckResult:
 
 
 class GeminiClient:
-    """Gemini API 包裝 — 自動偵測新版 (google-genai) 或舊版 (google-generativeai)。"""
+    """共用 LLM 入口：依設定使用 Codex App Server 或 Gemini SDK。"""
 
     def __init__(
         self,
         api_key: str = "",
         model: str = DEFAULT_MODEL,
         logger: Optional[logging.Logger] = None,
+        *,
+        settings: Optional[Settings] = None,
+        root: Optional[Path] = None,
     ):
-        self.api_key = api_key
-        self.model = model
         self.logger = logger or get_logger("llm")
         self._client: Optional[Any] = None
         self._mode: str = "none"
-        self._enabled = bool(api_key) and _HAS_GENAI
+        if settings is None:
+            settings = (
+                Settings(_env_file=str(Path(root) / ".env"))
+                if root is not None
+                else Settings()
+            )
+        self.settings = settings
+        self.api_key = api_key or settings.gemini_api_key
+        self.model = model
+        if settings.llm_provider == "codex_app_server":
+            self.model = settings.codex_app_server_model
+            self._mode = "codex_app_server"
+            self._enabled = settings.llm_enabled
+            if self._enabled:
+                try:
+                    self._client = CodexAppServerClient(
+                        url=settings.codex_app_server_url,
+                        model=settings.codex_app_server_model,
+                        effort=settings.codex_app_server_effort,
+                        cwd=str(Path(root).resolve()) if root is not None else str(Path.cwd()),
+                    )
+                    self.logger.info(
+                        "Codex App Server 已啟用 (model=%s, effort=%s)",
+                        self.model,
+                        settings.codex_app_server_effort,
+                    )
+                except Exception:
+                    self.logger.exception("Codex App Server 初始化失敗")
+                    self._enabled = False
+            else:
+                self.logger.info("Codex App Server 尚未設定，LLM 停用")
+            return
+
+        self._enabled = bool(self.api_key) and _HAS_GENAI
         if self._enabled:
             try:
                 if hasattr(genai, "Client"):
-                    self._client = genai.Client(api_key=api_key)
+                    self._client = genai.Client(api_key=self.api_key)
                     self._mode = "new"
                 else:
-                    genai.configure(api_key=api_key)  # type: ignore[attr-defined]
+                    genai.configure(api_key=self.api_key)  # type: ignore[attr-defined]
                     self._client = genai.GenerativeModel(model)  # type: ignore[attr-defined]
                     self._mode = "legacy"
                 self.logger.info("Gemini 已啟用 (model=%s, sdk=%s)", model, self._mode)
@@ -133,6 +172,11 @@ class GeminiClient:
         meta: Dict[str, Any] = {"sdk": self._mode}
         if not self._enabled or self._client is None:
             return None, meta
+
+        if self._mode == "codex_app_server":
+            text, codex_meta = self._client.generate(prompt)
+            meta.update(codex_meta)
+            return (text if text and "error" not in codex_meta else None), meta
 
         t0 = time.time()
         # gemini-2.5 系列預設會 reasoning，會把 max_output_tokens 吃掉但不輸出
@@ -188,6 +232,7 @@ def gemini_call(
     client: GeminiClient,
     registry: Optional[PromptRegistry] = None,
     call_logger: Optional[LlmCallLogger] = None,
+    root: Optional[Path] = None,
     metadata: Optional[Dict[str, Any]] = None,
     **vars: Any,
 ) -> tuple[Optional[str], Dict[str, Any]]:
@@ -196,21 +241,52 @@ def gemini_call(
     Returns:
         (raw_text, info)，info 包含 prompt_id/prompt_version/latency_ms/tokens 等。
     """
-    reg = registry or get_registry()
-    log = call_logger or get_call_logger()
+    # Keep prompt loading scoped to the same root as the DB/audit log.  Without
+    # this, ``stock-ask --root X`` launched from another CWD could silently use
+    # a different project's prompt set (or fail to find query_plan at all).
+    reg = registry or get_registry(
+        (Path(root) / "prompts") if root is not None else None
+    )
+    log = call_logger or get_call_logger(root=root)
     prompt = reg.get(prompt_id)
     if prompt is None:
         raise KeyError(f"Prompt 不存在: {prompt_id}")
 
-    rendered = prompt.render(**vars)
+    record_metadata = dict(metadata or {})
+    # 呼叫端常把 ticker 放在 prompt 變數而非 metadata；在 audit mirror
+    # 前自動補上，避免分析歷史失去股票關聯。
+    if not record_metadata.get("ticker"):
+        for candidate in ("ticker", "symbol"):
+            if vars.get(candidate):
+                record_metadata["ticker"] = str(vars[candidate])
+                break
+    if root is not None:
+        record_metadata.setdefault("project_root", str(Path(root)))
     info: Dict[str, Any] = {
         "prompt_id": prompt.id,
         "prompt_version": prompt.version,
         "model": client.model,
     }
 
+    try:
+        rendered = prompt.render(**vars)
+    except ValueError as exc:
+        message = str(exc)
+        record = log.record(
+            prompt_id=prompt.id,
+            prompt_version=prompt.version,
+            model=client.model,
+            input_text="",
+            output_text="",
+            success=False,
+            error=message,
+            metadata={**record_metadata, "validation_error": True},
+        )
+        info.update({"validation_error": message, "analysis_id": analysis_record_id(record)})
+        return None, info
+
     if not client.enabled:
-        log.record(
+        record = log.record(
             prompt_id=prompt.id,
             prompt_version=prompt.version,
             model=client.model,
@@ -218,9 +294,12 @@ def gemini_call(
             output_text="",
             success=False,
             error="LLM disabled (no API key or SDK)",
-            metadata=metadata or {},
+            metadata=record_metadata,
         )
-        info["disabled"] = True
+        info.update({
+            "disabled": True,
+            "analysis_id": analysis_record_id(record),
+        })
         return None, info
 
     text, meta = client.generate_raw(
@@ -230,7 +309,7 @@ def gemini_call(
     )
     info.update(meta)
     success = text is not None and not meta.get("error")
-    log.record(
+    record = log.record(
         prompt_id=prompt.id,
         prompt_version=prompt.version,
         model=client.model,
@@ -241,8 +320,9 @@ def gemini_call(
         tokens_out=meta.get("tokens_out"),
         success=success,
         error=str(meta.get("error", "")),
-        metadata=metadata or {},
+        metadata=record_metadata,
     )
+    info["analysis_id"] = analysis_record_id(record)
     return text, info
 
 
@@ -271,6 +351,88 @@ def extract_json(text: str) -> Optional[Any]:
         return None
 
 
+def _safe_float(value: Any, default: float, *, low: float, high: float, errors: List[str], field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        errors.append(f"{field_name} is not numeric")
+        return default
+    if parsed < low or parsed > high:
+        errors.append(f"{field_name} out of range [{low}, {high}]")
+        return default
+    return parsed
+
+
+def _validated_presentation_payload(data: Any) -> tuple[Dict[str, Any], List[str]]:
+    """LLM JSON schema 的最小驗證；錯誤時採保守值並保留錯誤原因。"""
+    errors: List[str] = []
+    obj = data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        errors.append("response is not an object")
+    sentiment = str(obj.get("sentiment", "neutral")).strip().lower()
+    if sentiment not in {"positive", "neutral", "negative"}:
+        errors.append("sentiment is not an allowed value")
+        sentiment = "neutral"
+    drivers = obj.get("growth_drivers", []) or []
+    risks = obj.get("risks", []) or []
+    if not isinstance(drivers, list):
+        errors.append("growth_drivers is not a list")
+        drivers = []
+    if not isinstance(risks, list):
+        errors.append("risks is not a list")
+        risks = []
+    metrics = obj.get("key_metrics", {}) or {}
+    if not isinstance(metrics, dict):
+        errors.append("key_metrics is not an object")
+        metrics = {}
+    return {
+        "summary": str(obj.get("summary", ""))[:2000],
+        "sentiment": sentiment,
+        "sentiment_score": _safe_float(
+            obj.get("sentiment_score", 0.0), 0.0,
+            low=-1.0, high=1.0, errors=errors, field_name="sentiment_score",
+        ),
+        "confidence": _safe_float(
+            obj.get("confidence", 0.0), 0.0,
+            low=0.0, high=1.0, errors=errors, field_name="confidence",
+        ),
+        "key_metrics": metrics,
+        "growth_drivers": [str(x)[:500] for x in drivers if str(x).strip()][:20],
+        "risks": [str(x)[:500] for x in risks if str(x).strip()][:20],
+        "capex_signal": str(obj.get("capex_signal", ""))[:100],
+        "margin_outlook": str(obj.get("margin_outlook", ""))[:100],
+    }, errors
+
+
+def validate_presentation_payload(data: Any) -> tuple[Dict[str, Any], List[str]]:
+    """公開給 research_ticker / analyze_presentation 共用的輸出驗證器。"""
+    return _validated_presentation_payload(data)
+
+
+def _validated_logic_payload(data: Any) -> tuple[Dict[str, Any], List[str]]:
+    errors: List[str] = []
+    obj = data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        errors.append("response is not an object")
+    verdict = str(obj.get("verdict", "inconclusive")).strip().lower()
+    suggestion = str(obj.get("suggestion", "hold")).strip().lower()
+    if verdict not in {
+        "consistent", "suspicious_distribution", "suspicious_accumulation", "inconclusive",
+    }:
+        errors.append("verdict is not an allowed value")
+        verdict = "inconclusive"
+    if suggestion not in {"buy", "sell", "avoid", "hold"}:
+        errors.append("suggestion is not an allowed value")
+        suggestion = "hold"
+    return {
+        "verdict": verdict,
+        "reasoning": str(obj.get("reasoning", ""))[:2000],
+        "confidence": _safe_float(
+            obj.get("confidence", 0.0), 0.0,
+            low=0.0, high=1.0, errors=errors, field_name="confidence",
+        ),
+        "suggestion": suggestion,
+    }, errors
 # ----------------------------------------------------------------------
 # 高階 API: 分析法說會 & 言行反查
 # ----------------------------------------------------------------------
@@ -282,6 +444,7 @@ def analyze_presentation(
     client: Optional[GeminiClient] = None,
     registry: Optional[PromptRegistry] = None,
     call_logger: Optional[LlmCallLogger] = None,
+    root: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
 ) -> PresentationAnalysis:
     log = logger or get_logger("llm")
@@ -297,6 +460,7 @@ def analyze_presentation(
         client=client,
         registry=registry,
         call_logger=call_logger,
+        root=root,
         metadata={"ticker": ticker, "task": "analyze_presentation"},
         ticker=ticker or "Unknown",
         text=text,
@@ -310,24 +474,23 @@ def analyze_presentation(
             prompt_version=info.get("prompt_version", ""),
         )
 
-    data = extract_json(raw) or {}
-    if not isinstance(data, dict):
-        data = {}
+    data, validation_errors = validate_presentation_payload(extract_json(raw))
     analysis = PresentationAnalysis(
         ticker=ticker,
-        summary=str(data.get("summary", "")),
-        sentiment=str(data.get("sentiment", "neutral")),
-        sentiment_score=float(data.get("sentiment_score", 0.0)),
-        confidence=float(data.get("confidence", 0.5)),
-        key_metrics=dict(data.get("key_metrics", {}) or {}),
-        growth_drivers=list(data.get("growth_drivers", []) or []),
-        risks=list(data.get("risks", []) or []),
+        summary=data["summary"],
+        sentiment=data["sentiment"],
+        sentiment_score=data["sentiment_score"],
+        confidence=data["confidence"],
+        key_metrics=data["key_metrics"],
+        growth_drivers=data["growth_drivers"],
+        risks=data["risks"],
         capex_signal=str(data.get("capex_signal", "")),
         margin_outlook=str(data.get("margin_outlook", "")),
         raw_response=raw,
         model=client.model,
         prompt_id=info.get("prompt_id", ""),
         prompt_version=info.get("prompt_version", ""),
+        validation_errors=validation_errors,
     )
     log.info(
         "LLM 解析 %s -> sentiment=%s score=%.2f confidence=%.2f",
@@ -342,6 +505,7 @@ def logic_check(
     client: Optional[GeminiClient] = None,
     registry: Optional[PromptRegistry] = None,
     call_logger: Optional[LlmCallLogger] = None,
+    root: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
 ) -> LogicCheckResult:
     log = logger or get_logger("llm")
@@ -351,6 +515,7 @@ def logic_check(
             client=client,
             registry=registry,
             call_logger=call_logger,
+            root=root,
             metadata={"ticker": analysis.ticker, "task": "logic_check"},
             ticker=analysis.ticker,
             sentiment=analysis.sentiment,
@@ -366,17 +531,16 @@ def logic_check(
             block=chips.block_trade_net,
         )
         if raw:
-            data = extract_json(raw) or {}
-            if not isinstance(data, dict):
-                data = {}
+            data, validation_errors = _validated_logic_payload(extract_json(raw))
             return LogicCheckResult(
                 ticker=analysis.ticker,
-                verdict=str(data.get("verdict", "inconclusive")),
-                reasoning=str(data.get("reasoning", "")),
-                confidence=float(data.get("confidence", 0.5)),
-                suggestion=str(data.get("suggestion", "hold")),
+                verdict=data["verdict"],
+                reasoning=data["reasoning"],
+                confidence=data["confidence"],
+                suggestion=data["suggestion"],
                 prompt_id=info.get("prompt_id", ""),
                 prompt_version=info.get("prompt_version", ""),
+                validation_errors=validation_errors,
             )
     return _rule_based_logic_check(analysis, chips, log)
 
@@ -462,4 +626,5 @@ __all__ = [
     "gemini_call",
     "logic_check",
     "logic_to_dict",
+    "validate_presentation_payload",
 ]

@@ -1,6 +1,7 @@
 """Tests for market_movers scanner."""
 from __future__ import annotations
 
+import datetime as dt
 from unittest.mock import MagicMock, patch
 
 from bot.market_movers import (
@@ -53,13 +54,14 @@ def test_fetch_market_movers_sorts_gainers(mock_map, mock_session_fn, _sleep):
         MagicMock(
             json=lambda: {
                 "msgArray": [
-                    {"c": "2330", "n": "A", "z": "110", "y": "100", "v": "1", "ex": "tse"},
-                    {"c": "2317", "n": "B", "z": "95", "y": "100", "v": "1", "ex": "tse"},
+                    {"c": "2330", "n": "A", "z": "110", "y": "100", "v": "1", "ex": "tse", "d": "2026-09-16".replace("-", "")},
+                    {"c": "2317", "n": "B", "z": "95", "y": "100", "v": "1", "ex": "tse", "d": "20260916"},
                 ],
             },
         ),
     ]
-    result = fetch_market_movers(limit=1, direction="gainers", batch_size=10)
+    with patch("bot.market_movers.now_tw", return_value=dt.datetime(2026, 9, 16, 10, 0)):
+        result = fetch_market_movers(limit=1, direction="gainers", batch_size=10)
     assert result.rows[0].ticker == "2330"
     assert result.rows[0].pct_chg == 10.0
     assert result.scanned == 2

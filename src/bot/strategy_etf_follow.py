@@ -57,12 +57,13 @@ class EtfFollowStrategy(BaseStrategy):
         super().__init__(
             broker, settings, market_source, logger,
             publisher=publisher, wire_handlers=wire_handlers,
+            project_root=project_root,
         )
         self.logger = logger or get_logger("strategy-etf")
         self.min_consensus_new = min_consensus_new
         self.min_consensus_add = min_consensus_add
         self.max_pct_chg_on_entry = max_pct_chg_on_entry
-        self._project_root = project_root or Path.cwd()
+        self._project_root = (project_root or Path.cwd()).resolve()
         self._signals: Dict[str, FollowSignal] = {}
         self._prepare_signals()
 

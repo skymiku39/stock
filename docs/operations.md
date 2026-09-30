@@ -1,16 +1,74 @@
 # 日常運維手冊
 
+Windows 常駐排程與 Task Scheduler 設定請見 [automation-plan.md](automation-plan.md)；本手冊其餘章節列出日常人工操作與 log 檢查。
+
+## 零、研究系統整合體檢（唯讀）
+
+交易用 `stock-preflight` 與研究系統的整合體檢是兩個不同入口。每天啟動研究或
+排程前，先在專案根目錄執行：
+
+```powershell
+cd C:\skymiku\stock
+uv run stock-system-preflight --root C:\skymiku\stock --json
+uv run stock-system-preflight --root C:\skymiku\stock --imports
+```
+
+此檢查不抓外網、不呼叫 Gemini、不執行 Google Sheets 同步、不寫入 SQLite，也不會
+觸發下單。它會確認 SQLite integrity、raw archive hash、research／evidence
+provenance、FTS 索引，以及 Gemini／Google Sheets 是否已配置。`GEMINI_API_KEY`
+或 Google 憑證缺少時是可預期的 `info`；本地核心的完整性錯誤才是 `fail`。
+
+若出現 `research_semantic_partial` 或 `source_runs_without_raw_manifest`，這代表
+既有資料仍有明確標示的歷史限制，不可依 URL、標題或相似度猜補來源；回答層應維持
+exact-only 與「我不確定」閘門。即時筆數請以當次 `stock-data-audit --json` 為準，
+勿沿用其他文件中的歷史 4／43 快照。
+
+若 Windows 上已有舊版 Dashboard 正在執行、導致 `uv run` 無法更新 `.venv\Scripts`
+入口檔，使用等價的模組入口：
+
+```powershell
+uv run --no-sync python -m bot.system_preflight_cli --root C:\skymiku\stock --json
+```
+
+## 〇・一、研究衍生鏈隔離（預設 dry-run）
+
+已知錯誤的 research／evidence／claim 衍生鏈可用 `stock-research-quarantine`
+標記為不可引用。此入口**不會刪除** raw archive 或關聯列，也**不會**依 URL、標題或
+相似度猜測 provenance；只接受明確的 `source_document_id`。
+
+```powershell
+# 預設唯讀 dry-run（不寫入）
+uv run stock-research-quarantine --root C:\skymiku\stock
+
+# 列出已隔離鏈（唯讀，含受影響 ID）
+uv run stock-research-quarantine --root C:\skymiku\stock --list
+
+# 預覽單一來源會影響哪些 ID（仍不寫入）
+uv run stock-research-quarantine --root C:\skymiku\stock `
+  --source-document-id <exact-source-document-id>
+
+# 實際隔離：必須同時提供具體 source_document_id 與 reason；先備份再執行
+uv run stock-db-backup --root C:\skymiku\stock --json
+uv run stock-research-quarantine --root C:\skymiku\stock `
+  --source-document-id <exact-source-document-id> `
+  --reason "說明為何隔離" `
+  --apply
+```
+
+缺少 `--source-document-id` 時，`--apply` 會被拒絕（exit code 2）。此命令與交易／
+下單路徑無關，請勿對正式庫直接 `--apply` 除非已確認 exact ID 與備份。
+
 ## 一、每日操作流程
 
 ### 盤前（08:00 ~ 09:00）
 
 1. **確認環境**
    ```powershell
-   cd d:\skymiku\stock
+   cd C:\skymiku\stock
    ```
 
 2. **檢查 .env 設定**
-   - 確認 `RUN_MODE`：`trade` 自動交易、`watch` 看盤不下單、`report` 公開延遲資料報表
+   - 確認 `RUN_MODE`：預設為 `watch`（看盤不下單）；`report` 公開延遲資料報表；`trade` 需明確設定（當沖實單預設封存）
    - 確認 `SYMBOLS` 是否需要更新（今天要監控哪些股票）
    - `trade` 模式才需要確認 `SIMULATION` 設定（`true` = 模擬，`false` = 實單）
 
@@ -24,25 +82,22 @@
    $env:RUN_MODE="report"; $env:SYMBOLS="2330,0050"; uv run stock-bot
    ```
 
-   使用 Shioaji 行情但不下單的看盤模式：
+   使用 Shioaji 行情但不下單的看盤模式（與預設相同，可省略）：
    ```powershell
    $env:RUN_MODE="watch"; uv run stock-bot
    ```
 
 4. **確認啟動成功**
 
-   正常啟動的 log 順序：
+   正常啟動的 log 順序（範例為 `run_mode=watch`）：
    ```
    [INFO] main: === Stock Bot 啟動 ===
-   [INFO] main: 組態載入完成 (run_mode=trade, market_source=shioaji, simulation=true)
-   [INFO] broker: 正在初始化 Shioaji ...
-   [INFO] broker: 登入中 ... (simulation=true)
-   [INFO] broker: 登入成功，可用帳號: [...]
-   [INFO] broker: 前日收盤價: {'2330': 589.0, '0050': 143.5}
-   [INFO] broker: 已訂閱 Tick: 2330
-   [INFO] broker: 已訂閱 Tick: 0050
-   [INFO] strategy: 策略已啟動，監控 ['2330', '0050']
+   [INFO] main: 組態載入完成 (run_mode=watch, market_source=shioaji, simulation=true)
    ```
+
+   交易／券商連線層另用 `stock-preflight`；研究／資料完整性請用
+   `stock-system-preflight` 與只讀 `stock-data-audit`（見上方「零」節），
+   不要把歷史驗證快照當成目前計數。
 
 5. **確認 Telegram 通知**
 
@@ -198,7 +253,8 @@ Select-String -Path "log\strategy_*.log" -Pattern "2330"
 
 - 檢查 `log/` 目錄大小，清理過舊的 log
 - 檢查 `data/` 目錄，備份交易紀錄
-- 備份本地 SQLite：`uv run stock-db-backup`（預設保留最近 14 份於 `data/backups/`）
+- 備份本地 SQLite：`uv run stock-db-backup`（預設保留最近 14 份於 `data/backups/`）；
+  從其他工作目錄執行時使用 `uv run stock-db-backup --root C:\\skymiku\\stock --json`
 - 回顧本週交易績效
 
 ### 每月

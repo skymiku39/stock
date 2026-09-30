@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -14,7 +15,12 @@ _PKG_ROOT = Path(__file__).resolve().parents[1]
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(
+    os.environ.get(
+        "STOCK_DASHBOARD_ROOT",
+        str(Path(__file__).resolve().parents[3]),
+    )
+).expanduser().resolve()
 DASHBOARD_UI_BUILD = "movers-cache-v18"
 
 
@@ -600,7 +606,12 @@ def _display_candlestick_chart(
             "show_ma": show_ma, "include_volume": include_volume,
         },
     )
-    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    try:
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+    finally:
+        # Streamlit 的 clear_figure 只清空內容，不保證釋放 pyplot registry；
+        # Dashboard 長時間切換頁面時要明確關閉，避免 figure 累積。
+        plt.close(fig)
     if show_bar_count:
         st.caption(f"📊 {n} 根 K 棒（蠟燭圖）")
 

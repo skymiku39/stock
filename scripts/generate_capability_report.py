@@ -3,6 +3,7 @@
 用法:
     uv run python scripts/generate_capability_report.py
     uv run python scripts/generate_capability_report.py --out docs/reports/system_capability_report.html
+    uv run python scripts/generate_capability_report.py --audit-json path/to/stock-data-audit.json
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import html
+import json
 import re
 import sys
 from pathlib import Path
@@ -52,6 +54,7 @@ CLI_META: Dict[str, Tuple[str, str]] = {
     "stock-intraday": ("research", "今日當沖戰情室管線（題材＋評分＋簡報）"),
     "stock-nextday": ("research", "明日當沖關注名單（draft／update）"),
     "stock-preflight": ("validate", "交易可行性七區檢查（含封存／憑證／時段）"),
+    "stock-system-preflight": ("validate", "系統完整性、資料稽核、記憶容量與模組 import 檢查"),
     "stock-validate": ("validate", "公開資料源只讀健康度（link／http／parse）"),
     "stock-oddlot-test": ("trade", "零股下單煙測（僅模擬環境）"),
     "stock-scheduler": ("other", "背景排程：macro／研究／公司／雲端／歷史／監控"),
@@ -68,9 +71,14 @@ CLI_META: Dict[str, Tuple[str, str]] = {
     "stock-watch-snapshot": ("data", "只看不買：熱度／熱門個股期貨快照"),
     "stock-watch-data-fetch": ("data", "只看不買：公司／日K／基本面／籌碼／技術／macro 補齊"),
     "stock-db-backup": ("data", "stock.db 線上備份（保留策略／標籤）"),
+    "stock-data-audit": ("validate", "只讀稽核 SQLite、raw archive、FTS 與 provenance 缺口"),
+    "stock-provenance-backfill": ("data", "只對可證明 exact source 的歷史資料補 provenance"),
+    "stock-evidence-link-repair": ("data", "只依 exact provenance 修復 evidence 的歷史來源連結"),
+    "stock-research-quarantine": ("validate", "以明確 source_document_id 隔離錯誤研究鏈；不刪 raw、不猜 provenance"),
     "stock-calibrate": ("research", "評分訊號與前瞻報酬校準（只讀，不改權重）"),
     "stock-memory": ("research", "短期／長期記憶查詢、回填、軟刪、提案"),
     "stock-ask": ("research", "QueryPlan＋EvidencePack 本地問答（可棄權）"),
+    "stock-sync-conflicts": ("validate", "查詢與人工裁決 row-level cloud sync conflict"),
 }
 
 
@@ -261,8 +269,9 @@ def section_analysis() -> str:
   </ul>
 
   <h3>3.6 Ask／記憶</h3>
-  <p>流程：QueryPlan → 本地 EvidencePack → ask_answer → evidence_id 驗證 → 通過才回答；失敗則「我不確定」。
-  僅寫入短期記憶；長期需品質通過或管理者核准。Ask <strong>不會</strong>在問答當下打外網 API。</p>
+  <p>流程：QueryPlan → 本地 EvidencePack →（明確啟用時）bounded live adapters → ask_answer →
+  evidence_id 驗證 → 通過才回答；失敗則「我不確定」。僅寫入短期記憶；長期需品質通過或管理者核准。
+  live 預設關閉，只有 QueryPlan 要求新聞／網搜且使用者明確啟用時才抓外網。</p>
 </section>
 """
 
@@ -354,10 +363,95 @@ def section_flows() -> str:
 """
 
 
-def section_gaps() -> str:
+def load_audit_json(path: Path) -> Dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("audit JSON 必須是物件")
+    return data
+
+
+def derive_audit_gap_metrics(audit: Dict[str, Any]) -> Dict[str, Any]:
+    """自 stock-data-audit JSON 衍生缺口計數；不硬編碼歷史數字。"""
+    db = audit.get("database") if isinstance(audit.get("database"), dict) else {}
+
+    source_runs: Optional[int] = None
+    for gap in audit.get("gaps") or []:
+        if not isinstance(gap, dict):
+            continue
+        if gap.get("code") != "source_runs_without_raw_manifest":
+            continue
+        details = gap.get("details") if isinstance(gap.get("details"), dict) else {}
+        unresolved = details.get("unresolved_source_runs")
+        if isinstance(unresolved, list):
+            source_runs = len(unresolved)
+        break
+    if source_runs is None and "source_runs_without_documents" in db:
+        source_runs = int(db.get("source_runs_without_documents") or 0)
+
+    legacy_llm: Optional[int] = None
+    for item in audit.get("known_limits") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("code") != "legacy_llm_without_provable_evidence":
+            continue
+        if "llm_analysis_legacy_unresolved" in db:
+            legacy_llm = int(db.get("llm_analysis_legacy_unresolved") or 0)
+        else:
+            legacy_llm = None
+        break
+    if legacy_llm is None and "llm_analysis_legacy_unresolved" in db:
+        legacy_llm = int(db.get("llm_analysis_legacy_unresolved") or 0)
+
+    return {
+        "supplied": True,
+        "source_runs_without_raw_manifest": source_runs,
+        "legacy_llm_without_provable_evidence": legacy_llm,
+    }
+
+
+def _fmt_audit_count(value: Optional[int]) -> str:
+    if value is None:
+        return "（此 audit JSON 未提供該計數）"
+    return f"{value} 筆"
+
+
+def section_gaps(audit_metrics: Optional[Dict[str, Any]] = None) -> str:
+    if audit_metrics and audit_metrics.get("supplied"):
+        source_txt = _fmt_audit_count(
+            audit_metrics.get("source_runs_without_raw_manifest")
+        )
+        legacy_txt = _fmt_audit_count(
+            audit_metrics.get("legacy_llm_without_provable_evidence")
+        )
+        audit_note = (
+            f"本報告已讀取 <code>--audit-json</code>："
+            f"<code>source_runs_without_raw_manifest</code> = {esc(source_txt)}；"
+            f"<code>legacy_llm_without_provable_evidence</code> = {esc(legacy_txt)}。"
+            " 計數來自該次 audit 產物，不是文件內硬編碼歷史快照。"
+        )
+        legacy_priority = (
+            f"以 exact manifest 逐步處理目前 audit 顯示的 "
+            f"{esc(source_txt)} legacy source run 與 {esc(legacy_txt)} legacy LLM 分析"
+            "（僅在有可證明原始檔時）"
+        )
+    else:
+        audit_note = (
+            "未提供 <code>--audit-json</code>：目前 "
+            "<code>source_runs_without_raw_manifest</code>／"
+            "<code>legacy_llm_without_provable_evidence</code> "
+            "計數不可用。請執行 <code>uv run stock-data-audit --json</code> "
+            "後帶入產物再生報告；勿沿用歷史文件中的 4／43 等過期數字。"
+        )
+        legacy_priority = (
+            "以最新 <code>stock-data-audit --json</code> 確認 "
+            "source_runs_without_raw_manifest 與 legacy_llm_without_provable_evidence "
+            "後，再以 exact manifest 逐步處理（目前報告未附 audit，計數不可用）"
+        )
+
     return f"""
 <section id="gaps">
   <h2>5. 缺少／缺口</h2>
+  <p class="note">{audit_note}</p>
   {table(
       ["嚴重度", "缺口", "影響"],
       [
@@ -365,22 +459,24 @@ def section_gaps() -> str:
            "已由 bot.ask_adapters 只讀接通；仍需本地先有快取"],
           ["Done (P0)", "ETF 評分遮蔽 fundamental／etf_consensus",
            "compute_scorecard(instrument_type=etf) 已分流"],
-          ["Done (P1)", "Ask 本地 news adapter",
-           "讀 data/news 日快取；web_search 仍不在問答當下抓網"],
+          ["Done (P1)", "Ask news／web_search／MOPS／ticker live adapters",
+           "預設關閉；--live 或 STOCK_ASK_LIVE=1 時限時抓取並保存 provenance；ticker 仍受延遲與 freshness gate 約束"],
           ["Done (P1)", "classify_news 接線；其餘 planned 歸檔",
            "auto_llm → classified_materials；supply_chain／analyst 移 archive"],
           ["Done (P1)", "EtfFollow 可選 LLM 進場閘",
            "ETF_FOLLOW_LLM_GATE=true 可對齊 ConfigurableStrategy"],
-          ["Critical", "DATA_ARCHITECTURE_REDESIGN 仍為目標規格、未完全落地",
-           "as_of／來源譜系／跨格式 SSOT 不完整"],
+          ["High", "DATA_ARCHITECTURE_REDESIGN 已部分落地",
+           "大規模歷史回填、來源專用日期／衝突驗證仍分階段補齊"],
           ["High", "當沖 trade 模式預設封存",
            "易誤以為 bot 會實單，實際僅訊號"],
-          ["Medium", "Ask 問答當下不抓外網",
-           "本地未先跑 watch-data-fetch／pipeline 則證據空"],
-          ["Medium", "Ask web_search adapter 未做",
-           "需即時網搜的問題仍棄權或依賴既有 memory"],
-          ["Medium", "RiskPostTradeHandler 未接線",
-           "成交後風控僅策略內同步"],
+          ["Done (P1)", "canonical SQLite semantic audit",
+           "只讀檢查 OHLC、期間、財務數值與空表狀態；不把保存誤當正確"],
+          ["Medium", "來源專用 PDF／事件衝突驗證仍需擴充",
+           "共用品質與 raw provenance 已有，域專用規則仍需實際格式案例"],
+          ["Low", "professional_knowledge 僅接受 allowlist 權威網域",
+           "已接入專用 adapter；頁面原文優先，僅摘要時標 partial，一般搜尋結果不列為專業證據"],
+          ["Out of scope", "RiskPostTradeHandler／下單後流程",
+           "本次研究、蒐集、問答與同步驗收不改動交易／下單路徑"],
           ["Low", "EVENT_CHAIN_SMILE_SCREEN 預設關閉",
            "量化補齊後不會自動選股"],
           ["Low", "新掛牌主動 ETF 可能 no_data_yet",
@@ -390,9 +486,9 @@ def section_gaps() -> str:
 
   <h3>6. 建議優先順序（後續）</h3>
   <ol>
-    <li>落地 DATA_ARCHITECTURE_REDESIGN（as_of／retrieved_at）與 RiskPostTradeHandler</li>
-    <li>Ask web_search：若允許問答當下搜尋，須明確 freshness／品質閘</li>
-    <li>視需求重啟 archive 內 supply_chain_impact／analyst_real_sentiment 管線</li>
+    <li>補齊 MOPS／ETF／新聞／PDF 的來源專用日期、單位與衝突驗證</li>
+    <li>{legacy_priority}</li>
+    <li>累積真實歷史樣本後再做 scoring calibration；不以少量結果宣稱投資正確率</li>
   </ol>
 </section>
 """
@@ -411,6 +507,7 @@ def build_html(
     groups: Dict[str, List[str]],
     prompts: List[Dict[str, str]],
     helpers: List[Tuple[str, str]],
+    audit_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
     cli_rows = []
     for name, target in scripts:
@@ -520,7 +617,7 @@ ul { padding-left: 1.2rem; }
 <header>
   <h1>Stock Bot 系統能力盤點報告</h1>
   <p>產生時間：{esc(generated_at)}（Asia/Taipei）</p>
-  <p class="note">本報告由 <code>scripts/generate_capability_report.py</code> 自程式碼掃描＋靜態盤點產生；不含任何 API 金鑰。</p>
+  <p class="note">本報告由 <code>scripts/generate_capability_report.py</code> 自程式碼掃描＋靜態盤點產生；不含任何 API 金鑰。可離線開啟（流程圖為可讀 preformatted 文字，不載入外部 CDN）。</p>
 </header>
 <nav class="toc">
   <a href="#summary">1. 摘要</a>
@@ -565,16 +662,13 @@ ul { padding-left: 1.2rem; }
 
 {section_analysis()}
 {section_flows()}
-{section_gaps()}
+{section_gaps(audit_metrics)}
 
 </main>
 <footer>
   重新產生：<code>uv run python scripts/generate_capability_report.py</code>
+  （可選 <code>--audit-json</code> 帶入 <code>stock-data-audit --json</code> 產物）
 </footer>
-<script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
-  mermaid.initialize({{ startOnLoad: true, theme: "dark" }});
-</script>
 </body>
 </html>
 """
@@ -588,13 +682,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=ROOT / "docs" / "reports" / "system_capability_report.html",
     )
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument(
+        "--audit-json",
+        type=Path,
+        default=None,
+        help="可選：stock-data-audit --json 產物；用於衍生 provenance 缺口計數",
+    )
     args = parser.parse_args(argv)
 
     root: Path = args.root
     scripts = _load_toml_scripts(root / "pyproject.toml")
+    missing_meta = sorted(name for name, _target in scripts if name not in CLI_META)
+    if missing_meta:
+        print(
+            "error: CLI metadata missing for " + ", ".join(missing_meta),
+            file=sys.stderr,
+        )
+        return 2
+
     pages, groups = _parse_nav_pages(root / "src" / "bot" / "dashboard" / "nav.py")
     prompts = _read_prompt_meta(root / "prompts")
     helpers = _list_scripts_helpers(root / "scripts")
+
+    audit_metrics: Optional[Dict[str, Any]] = None
+    if args.audit_json is not None:
+        try:
+            audit_metrics = derive_audit_gap_metrics(load_audit_json(args.audit_json))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"error: failed to read --audit-json: {exc}", file=sys.stderr)
+            return 2
 
     # 台北時間近似：本機若已是 TW 則用本地；報告標註字串
     now = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
@@ -605,15 +721,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         groups=groups,
         prompts=prompts,
         helpers=helpers,
+        audit_metrics=audit_metrics,
     )
 
     out: Path = args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html_doc, encoding="utf-8")
-    print(f"ok wrote {out} cli={len(scripts)} pages={len(pages)} prompts={len(prompts)}")
-    if len(scripts) != 27:
-        print(f"warning: expected 27 CLI scripts, got {len(scripts)}", file=sys.stderr)
-        return 2
+    audit_note = "audit=none"
+    if audit_metrics and audit_metrics.get("supplied"):
+        audit_note = (
+            "audit="
+            f"source_runs={audit_metrics.get('source_runs_without_raw_manifest')};"
+            f"legacy_llm={audit_metrics.get('legacy_llm_without_provable_evidence')}"
+        )
+    print(
+        f"ok wrote {out} cli={len(scripts)} pages={len(pages)} "
+        f"prompts={len(prompts)} {audit_note}"
+    )
     return 0
 
 

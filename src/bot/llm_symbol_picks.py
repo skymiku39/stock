@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -22,7 +23,7 @@ def _add_unique(order: List[str], seen: set[str], ticker: str) -> None:
     order.append(t)
 
 
-def collect_llm_symbols(
+def _collect_llm_symbols_open_db(
     root: Optional[Path] = None,
     *,
     lookback_days: int = 5,
@@ -72,6 +73,22 @@ def collect_llm_symbols(
     return order
 
 
+@wraps(_collect_llm_symbols_open_db)
+def collect_llm_symbols(*args: Any, **kwargs: Any) -> List[str]:
+    """彙整報告中的股票，並釋放本函式自有的 SQLite 連線。"""
+    if kwargs.get("db") is not None:
+        return _collect_llm_symbols_open_db(*args, **kwargs)
+    root = kwargs.get("root")
+    if root is None and args:
+        root = args[0]
+    db = StockDB.open(path=default_db_path(root))
+    kwargs["db"] = db
+    try:
+        return _collect_llm_symbols_open_db(*args, **kwargs)
+    finally:
+        db.close()
+
+
 def llm_symbol_metadata(
     root: Optional[Path] = None,
     symbols: Optional[Sequence[str]] = None,
@@ -79,22 +96,25 @@ def llm_symbol_metadata(
     """回傳各股在最近 intraday 報告中的排名/分數（若有）。"""
     root = root or Path.cwd()
     database = StockDB.open(path=default_db_path(root))
-    today = now_tw().date().isoformat()
-    meta: Dict[str, Dict[str, Any]] = {}
-    row = database.get_llm_daily_report("intraday", today, mode="")
-    if not row or not row.payload_json:
+    try:
+        today = now_tw().date().isoformat()
+        meta: Dict[str, Dict[str, Any]] = {}
+        row = database.get_llm_daily_report("intraday", today, mode="")
+        if not row or not row.payload_json:
+            return meta
+        payload = json.loads(row.payload_json)
+        for idx, item in enumerate(payload.get("rankings") or [], 1):
+            if not isinstance(item, dict):
+                continue
+            t = str(item.get("ticker") or "").strip()
+            if symbols and t not in symbols:
+                continue
+            meta[t] = {
+                "rank": idx,
+                "name": item.get("name", ""),
+                "day_trade_score": item.get("day_trade_score"),
+                "action": item.get("action", ""),
+            }
         return meta
-    payload = json.loads(row.payload_json)
-    for idx, item in enumerate(payload.get("rankings") or [], 1):
-        if not isinstance(item, dict):
-            continue
-        t = str(item.get("ticker") or "").strip()
-        if symbols and t not in symbols:
-            continue
-        meta[t] = {
-            "rank": idx,
-            "name": item.get("name", ""),
-            "day_trade_score": item.get("day_trade_score"),
-            "action": item.get("action", ""),
-        }
-    return meta
+    finally:
+        database.close()

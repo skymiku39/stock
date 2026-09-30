@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Dict, Optional
 
 from bot.entry_rules import in_entry_range, resolve_entry_range
@@ -37,10 +38,12 @@ class ConfigurableStrategy(BaseStrategy):
         publisher=None,
         *,
         wire_handlers: bool = True,
+        project_root: Optional[Path] = None,
     ):
         super().__init__(
             broker, settings, market_source, logger,
             publisher=publisher, wire_handlers=wire_handlers,
+            project_root=project_root,
         )
         self._last_watch_log: Dict[str, float] = {}
 

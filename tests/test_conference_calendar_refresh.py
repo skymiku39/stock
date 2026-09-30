@@ -130,6 +130,23 @@ def test_resolve_llm_bundle_uses_live_sections_without_cache(tmp_path: Path):
     assert bundle["source_sections"] == live_sections
 
 
+def test_resolve_llm_bundle_can_disable_live_sources(tmp_path: Path):
+    from bot.auto_llm import resolve_llm_bundle
+
+    with patch(
+        "bot.auto_llm.build_live_source_sections",
+        side_effect=AssertionError("live source must be disabled"),
+    ):
+        bundle = resolve_llm_bundle(
+            "2330",
+            tmp_path,
+            pipeline_analysis={"ticker": "2330", "summary": "local"},
+            allow_live_sources=False,
+        )
+
+    assert bundle["source_sections"] is None
+
+
 def test_patch_material_detail_in_cache(tmp_path: Path):
     from bot.auto_llm import patch_material_detail_in_cache
 

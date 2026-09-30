@@ -26,6 +26,7 @@ from bot.fundamentals_fetcher import (
     MonthlyRevenue,
     QuarterlyFinancials,
     ValuationDaily,
+    build_fundamental_snapshot,
     _enrich_dividends_with_payout,
     _parse_one_revenue,
     _parse_valuation,
@@ -99,6 +100,16 @@ class TestParseValuation:
         assert v.pe_ratio == pytest.approx(22.5)
         assert v.dividend_yield == pytest.approx(1.85)
 
+    def test_rejects_provider_extreme_dividend_yield(self) -> None:
+        raw = {
+            "Code": "5314",
+            "Name": "provider outlier",
+            "PEratio": "6.65",
+            "PBratio": "4.98",
+            "DividendYield": "102.66",
+        }
+        assert _parse_valuation(raw) is None
+
 
 class TestPayoutEnrichment:
     def test_calculates_payout_ratio(self) -> None:
@@ -145,6 +156,56 @@ class TestFundamentalSnapshotDerived:
         assert len(prog["progress"]) == 2
         assert prog["progress"][0]["cum_eps"] == pytest.approx(5.0)
         assert prog["prev_year_total_eps"] == pytest.approx(16.0)
+
+
+def test_cache_only_snapshot_reads_full_market_caches_without_network(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "data" / "fundamentals"
+    cache.mkdir(parents=True)
+    (cache / "monthly_revenue_all.json").write_text(json.dumps([{
+        "公司代號": "2330",
+        "公司名稱": "台積電",
+        "資料年月": "11508",
+        "營業收入-當月營收": "514805337",
+        "營業收入-去年同月營收": "335771691",
+        "營業收入-去年同月增減(%)": "53.32",
+        "營業收入-上月比較增減(%)": "10.10",
+    }], ensure_ascii=False), encoding="utf-8")
+    (cache / "valuation_all.json").write_text(json.dumps([{
+        "Code": "2330",
+        "Name": "台積電",
+        "Date": "1150915",
+        "PEratio": "27.65",
+        "PBratio": "9.61",
+        "DividendYield": "0.92",
+    }], ensure_ascii=False), encoding="utf-8")
+    (cache / "quarterly_financials_all.json").write_text(json.dumps([{
+        "公司代號": "2330",
+        "年度": "115",
+        "季別": "2",
+        "營業收入": "2404483690",
+        "營業毛利（損）": "1611606116",
+        "營業利益（損失）": "1425568793",
+        "本期淨利（淨損）": "1279582227",
+        "基本每股盈餘（元）": "49.33",
+        "_sector": "ci",
+    }], ensure_ascii=False), encoding="utf-8")
+
+    with patch("bot.fundamentals_fetcher.requests.Session.get") as get:
+        snapshot = build_fundamental_snapshot("2330", root=tmp_path, refresh=False)
+
+    get.assert_not_called()
+    assert snapshot.has_data
+    assert snapshot.name == "台積電"
+    assert snapshot.latest_revenue() is not None
+    assert snapshot.latest_revenue().year == 2026
+    assert snapshot.latest_revenue().month == 8
+    assert snapshot.valuation is not None
+    assert snapshot.valuation.pe_ratio == pytest.approx(27.65)
+    assert snapshot.quarterlies[0].year == 2026
+    assert snapshot.quarterlies[0].quarter == 2
+    assert snapshot.fetched_at
 
 
 class TestManualQuarterlyIO:

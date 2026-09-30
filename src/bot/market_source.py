@@ -7,11 +7,14 @@ TWSE MIS API 回傳的行情相較即時行情延遲 20 分鐘以上，
 from __future__ import annotations
 
 import logging
+import datetime as dt
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from bot.models import MarketTick
+from bot.data_quality import persist_source_result, response_to_rows
 from bot.utils import get_logger, now_tw
 
 
@@ -26,10 +29,19 @@ class TwsePublicMarketSource:
         symbols: List[str],
         poll_seconds: int = 5,
         logger: Optional[logging.Logger] = None,
+        root: Optional[Path] = None,
+        request_timeout: float = 10.0,
     ):
         self.symbols = symbols
         self.poll_seconds = poll_seconds
         self.logger = logger or get_logger("twse-source")
+        # None intentionally means no provenance write.  Read-only validators
+        # and isolated tests must not silently mutate the formal project DB.
+        self.root = Path(root) if root is not None else None
+        try:
+            self.request_timeout = max(0.25, float(request_timeout))
+        except (TypeError, ValueError):
+            self.request_timeout = 10.0
 
         self._session = requests.Session()
         self._session.headers.update({
@@ -40,6 +52,7 @@ class TwsePublicMarketSource:
         self._exchange_map: Dict[str, str] = {}
         self._prev_volumes: Dict[str, int] = {}
         self._prev_close: Dict[str, float] = {}
+        self._last_source_document_id = ""
         self._initialized = False
 
     # ------------------------------------------------------------------
@@ -48,7 +61,7 @@ class TwsePublicMarketSource:
 
     def _init_session(self) -> None:
         try:
-            self._session.get(self.MIS_INDEX_URL, timeout=10)
+            self._session.get(self.MIS_INDEX_URL, timeout=self.request_timeout)
             self._initialized = True
             self.logger.info("TWSE MIS session 初始化完成")
         except Exception:
@@ -68,15 +81,31 @@ class TwsePublicMarketSource:
         if not self._initialized:
             self._init_session()
 
+        self._last_source_document_id = ""
         ex_ch = self._build_ex_ch(symbols)
         try:
             resp = self._session.get(
                 self.MIS_API_URL,
                 params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
-                timeout=10,
+                timeout=self.request_timeout,
             )
-            data = resp.json()
-            return data.get("msgArray", [])
+            result = response_to_rows(
+                resp,
+                source="twse_mis_quote",
+                url=self.MIS_API_URL,
+                list_key="msgArray",
+                min_rows=0,
+            )
+            if self.root is not None:
+                self._last_source_document_id = str(
+                    persist_source_result(result, root=self.root) or ""
+                )
+            if not result.usable:
+                self.logger.warning(
+                    "TWSE MIS 回應品質=%s: %s", result.status, result.error,
+                )
+                return []
+            return result.rows
         except Exception:
             self.logger.exception("TWSE 資料拉取失敗")
             return []
@@ -200,6 +229,7 @@ class TwsePublicMarketSource:
                 "exchange": ex,
                 "fetched_at": ts.isoformat(timespec="seconds"),
                 "source": "twse_mis",
+                "source_document_id": self._last_source_document_id,
                 "raw": item,
             }
         return result
@@ -208,7 +238,7 @@ class TwsePublicMarketSource:
         """輪詢一次，回傳有新成交量的 MarketTick 清單。"""
         items = self._fetch_raw(self.symbols)
         ticks: List[MarketTick] = []
-        ts = now_tw()
+        fetched_at = now_tw()
 
         for item in items:
             code = item.get("c", "")
@@ -238,6 +268,8 @@ class TwsePublicMarketSource:
                 100 * (price - prev_close) / prev_close if prev_close > 0 else 0.0
             )
 
+            observed_at = self._parse_quote_datetime(item) or fetched_at
+
             prev_vol = self._prev_volumes.get(code, -1)
             if volume == prev_vol:
                 continue
@@ -245,14 +277,33 @@ class TwsePublicMarketSource:
 
             ticks.append(
                 MarketTick(
-                    ts=ts,
+                    ts=observed_at,
                     symbol=code,
                     price=price,
                     volume=volume,
                     pct_chg=pct_chg,
                     prev_close=prev_close,
                     source="twse_public",
+                    observed_at=observed_at,
+                    quality_status="ok" if prev_close > 0 else "partial",
+                    price_basis="last_trade",
+                    source_document_id=self._last_source_document_id,
                 )
             )
 
         return ticks
+
+    @staticmethod
+    def _parse_quote_datetime(item: Dict[str, Any]) -> Optional[dt.datetime]:
+        """使用 MIS 的 ``d`` / ``t``；欄位缺失時由呼叫端退回本機抓取時間。"""
+        raw_date = str(item.get("d") or "").strip()
+        raw_time = str(item.get("t") or "").strip()
+        if len(raw_date) != 8 or not raw_date.isdigit() or not raw_time:
+            return None
+        try:
+            parsed = dt.datetime.strptime(
+                f"{raw_date} {raw_time}", "%Y%m%d %H:%M:%S",
+            )
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=now_tw().tzinfo)

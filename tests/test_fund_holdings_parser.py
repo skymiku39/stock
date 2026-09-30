@@ -151,6 +151,7 @@ class TestFetcherDeterministicPath:
         )
         assert result.success
         assert result.holdings_count == 6
+        assert result.source_document_id.startswith("source-doc:etf_holdings_ALI006:")
         assert result.snapshot_date is not None
         assert result.snapshot_date.isoformat() == "2026-06-30"
         assert result.prompt_id == "fund_holdings_parser"

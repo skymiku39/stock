@@ -31,6 +31,18 @@
 | 美股/指數/VIX/ADR | yfinance | 跨市場連動 | 否 | TWSE 收盤 fallback；未安裝則「無資料」 |
 | **台指期正逆價差** | `openapi.taifex.com.tw/v1/DailyMarketReportFut` | 期貨領先指標 (正逆價差) | 否 | 抓不到則 macro note 標記、不影響其他分析 |
 
+### Macro 時間與來源判定
+
+macro 快照的 `asof_date` 是快照／抓取日期，不等於每一筆行情的觀測日期。
+指數、ADR、台股現貨與 USDTWD 會各自保存 `source_date`；ADR 溢價若跨市場
+日期未對齊，結果仍可供參考，但會在 `notes` 標示日期差異。台股現貨若退回
+TWSE `STOCK_DAY_AVG_ALL` 且回應未提供可可靠確認的觀測日，系統會保留空白，
+不以抓取時間冒充市場日期。
+
+重大訊息 OpenAPI 的「有效回應但沒有該股票」與「HTTP／JSON 失敗」也會分開
+記錄：前者是 `openapi_valid=true` 且 `openapi_count=0`，後者保留
+`openapi_valid=false` 與 `openapi_error`，不會把來源故障當成沒有重大訊息。
+
 > **產業分類 (持股分析「未分類」修復)**：上述公司基本資料的「產業別」原始格式是**數字代碼**
 > (例如 `24`=半導體業)，由 `bot/company_info.py` 的 `INDUSTRY_CODE_MAP` 轉成中文後寫入
 > 本地 `stock_info`。持股分析頁查 DB 缺名稱/產業時會**自動補抓**；亦可手動全市場補齊：
@@ -48,8 +60,8 @@
 
 | 來源 | URL 樣式 | 適用 | 失敗 fallback |
 |------|---------|------|--------------|
-| etfinfo.tw | `etfinfo.tw/etf/{symbol}/holdings` | 多數已掛牌主動式 ETF (22 檔) | 改 MoneyDJ |
-| MoneyDJ | `moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw` | etfinfo 未收錄者 (00402A/00404A/00405A/00406A/00407A/00998A)、海外型 | 來源頁顯示「查無資料」→ 標記 `no_data_yet` (略過 LLM，待後續自動補齊) |
+| etfinfo.tw | `etfinfo.tw/etf/{symbol}/holdings` | 目前 27 檔主動式 ETF；Nuxt payload／完整表先做 deterministic parse | 頁面契約改版時保留 raw，才允許受控 LLM fallback |
+| MoneyDJ ETF | `moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw` | 使用者覆寫來源時的 fallback；前十大摘要不可當完整持股 | 標記 `source_incomplete_top_n`，保留 raw 且禁止 LLM 假補全 |
 
 ## 共同基金持股（納入共識追蹤）
 
@@ -61,14 +73,15 @@
 > `ALI006` 掛進 `DEFAULT_ACTIVE_ETFS`，快照同樣寫入 `data/etf_holdings/ALI006/`。
 > Shioaji 查不到契約時會自動略過報價，不影響持股共識計算。
 
-> **已知限制（新掛牌）**：2026/5 下旬募集、6 月初才掛牌的 5 檔
-> (00402A、00404A、00405A、00406A、00407A) 連發行商與第三方 (etfinfo / MoneyDJ) **都尚未公開每日成分股**
-> (MoneyDJ 頁面顯示「查無資料」)。URL 雖回 HTTP 200，但持股表為空。
-> - 程式會將其標記為 **`no_data_yet`**（與真正解析失敗 `no_holdings_parsed` 區分），且**不浪費 LLM 呼叫**。
-> - **背景排程器 (`stock-scheduler`) 會定期重抓**，一旦來源公開持股即自動產生 CSV，**無需人工介入**。
-> - 26/27 檔（含已修復的 00998A）可正常解析；屬資料可得性限制，非程式錯誤。
->
-> 持股解析依賴 Gemini (`extract_etf_holdings` prompt)，需 `GEMINI_API_KEY`。
+> **目前狀態（2026-09-19）**：27 檔 ETF 都已能由 etfinfo.tw 的完整 SSR payload
+> 產生可重播的 canonical CSV；其中 00404A／00406A 的選擇權／衍生品列保留於 raw，
+> 但明確排除於股票持股模型。若未來來源退化成只有前十大，程式會標記
+> **`source_incomplete_top_n`**，不把摘要誤當完整快照，也不會交給 LLM 假補全。
+> `stock-scheduler` 仍會定期重抓；只有 parser 契約失敗且來源不是已知 top-N 時，才進入
+> 受控的 `extract_etf_holdings` fallback，因此目前正常 batch 不需要 `GEMINI_API_KEY`。
+> 主動式 ETF 清單也會在完整研究管線啟動時以 `sync_etf_meta_to_db()` 物化到
+> `etf_meta`；這些列是 `config://`、`quality_status=unknown` 的設定 metadata，
+> 不會被當成外部市場證據，已有 exact 外部資料則不覆蓋。
 
 ## 需憑證 / 即時的資料源
 
@@ -91,6 +104,7 @@ uv run stock-validate --cloud          # 對 Google Sheets 做 live ping
 
 特性：
 - **只讀**：所有抓取導向暫存資料夾，不覆蓋正式 `data/`、不下單、不寫雲端。
+- **隔離驗證 root**：公司名冊、MOPS、網路搜尋與其他會保存 raw 的收集器，均接收同一個暫存 root；驗證前後正式 `data/raw` 與 provenance 計數應保持不變。
 - **不洩漏金鑰**：僅顯示憑證「是否存在 (present=true/false)」，絕不印出金鑰內容。
 - **三層輸出**：每項回報 `layer / ok / rows / sample_date / error / note`。
 - **誠實標記**：MOPS 安全性阻擋、Shioaji 模擬 0 筆、ETF 新掛牌無持股等，皆以

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime
+import ipaddress
 from typing import Annotated, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -287,6 +289,31 @@ class Settings(BaseSettings):
     etf_min_consensus_add: int = 3
     etf_max_pct_chg_on_entry: float = 4.0
 
+    # --- LLM provider ---
+    llm_provider: Literal["gemini", "codex_app_server"] = "gemini"
+    codex_app_server_url: str = "ws://127.0.0.1:4500"
+    codex_app_server_model: str = "gpt-6-sol"
+    codex_app_server_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "max"
+
+    @property
+    def llm_enabled(self) -> bool:
+        if self.llm_provider == "codex_app_server":
+            parsed = urlparse(self.codex_app_server_url.strip())
+            if parsed.scheme != "ws" or not parsed.hostname:
+                return False
+            try:
+                port = parsed.port
+            except ValueError:
+                return False
+            if port is None:
+                return False
+            try:
+                loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+            except ValueError:
+                loopback = parsed.hostname.lower() == "localhost"
+            return bool(loopback and self.codex_app_server_model.strip())
+        return bool(self.gemini_api_key.strip())
+
     # --- Gemini LLM ---
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
@@ -316,6 +343,8 @@ class Settings(BaseSettings):
     scheduler_fundamentals_args: str = "--limit 3 --stale-days 30 --delay-seconds 30"
     # 完整研究管線 (ETF/籌碼/基本面/法說 + LLM 簡報)；<=0 停用
     scheduler_research_interval_min: int = 240
+    # 每次排程最多對多少個過期/缺少快取的個股做完整 LLM 研究；<=0 不設上限。
+    scheduler_research_max_tickers: int = 12
     # 公司基本資料 (名稱/產業/上市日) 補齊；靜態資料，預設一天一次；<=0 停用
     scheduler_company_interval_min: int = 1440
     # 傳給 stock-auto-research 的額外參數 (例如 "--no-brief" 省 LLM 成本)
