@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.smile_curve_backtest import SmileBacktestSummary, SmileCurveBacktester
 from bot.stock_db import StockDB, default_db_path
@@ -116,6 +117,7 @@ def _export_csv(summary: SmileBacktestSummary, path: Path) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(description="微笑曲線策略日 K 回測")
     parser.add_argument("--symbols", required=True, help="逗號分隔股票代號")
     parser.add_argument("--start", help="起始日期 YYYY-MM-DD")
@@ -128,17 +130,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--fetch", action="store_true", help="缺日K時自動抓取")
     parser.add_argument("--output", help="匯出 CSV 路徑")
     parser.add_argument("--json", action="store_true", help="輸出 JSON 摘要")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
     logger = get_logger("smile-backtest")
-    root = Path.cwd()
+    root = args.root.resolve() if args.root else Path.cwd()
     symbols = [_normalize_symbol(s) for s in args.symbols.split(",") if s.strip()]
     if not symbols:
         logger.error("請指定 --symbols")
         return 1
 
     start, end = _resolve_dates(args.days, args.start, args.end)
-    overrides: dict = {"symbols": symbols, "_env_file": None}
+    overrides: dict = {"symbols": symbols, "_env_file": str(root / ".env")}
     if args.tiers:
         overrides["smile_buy_tiers"] = args.tiers
     if args.base_lot is not None:
@@ -153,47 +159,51 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     settings = Settings(**overrides)  # type: ignore[call-arg]
     db = StockDB.open(path=default_db_path(root))
+    try:
+        if args.fetch:
+            _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
 
-    if args.fetch:
-        _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
+        summary = SmileCurveBacktester(settings).run_many(
+            symbols, root=root, start=start, end=end, db=db,
+        )
+        summary.start = start
+        summary.end = end
 
-    summary = SmileCurveBacktester(settings).run_many(
-        symbols, root=root, start=start, end=end, db=db,
-    )
-    summary.start = start
-    summary.end = end
+        if args.json:
+            payload = {
+                "settings_note": summary.settings_note,
+                "start": start,
+                "end": end,
+                "total_pnl_twd": summary.total_pnl_twd,
+                "win_rate": summary.win_rate,
+                "trade_count": len(summary.all_round_trips),
+                "symbols": [
+                    {
+                        "symbol": r.symbol,
+                        "trade_count": r.trade_count,
+                        "total_pnl_twd": r.total_pnl_twd,
+                        "win_rate": r.win_rate,
+                        "cycle_count": r.cycle_count,
+                        "open_lots": r.open_lots,
+                        "skip_reason": r.skip_reason,
+                    }
+                    for r in summary.results
+                ],
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_summary(summary)
 
-    if args.json:
-        payload = {
-            "settings_note": summary.settings_note,
-            "start": start,
-            "end": end,
-            "total_pnl_twd": summary.total_pnl_twd,
-            "win_rate": summary.win_rate,
-            "trade_count": len(summary.all_round_trips),
-            "symbols": [
-                {
-                    "symbol": r.symbol,
-                    "trade_count": r.trade_count,
-                    "total_pnl_twd": r.total_pnl_twd,
-                    "win_rate": r.win_rate,
-                    "cycle_count": r.cycle_count,
-                    "open_lots": r.open_lots,
-                    "skip_reason": r.skip_reason,
-                }
-                for r in summary.results
-            ],
-        }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        _print_summary(summary)
+        if args.output:
+            out = Path(args.output)
+            if not out.is_absolute():
+                out = root / out
+            _export_csv(summary, out)
+            logger.info("已匯出 %s", out)
 
-    if args.output:
-        out = Path(args.output)
-        _export_csv(summary, out)
-        logger.info("已匯出 %s", out)
-
-    return 0
+        return 0
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

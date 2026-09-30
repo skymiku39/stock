@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
 from bot.smile_curve_backtest_cli import _ensure_daily_data, _normalize_symbol, _resolve_dates
@@ -64,6 +65,7 @@ def _print_report(report: SmileScreenReport) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         description="微笑曲線複合選股：ETF 共識 + 波動回檔 + 資金可負擔 + 回測驗證",
     )
@@ -83,10 +85,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--tiers", help="覆寫 SMILE_BUY_TIERS")
     parser.add_argument("--output", help="匯出 JSON 報告路徑")
     parser.add_argument("--json", action="store_true", help="輸出 JSON")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
     logger = get_logger("smile-screen")
-    root = Path.cwd()
+    root = args.root.resolve() if args.root else Path.cwd()
     start, end = _resolve_dates(args.days, args.start, args.end)
 
     extra: Optional[List[str]] = None
@@ -100,7 +106,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         use_odd_lot = False
 
     fund_per_symbol = args.total_fund / max(1, args.top_n)
-    overrides: dict = {"_env_file": None, "max_fund": int(fund_per_symbol)}
+    overrides: dict = {"_env_file": str(root / ".env"), "max_fund": int(fund_per_symbol)}
     if use_odd_lot is True:
         overrides["use_odd_lot"] = True
     elif use_odd_lot is False:
@@ -110,59 +116,64 @@ def main(argv: Optional[List[str]] = None) -> int:
     settings = Settings(**overrides)  # type: ignore[call-arg]
 
     db = StockDB.open(path=default_db_path(root))
-    universe = collect_universe_tickers(
-        root,
-        min_etf_count=args.min_etf,
-        universe_limit=args.universe_limit,
-        extra_symbols=extra,
-    )
-    if args.fetch and universe:
-        _ensure_daily_data(universe, start, end, root=root, db=db, logger=logger)
+    try:
+        universe = collect_universe_tickers(
+            root,
+            min_etf_count=args.min_etf,
+            universe_limit=args.universe_limit,
+            extra_symbols=extra,
+        )
+        if args.fetch and universe:
+            _ensure_daily_data(universe, start, end, root=root, db=db, logger=logger)
 
-    report = screen_smile_candidates(
-        db,
-        root=root,
-        start=start,
-        end=end,
-        total_fund=float(args.total_fund),
-        top_n=args.top_n,
-        min_etf_count=args.min_etf,
-        max_price=args.max_price,
-        min_ann_vol=args.min_vol,
-        use_odd_lot=use_odd_lot,
-        universe_limit=args.universe_limit,
-        extra_symbols=extra,
-        settings=settings,
-        publisher=get_or_create_bus(),
-    )
+        report = screen_smile_candidates(
+            db,
+            root=root,
+            start=start,
+            end=end,
+            total_fund=float(args.total_fund),
+            top_n=args.top_n,
+            min_etf_count=args.min_etf,
+            max_price=args.max_price,
+            min_ann_vol=args.min_vol,
+            use_odd_lot=use_odd_lot,
+            universe_limit=args.universe_limit,
+            extra_symbols=extra,
+            settings=settings,
+            publisher=get_or_create_bus(project_root=root),
+        )
 
-    if args.json or args.output:
-        payload = {
-            "start": report.start,
-            "end": report.end,
-            "total_fund": report.total_fund,
-            "fund_per_symbol": report.fund_per_symbol,
-            "top_n": report.top_n,
-            "universe_size": report.universe_size,
-            "filtered_size": report.filtered_size,
-            "notes": report.notes,
-            "selected": [c.to_dict() for c in report.selected],
-            "candidates": [c.to_dict() for c in report.candidates],
-            "settings_suggestion": report.settings_suggestion,
-        }
-        if args.json:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        if args.output:
-            out = Path(args.output)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info("已匯出 %s", out)
-    else:
-        _print_report(report)
+        if args.json or args.output:
+            payload = {
+                "start": report.start,
+                "end": report.end,
+                "total_fund": report.total_fund,
+                "fund_per_symbol": report.fund_per_symbol,
+                "top_n": report.top_n,
+                "universe_size": report.universe_size,
+                "filtered_size": report.filtered_size,
+                "notes": report.notes,
+                "selected": [c.to_dict() for c in report.selected],
+                "candidates": [c.to_dict() for c in report.candidates],
+                "settings_suggestion": report.settings_suggestion,
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            if args.output:
+                out = Path(args.output)
+                if not out.is_absolute():
+                    out = root / out
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                logger.info("已匯出 %s", out)
+        else:
+            _print_report(report)
 
-    if not report.candidates and not extra:
-        return 1
-    return 0
+        if not report.candidates and not extra:
+            return 1
+        return 0
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
