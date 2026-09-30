@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
+import os
 import signal
 import subprocess
 import sys
@@ -64,6 +66,51 @@ def _resolve_cmd(console_script: str, module: str, extra: List[str]) -> List[str
     return base + [module] + extra  # python -m <module>
 
 
+class _ProcessLock:
+    """Hold a non-blocking OS file lock for this scheduler process lifetime."""
+
+    def __init__(self, project_root: Path):
+        self.path = project_root / "data" / ".scheduler.lock"
+        self._handle = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if self.path.stat().st_size == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return False
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            handle.close()
+
+
 @dataclass
 class Job:
     name: str
@@ -90,6 +137,9 @@ class Job:
         return True
 
 
+_DAILY_FAILURE_RETRY_SECONDS = 5 * 60
+
+
 class Scheduler:
     def __init__(
         self,
@@ -103,12 +153,75 @@ class Scheduler:
         self.project_root = project_root or Path.cwd()
         self.dry_run = dry_run
         self._publisher = publisher
-        self.logger = get_logger("scheduler")
+        self.logger = get_logger("scheduler", log_dir=self.project_root / "log")
         self.log_dir = self.project_root / "log"
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.status_path = self.project_root / "data" / "scheduler_status.json"
         self._stop = threading.Event()
         self.jobs: List[Job] = self._build_jobs()
         self._monitor_runner = None  # 延遲建立，避免無謂 import
+
+    def _write_status(
+        self,
+        state: str,
+        *,
+        run_once: Optional[bool] = None,
+        last_job: Optional[str] = None,
+        last_success: Optional[bool] = None,
+        last_error: Optional[str] = None,
+    ) -> None:
+        """Publish a durable heartbeat for the dashboard and diagnostics."""
+        try:
+            self.status_path.parent.mkdir(parents=True, exist_ok=True)
+            previous: dict = {}
+            if self.status_path.exists():
+                try:
+                    previous = json.loads(self.status_path.read_text(encoding="utf-8"))
+                except Exception:
+                    previous = {}
+            heartbeat = now_tw().isoformat(timespec="seconds")
+            payload = {
+                **previous,
+                "state": state,
+                "pid": os.getpid(),
+                "heartbeat_at": heartbeat,
+                "run_once": run_once if run_once is not None else previous.get("run_once", False),
+            }
+            if last_job is not None:
+                payload["last_job"] = last_job
+                payload["last_job_at"] = heartbeat
+            if last_success is not None:
+                payload["last_success"] = last_success
+            if last_error is not None:
+                payload["last_error"] = last_error
+            # Use a process/thread-specific temporary file.  A fixed
+            # ``scheduler_status.tmp`` lets two scheduler instances race on
+            # Windows, where one process can replace/delete the other's open
+            # temp file and produce WinError 32.  The target can also be read
+            # by Streamlit at the same time, so retry the atomic replace
+            # briefly before reporting a genuine write failure.
+            tmp = self.status_path.with_name(
+                f"{self.status_path.name}.{os.getpid()}."
+                f"{threading.get_ident()}.tmp"
+            )
+            serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+            try:
+                for attempt in range(4):
+                    try:
+                        tmp.write_text(serialized, encoding="utf-8")
+                        tmp.replace(self.status_path)
+                        return
+                    except PermissionError:
+                        if attempt >= 3:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            self.logger.debug("scheduler status 寫入失敗", exc_info=True)
 
     def _build_jobs(self) -> List[Job]:
         s = self.settings
@@ -133,6 +246,15 @@ class Scheduler:
             ))
         if s.scheduler_research_interval_min > 0:
             extra = [a for a in str(s.scheduler_research_args).split() if a]
+            if not any(
+                arg == "--auto-research-limit"
+                or arg.startswith("--auto-research-limit=")
+                for arg in extra
+            ):
+                extra.extend([
+                    "--auto-research-limit",
+                    str(s.scheduler_research_max_tickers),
+                ])
             jobs.append(Job(
                 name="research",
                 console_script="stock-auto-research",
@@ -255,6 +377,35 @@ class Scheduler:
         window_end = job.window_end or dt.time(23, 59)
         return _in_window(now.time(), job.window_start, window_end)
 
+    def _job_eligible(self, job: Job, now: dt.datetime, *, once: bool) -> bool:
+        """Apply the same due/window/idempotence rules to daemon and --once runs."""
+        if job.is_running():
+            return False
+        if job.run_once_per_day:
+            if not self._job_in_window(job, now):
+                return False
+            run_key = self._daily_run_key(job, now)
+            if job.last_run_key == run_key:
+                return False
+            if (
+                job.last_run_epoch > 0
+                and time.time() - job.last_run_epoch < _DAILY_FAILURE_RETRY_SECONDS
+            ):
+                return False
+            if self._report_exists_for_job(job, now):
+                self.logger.info("skip %s; report already exists for %s", job.name, run_key)
+                job.last_run_key = run_key
+                job.last_run_epoch = time.time()
+                return False
+        else:
+            if not once and (time.time() - job.last_run_epoch) < job.interval_min * 60:
+                return False
+            if job.window_start is not None and not self._job_in_window(job, now):
+                return False
+        if job.market_hours_only and not _is_data_window(now):
+            return False
+        return True
+
     def _report_exists_for_job(self, job: Job, now: dt.datetime) -> bool:
         try:
             if job.report_kind == "intraday":
@@ -277,8 +428,9 @@ class Scheduler:
             self.logger.debug("daily report existence check failed: %s", job.name, exc_info=True)
         return False
 
-    def _run_job(self, job: Job, now: Optional[dt.datetime] = None) -> None:
+    def _run_job(self, job: Job, now: Optional[dt.datetime] = None) -> int:
         scheduled_at = now or now_tw()
+        self._write_status("running", last_job=job.name)
         cmd = _resolve_cmd(job.console_script, job.module, self._job_extra_args(job, scheduled_at))
         ts = time.strftime("%Y%m%d_%H%M%S")
         log_path = self.log_dir / f"scheduler_{job.name}_{ts}.log"
@@ -299,7 +451,8 @@ class Scheduler:
                     log_path=str(log_path),
                 ),
             )
-            return
+            self._write_status("running", last_job=job.name, last_success=True, last_error="")
+            return 0
 
         env = _child_env(self.project_root)
         try:
@@ -318,7 +471,7 @@ class Scheduler:
             rc = -1
         finally:
             job.last_run_epoch = time.time()
-            if job.run_once_per_day:
+            if job.run_once_per_day and rc == 0:
                 job.last_run_key = self._daily_run_key(job, scheduled_at)
             publish_if_bus(
                 self._publisher,
@@ -330,35 +483,33 @@ class Scheduler:
                     log_path=str(log_path),
                 ),
             )
+            self._write_status(
+                "running",
+                last_job=job.name,
+                last_success=rc == 0,
+                last_error="" if rc == 0 else f"exit_code={rc}",
+            )
+        return rc
 
     def _dispatch(self, job: Job, now: dt.datetime) -> None:
-        if job.is_running():
-            return
-        if job.run_once_per_day:
-            if not self._job_in_window(job, now):
-                return
-            run_key = self._daily_run_key(job, now)
-            if job.last_run_key == run_key:
-                return
-            if self._report_exists_for_job(job, now):
-                self.logger.info("skip %s; report already exists for %s", job.name, run_key)
-                job.last_run_key = run_key
-                job.last_run_epoch = time.time()
-                return
-        else:
-            due = (time.time() - job.last_run_epoch) >= job.interval_min * 60
-            if not due:
-                return
-            if job.window_start is not None and not self._job_in_window(job, now):
-                return
-        if job.market_hours_only and not _is_data_window(now):
+        if not self._job_eligible(job, now, once=False):
             return
 
-        def _worker() -> None:
-            with job._lock:
-                self._run_job(job, now)
+        threading.Thread(
+            target=self._run_job_with_lock,
+            args=(job, now),
+            name=f"job-{job.name}",
+            daemon=True,
+        ).start()
 
-        threading.Thread(target=_worker, name=f"job-{job.name}", daemon=True).start()
+    def _run_job_with_lock(self, job: Job, now: dt.datetime) -> None:
+        if not job._lock.acquire(blocking=False):
+            self.logger.debug("略過重複派送中的任務 %s", job.name)
+            return
+        try:
+            self._run_job(job, now)
+        finally:
+            job._lock.release()
 
     # ------------------------------------------------------------------
     # 盤中監測子行程托管
@@ -408,6 +559,7 @@ class Scheduler:
 
     def run(self, *, once: bool = False) -> int:
         self.logger.info("=== Scheduler 啟動 (once=%s, dry_run=%s) ===", once, self.dry_run)
+        self._write_status("starting", run_once=once)
         publish_if_bus(
             self._publisher,
             SchedulerStarted(
@@ -425,18 +577,23 @@ class Scheduler:
         )
         if not self.jobs and not self.settings.scheduler_supervise_monitor:
             self.logger.warning("沒有啟用任何任務 (檢查 SCHEDULER_* 設定)")
+            self._write_status("stopped", run_once=once)
             return 0
 
         if once:
             now = now_tw()
+            exit_code = 0
             for job in self.jobs:
-                if job.market_hours_only and not _is_data_window(now):
-                    self.logger.info("略過 %s (非交易時段)", job.name)
+                if not self._job_eligible(job, now, once=True):
+                    self.logger.info("略過 %s (尚未到窗口、非交易日、未到期或已有報告)", job.name)
                     continue
-                self._run_job(job, now)
+                rc = self._run_job(job, now)
+                if rc != 0 and exit_code == 0:
+                    exit_code = rc
             self._supervise_monitor(now)
+            self._write_status("stopped", run_once=True)
             self.logger.info("=== Scheduler --once 完成 ===")
-            return 0
+            return exit_code
 
         # 啟動即跑一輪 (不受 market_hours_only 限制，方便即時看到資料)
         if self.settings.scheduler_run_on_start and not self.dry_run:
@@ -447,12 +604,13 @@ class Scheduler:
                 if job.window_start is not None and not self._job_in_window(job, now):
                     continue
                 threading.Thread(
-                    target=lambda j=job: (j._lock.acquire(),
-                                          self._run_job(j), j._lock.release()),
+                    target=self._run_job_with_lock,
+                    args=(job, now),
                     name=f"startup-{job.name}", daemon=True,
                 ).start()
 
         tick = max(5, self.settings.scheduler_tick_seconds)
+        last_status_at = 0.0
         while not self._stop.is_set():
             now = now_tw()
             try:
@@ -461,8 +619,13 @@ class Scheduler:
                 self._supervise_monitor(now)
             except Exception:
                 self.logger.exception("排程主迴圈發生例外，繼續執行")
+                self._write_status("degraded", last_error="scheduler tick 失敗")
+            if time.time() - last_status_at >= 15:
+                self._write_status("running")
+                last_status_at = time.time()
             self._stop.wait(tick)
 
+        self._write_status("stopped")
         self.logger.info("=== Scheduler 結束 ===")
         return 0
 
@@ -499,36 +662,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="stock-scheduler", description="常駐背景排程器")
     parser.add_argument("--once", action="store_true", help="到期任務各跑一次即結束")
     parser.add_argument("--dry-run", action="store_true", help="只印排程計畫，不實際執行")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
     from bot.app_bootstrap import get_or_create_bus
 
-    settings = Settings()
+    project_root = args.root.resolve() if args.root else Path.cwd()
+    settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
     if not settings.scheduler_enabled and not args.once and not args.dry_run:
-        get_logger("scheduler").warning(
+        get_logger("scheduler", log_dir=project_root / "log").warning(
             "SCHEDULER_ENABLED=false；如需常駐請設為 true，或用 --once / --dry-run。"
         )
         return 0
 
-    publisher = get_or_create_bus()
-    scheduler = Scheduler(
-        settings,
-        project_root=Path.cwd(),
-        dry_run=args.dry_run,
-        publisher=publisher,
-    )
-
-    def _shutdown(signum: int, frame: object) -> None:
-        scheduler.logger.info("收到信號 %d，準備關閉 ...", signum)
-        scheduler.stop()
+    process_lock = _ProcessLock(project_root)
+    if not args.dry_run and not process_lock.acquire():
+        get_logger("scheduler", log_dir=project_root / "log").info(
+            "已有另一個 scheduler 程序持有單例鎖，略過重複啟動。"
+        )
+        return 75
 
     try:
-        signal.signal(signal.SIGINT, _shutdown)
-        signal.signal(signal.SIGTERM, _shutdown)
-    except Exception:
-        pass
+        publisher = get_or_create_bus(project_root=project_root)
+        scheduler = Scheduler(
+            settings,
+            project_root=project_root,
+            dry_run=args.dry_run,
+            publisher=publisher,
+        )
 
-    return scheduler.run(once=args.once)
+        def _shutdown(signum: int, frame: object) -> None:
+            scheduler.logger.info("收到信號 %d，準備關閉 ...", signum)
+            scheduler.stop()
+
+        try:
+            signal.signal(signal.SIGINT, _shutdown)
+            signal.signal(signal.SIGTERM, _shutdown)
+        except Exception:
+            pass
+
+        return scheduler.run(once=args.once)
+    finally:
+        process_lock.release()
 
 
 if __name__ == "__main__":
