@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import time
 from dataclasses import asdict, dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +27,7 @@ from bot.technicals import (
     _resolve_market,
     _save_df_to_db,
     _session,
+    capture_normalized_kline_rows,
     fetch_monthly_kline_with_meta,
     fetch_monthly_kline_yfinance,
 )
@@ -264,6 +266,7 @@ def _save_daily_rows(
     root: Path,
     db: StockDB,
     logger,
+    provenance_by_date: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> int:
     if not rows:
         return 0
@@ -284,7 +287,10 @@ def _save_daily_rows(
     merged = merged.sort_values("date").reset_index(drop=True)
     merged.to_csv(cache_path, index=False, encoding="utf-8")
     mirror_file_to_cloud(cache_path, root=root)
-    _save_df_to_db(symbol, df, root=root, logger=logger)
+    _save_df_to_db(
+        symbol, df, root=root, logger=logger,
+        provenance_by_date=provenance_by_date,
+    )
     return len(rows)
 
 
@@ -306,7 +312,7 @@ def run_one_daily(
     else:
         meta = fetch_monthly_kline_with_meta(
             item.symbol, item.year, item.month,
-            market=market, session=session, logger=logger,
+            market=market, session=session, logger=logger, root=root,
         )
         rows = meta.rows
         if meta.http_status in (403, 429):
@@ -332,7 +338,50 @@ def run_one_daily(
             rate_limited=True,
         )
     if rows:
-        n = _save_daily_rows(item.symbol, rows, root=root, db=db, logger=logger)
+        fallback_source_document_id = ""
+        fallback_source_url = ""
+        if source == "yfinance":
+            fallback_source_document_id, fallback_source_url, fallback_retrieved_at = capture_normalized_kline_rows(
+                root=root,
+                ticker=item.symbol,
+                rows=rows,
+                market=market,
+                start_date=f"{item.year:04d}-{item.month:02d}-01",
+                end_date=f"{item.year:04d}-{item.month:02d}",
+                db=db,
+                logger=logger,
+            )
+            # yfinance 的 DataFrame 不是本專案可取得的 raw HTTP response；
+            # 明確標成 partial/cache-only，不能冒充 TWSE/TPEx exact provenance。
+            provenance_by_date = {
+                str(row.get("date") or ""): {
+                    "source": "yfinance",
+                    "source_document_id": fallback_source_document_id,
+                    "source_url": fallback_source_url,
+                    "source_date": f"{item.year:04d}-{item.month:02d}",
+                    "retrieved_at": fallback_retrieved_at,
+                    "quality_status": "partial",
+                }
+                for row in rows
+                if row.get("date")
+            }
+        else:
+            provenance_by_date = {
+                str(row.get("date") or ""): {
+                    "source": meta.source or market,
+                    "source_document_id": meta.source_document_id,
+                    "source_url": meta.source_url,
+                    "source_date": meta.source_date,
+                    "retrieved_at": meta.retrieved_at,
+                    "quality_status": meta.quality_status,
+                }
+                for row in rows
+                if row.get("date")
+            }
+        n = _save_daily_rows(
+            item.symbol, rows, root=root, db=db, logger=logger,
+            provenance_by_date=provenance_by_date,
+        )
         return FetchRunResult(
             item=item, ok=True, rows=n, http_status=meta.http_status,
             message=f"寫入 {n} 根日K ({source})",
@@ -343,7 +392,7 @@ def run_one_daily(
     )
 
 
-def process_batch(
+def _process_batch_open_db(
     *,
     root: Optional[Path] = None,
     batch_size: int = 1,
@@ -353,11 +402,12 @@ def process_batch(
     lookback_days: int = 5,
     use_yfinance_fallback: bool = True,
     logger=None,
+    db: Optional[StockDB] = None,
 ) -> List[FetchRunResult]:
     """處理最多 batch_size 個工作項目；回傳每筆結果。"""
     log = logger or get_logger("history-fetch")
     root = root or Path.cwd()
-    db = StockDB.open(path=default_db_path(root))
+    db = db or StockDB.open(path=default_db_path(root))
     state = load_state(root)
     if not state.symbols:
         state = init_state(root=root, lookback_days=lookback_days)
@@ -417,16 +467,38 @@ def process_batch(
     return results
 
 
-def status_summary(root: Optional[Path] = None) -> Dict[str, Any]:
+@wraps(_process_batch_open_db)
+def process_batch(*args: Any, **kwargs: Any) -> List[FetchRunResult]:
+    """處理一批歷史資料並關閉函式自有的 SQLite 連線。
+
+    內部／測試若傳入 ``db``，ownership 仍由呼叫端負責；一般 CLI／排程
+    未傳入時，這個 wrapper 會在所有結果或例外後釋放 DB handle。
+    """
+    if kwargs.get("db") is not None:
+        return _process_batch_open_db(*args, **kwargs)
+    root = kwargs.get("root")
+    db = StockDB.open(path=default_db_path(root))
+    kwargs["db"] = db
+    try:
+        return _process_batch_open_db(*args, **kwargs)
+    finally:
+        db.close()
+
+
+def _status_summary_open_db(
+    root: Optional[Path] = None,
+    *,
+    db: Optional[StockDB] = None,
+) -> Dict[str, Any]:
     root = root or Path.cwd()
     state = load_state(root)
-    db = StockDB.open(path=default_db_path(root))
+    database = db or StockDB.open(path=default_db_path(root))
     pending = 0
     for sym in state.symbols:
         for y, m in state.months:
-            if not _month_covered(db, sym, y, m, kind=state.kind):
+            if not _month_covered(database, sym, y, m, kind=state.kind):
                 pending += 1
-    return {
+    result = {
         "symbols": len(state.symbols),
         "months_per_symbol": len(state.months),
         "pending_months_est": pending,
@@ -448,3 +520,15 @@ def status_summary(root: Optional[Path] = None) -> Dict[str, Any]:
         "updated_at": state.updated_at,
         "range": f"{state.start_date} ~ {state.end_date or now_tw().date().isoformat()}",
     }
+    return result
+
+
+@wraps(_status_summary_open_db)
+def status_summary(root: Optional[Path] = None) -> Dict[str, Any]:
+    """讀取佇列狀態並關閉本函式自有的 SQLite 連線。"""
+    project_root = root or Path.cwd()
+    db = StockDB.open(path=default_db_path(project_root))
+    try:
+        return _status_summary_open_db(project_root, db=db)
+    finally:
+        db.close()

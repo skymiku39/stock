@@ -36,9 +36,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.config import Settings
 from bot.pipeline_shared import (
+    build_report_evidence,
     consensus_tickers_today as _consensus_tickers_today,
     macro_summary_text as _macro_summary_text,
     parse_json_blob as _parse_json,
+    prepare_report_payload_for_storage,
+    persist_report_evidence,
 )
 from bot.llm_analyzer import GeminiClient, gemini_call
 from bot.market_macro import fetch_macro_snapshot, load_supply_chain, macro_to_dict
@@ -70,9 +73,12 @@ class NextDayCandidate:
 
     # 今日盤後數據
     today_close: Optional[float] = None
-    today_pct_change: float = 0.0
-    volume_ratio: float = 0.0       # 今日量 / 20日均量
-    strength_score: float = 0.0     # 0-100，由 pct/量比/法人共同計算
+    today_pct_change: Optional[float] = None
+    volume_ratio: Optional[float] = None  # 今日量 / 20日均量
+    strength_score: Optional[float] = None  # 0-100；缺資料時為 None
+    data_asof: str = ""
+    data_quality: str = "unavailable"
+    data_quality_note: str = ""
 
     # 籌碼
     foreign_net: float = 0.0
@@ -105,6 +111,7 @@ class NextDayReport:
     strong_carry_llm: List[Dict[str, Any]] = field(default_factory=list)
     rankings: List[NextDayCandidate] = field(default_factory=list)
     macro_summary: Dict[str, Any] = field(default_factory=dict)
+    evidence: List[Dict[str, Any]] = field(default_factory=list)
     catalyst_count: int = 0
     brief_md: str = ""
     brief_prompt_id: str = ""
@@ -249,6 +256,43 @@ def _catalyst_events(
     return out
 
 
+def _events_to_event_focus(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把規則層催化事件轉成 ``event_focus`` 的共用資料契約。
+
+    ``event_focus`` 原本主要由 LLM radar 產生；但沒有 LLM 時，規則層已經
+    取得的事件仍應出現在報告與 Dashboard，不能只留下 catalyst_count。
+    同一事件標題／時間下的多個代號合併成一個 focus，並保留原始事件欄位。
+    """
+    grouped: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        ticker = str(raw.get("ticker") or "").strip()
+        if not ticker or not ticker.isdigit():
+            continue
+        event = str(raw.get("event") or "").strip()
+        event_time = str(raw.get("event_time") or "").strip()
+        title = str(raw.get("title") or "").strip()
+        key = (event, event_time, title)
+        item = grouped.setdefault(
+            key,
+            {
+                "event": event,
+                "event_time": event_time,
+                "title": title,
+                "tickers": [],
+            },
+        )
+        ticker_rows = item["tickers"]
+        if not any(str(row.get("ticker") or "") == ticker for row in ticker_rows):
+            ticker_rows.append({
+                "ticker": ticker,
+                "name": str(raw.get("name") or ""),
+                "side": "",
+            })
+    return list(grouped.values())
+
+
 # ----------------------------------------------------------------------
 # 2) 今日強勢承接掃描
 # ----------------------------------------------------------------------
@@ -288,7 +332,7 @@ def _today_strength_for_ticker(
     if (today - last_d).days > 4:
         return None
 
-    vol_ratio = 0.0
+    vol_ratio: Optional[float] = None
     if snap.vol_ma20 and snap.vol_ma20 > 0:
         vol_ratio = round((snap.volume_last or 0) / snap.vol_ma20, 2)
 
@@ -298,7 +342,7 @@ def _today_strength_for_ticker(
         "close": snap.last_close,
         "pct_1d": snap.pct_change_1d,
         "vol_ratio": vol_ratio,
-        "rsi14": snap.rsi14 or 0.0,
+        "rsi14": snap.rsi14,
         "ma20": snap.ma20,
     }
 
@@ -391,7 +435,7 @@ def _scan_today_strength(
         trust = chip.get("investment_trust_net", 0.0) if chip else 0.0
         strength = _compute_strength_score(
             pct_1d=tech["pct_1d"],
-            vol_ratio=tech["vol_ratio"],
+            vol_ratio=tech["vol_ratio"] or 0.0,
             foreign_net=foreign,
             trust_net=trust,
         )
@@ -400,6 +444,10 @@ def _scan_today_strength(
             "foreign_net": foreign,
             "investment_trust_net": trust,
             "strength_score": strength,
+            "data_quality": "partial" if tech.get("vol_ratio") is None else "ok",
+            "data_quality_note": (
+                "缺少20日均量，量比不可用" if tech.get("vol_ratio") is None else ""
+            ),
         }
     log.info("成功掃描 %d 檔", len(out))
     return out
@@ -412,17 +460,25 @@ def _strong_carry_text(
 ) -> str:
     """挑強勢度前 N 名，輸出為 LLM 可讀文字。"""
     rows = sorted(
-        [(t, d) for t, d in strength_map.items() if d.get("pct_1d", 0) > 0],
-        key=lambda x: -x[1].get("strength_score", 0),
+        [(t, d) for t, d in strength_map.items() if (d.get("pct_1d") or 0) > 0],
+        key=lambda x: -(x[1].get("strength_score") or 0),
     )[:top_n]
     if not rows:
         return "(今日無顯著強勢承接候選)"
     lines: List[str] = []
     for i, (t, d) in enumerate(rows, 1):
         nm = name_map.get(t, "")
+        pct_change = float(d.get("pct_1d") or 0.0)
+        foreign_net = float(d.get("foreign_net") or 0.0)
+        investment_trust_net = float(d.get("investment_trust_net") or 0.0)
+        strength_score = float(d.get("strength_score") or 0.0)
+        volume_text = (
+            f"{float(d['vol_ratio']):.2f}" if d.get("vol_ratio") is not None else "unavailable"
+        )
         lines.append(
-            f"{i:02d}. {t} {nm} ｜ 漲{d['pct_1d']:+.2f}% ｜ 量比 {d['vol_ratio']:.2f} ｜ "
-            f"外資{d['foreign_net']:+.0f}/投信{d['investment_trust_net']:+.0f} ｜ 強勢分 {d['strength_score']:.0f}"
+            f"{i:02d}. {t} {nm} ｜ 漲{pct_change:+.2f}% ｜ "
+            f"量比 {volume_text} ｜ 外資{foreign_net:+.0f}/投信{investment_trust_net:+.0f} ｜ "
+            f"強勢分 {strength_score:.0f}"
         )
     return "\n".join(lines)
 
@@ -556,6 +612,11 @@ def run_next_day_watch(
         macro = {}
     macro_text = _macro_summary_text(macro)
     log.info("macro: %s", macro_text)
+    report.evidence = persist_report_evidence(
+        root,
+        build_report_evidence(news_items=news_items, macro=macro),
+        logger=log,
+    )
     progress.complete(
         "macro",
         success=not any(e.startswith("macro:") for e in report.errors),
@@ -572,6 +633,9 @@ def run_next_day_watch(
         log.debug("ensure calendar/global events 失敗", exc_info=True)
     events = _catalyst_events(target, root, log)
     report.catalyst_count = len(events)
+    # 先以規則層結果建立可用 fallback；若 LLM 成功產出更高階的 focus，
+    # 後續才以 LLM 結果取代。這樣停用／逾時／失敗時不會遺失已驗證事件。
+    report.event_focus = _events_to_event_focus(events)
     catalyst_text = _catalyst_text(events)
     progress.complete("catalysts", success=True, message=f"{len(events)} events")
 
@@ -610,6 +674,8 @@ def run_next_day_watch(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
         logger=log,
+        settings=settings,
+        root=root,
     )
     radar_obj: Dict[str, Any] = {}
     if client.enabled:
@@ -633,7 +699,9 @@ def run_next_day_watch(
                     report.market_tone = str(obj.get("market_tone") or "neutral")
                     report.overall_brief = str(obj.get("overall_brief") or "")
                     report.carry_themes = obj.get("carry_themes") or []
-                    report.event_focus = obj.get("event_focus") or []
+                    llm_event_focus = obj.get("event_focus")
+                    if isinstance(llm_event_focus, list) and llm_event_focus:
+                        report.event_focus = llm_event_focus
                     report.strong_carry_llm = obj.get("strong_carry") or []
                     log.info(
                         "next_day_radar: %d 題材 / %d 事件 / %d 強勢承接 (tone=%s)",
@@ -731,10 +799,12 @@ def run_next_day_watch(
 
     # (d) 規則層補：今日強勢且漲超過 +3% / 量比 > 1.5 也納入排序候選
     for t, d in strength_map.items():
-        if d.get("pct_1d", 0) < 1.0 and d.get("strength_score", 0) < 35:
+        pct_1d = float(d.get("pct_1d") or 0.0)
+        strength_score = float(d.get("strength_score") or 0.0)
+        if pct_1d < 1.0 and strength_score < 35:
             continue
         row = _ensure(t, name_map.get(t, ""))
-        if "strong_carry" not in row.sources and d.get("strength_score", 0) >= 50:
+        if "strong_carry" not in row.sources and strength_score >= 50:
             row.sources.append("strong_carry")
             row.entry_logic = row.entry_logic or "強勢承接"
 
@@ -762,9 +832,12 @@ def run_next_day_watch(
         s = strength_map.get(t)
         if s:
             row.today_close = s.get("close")
-            row.today_pct_change = s.get("pct_1d", 0.0)
-            row.volume_ratio = s.get("vol_ratio", 0.0)
-            row.strength_score = s.get("strength_score", 0.0)
+            row.today_pct_change = s.get("pct_1d")
+            row.volume_ratio = s.get("vol_ratio")
+            row.strength_score = s.get("strength_score")
+            row.data_asof = str(s.get("last_date") or "")
+            row.data_quality = str(s.get("data_quality") or "ok")
+            row.data_quality_note = str(s.get("data_quality_note") or "")
             row.foreign_net = s.get("foreign_net", 0.0)
             row.investment_trust_net = s.get("investment_trust_net", 0.0)
             row.chip_summary_text = (
@@ -783,7 +856,11 @@ def run_next_day_watch(
 
     rankings = sorted(
         pool.values(),
-        key=lambda r: (-r.next_day_score, -r.strength_score, -r.theme_heat),
+        key=lambda r: (
+            -r.next_day_score,
+            -(r.strength_score or 0.0),
+            -r.theme_heat,
+        ),
     )[:candidate_limit]
     report.rankings = rankings
     progress.complete("scoring", success=True, message=f"{len(rankings)} ranked")
@@ -882,7 +959,7 @@ def _next_day_composite(row: NextDayCandidate) -> float:
 
     再依 source 多樣性 (多個來源同時命中) 加 5-10 分。
     """
-    s = row.strength_score * 0.5
+    s = (row.strength_score or 0.0) * 0.5
     s += row.theme_heat * 6  # heat 1~5 → 6~30
     if row.event:
         bonus = 14
@@ -900,8 +977,8 @@ def _next_day_composite(row: NextDayCandidate) -> float:
     s += bonus_src
 
     # 過熱衰減：今日漲幅 > 7% → 抑制 (避開追高)
-    if row.today_pct_change > 7:
-        s -= (row.today_pct_change - 7) * 3
+    if (row.today_pct_change or 0.0) > 7:
+        s -= ((row.today_pct_change or 0.0) - 7) * 3
     return max(0.0, min(100.0, s))
 
 
@@ -922,6 +999,7 @@ def _report_to_json(r: NextDayReport) -> Dict[str, Any]:
         "strong_carry_llm": r.strong_carry_llm,
         "rankings": [asdict(c) for c in r.rankings],
         "macro_summary": r.macro_summary,
+        "evidence": list(r.evidence),
         "catalyst_count": r.catalyst_count,
         "brief_md": r.brief_md,
         "brief_prompt_id": r.brief_prompt_id,
@@ -942,6 +1020,7 @@ def load_latest_next_day(
     優先讀 ``report_update.json`` (凌晨更新版)，沒有再退 ``report.json``。
     """
     root_path = root or Path.cwd()
+    db = None
     try:
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
@@ -960,6 +1039,9 @@ def load_latest_next_day(
                 return data
     except Exception:
         get_logger("next-day").debug("load latest next-day from DB failed", exc_info=True)
+    finally:
+        if db is not None:
+            db.close()
 
     base = root_path / "data" / "next_day_watch"
     if not base.exists():
@@ -973,8 +1055,9 @@ def load_latest_next_day(
             if p.exists():
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
-                    _persist_report_json_to_db(data, root=root_path, log=get_logger("next-day"))
-                    return data
+                    return _persist_report_json_to_db(
+                        data, root=root_path, log=get_logger("next-day"),
+                    )
                 except Exception:
                     continue
     return None
@@ -1000,6 +1083,7 @@ def load_next_day_by_date(
         ["update", "draft"] if prefer_update else ["draft", "update"]
     )
 
+    db = None
     try:
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
@@ -1011,6 +1095,9 @@ def load_next_day_by_date(
                 return data
     except Exception:
         get_logger("next-day").debug("load next-day from DB failed", exc_info=True)
+    finally:
+        if db is not None:
+            db.close()
 
     file_names = {
         "draft": "report.json",
@@ -1026,8 +1113,9 @@ def load_next_day_by_date(
             continue
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            _persist_report_json_to_db(data, root=root_path, log=get_logger("next-day"))
-            return data
+            return _persist_report_json_to_db(
+                data, root=root_path, log=get_logger("next-day"),
+            )
         except Exception:
             get_logger("next-day").debug("load next-day file failed: %s", p, exc_info=True)
     return None
@@ -1049,6 +1137,7 @@ def load_next_day_by_asof(
     else:
         date_iso = str(asof_date)
 
+    db = None
     try:
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
@@ -1072,6 +1161,9 @@ def load_next_day_by_asof(
                 return data
     except Exception:
         get_logger("next-day").debug("load next-day by asof from DB failed", exc_info=True)
+    finally:
+        if db is not None:
+            db.close()
 
     base = root_path / "data" / "next_day_watch"
     if not base.exists():
@@ -1110,11 +1202,15 @@ def _persist_report_json_to_db(
     *,
     root: Path,
     log: logging.Logger,
-) -> None:
+) -> Dict[str, Any]:
     report_date = str(data.get("target_date") or "").strip()
     if not report_date:
-        return
+        return dict(data)
     mode = str(data.get("mode") or "draft")
+    db = None
+    payload, normalized_evidence, quality_status = prepare_report_payload_for_storage(
+        root, data, logger=log,
+    )
     try:
         from bot.stock_db import LlmDailyReportRow, StockDB
         db = StockDB.open(root=root)
@@ -1129,11 +1225,17 @@ def _persist_report_json_to_db(
                 prompt_id=str(data.get("brief_prompt_id") or ""),
                 prompt_version=str(data.get("brief_prompt_version") or ""),
                 brief_md=str(data.get("brief_md") or ""),
-                payload_json=json.dumps(data, ensure_ascii=False),
+                payload_json=json.dumps(payload, ensure_ascii=False),
+                evidence_json=json.dumps(normalized_evidence, ensure_ascii=False),
+                quality_status=quality_status,
             )
         )
     except Exception:
         log.exception("next-day DB 持久化失敗")
+    finally:
+        if db is not None:
+            db.close()
+    return payload
 
 
 __all__ = [

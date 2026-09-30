@@ -17,13 +17,16 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
 from bot.next_day_watch_pipeline import run_next_day_watch
+from bot.utils import log_root
 from bot.utils import get_logger
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-nextday",
         description="明日當沖預備清單 (題材延續 + 強勢承接 + 明日事件)",
@@ -38,27 +41,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--limit", type=int, default=25, help="候選股排序輸出數量")
     parser.add_argument("--scan-limit", type=int, default=60, help="強勢承接掃描範圍上限")
     parser.add_argument("--target-date", default="", help="Target trading date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("stock-nextday")
-    settings = Settings()
+    project_root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("stock-nextday", log_dir=project_root / "log")
+    settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
 
     refresh_macro = args.refresh_macro or args.mode == "update"
     target_date = dt.date.fromisoformat(args.target_date) if args.target_date else None
 
-    report = run_next_day_watch(
-        mode=args.mode,
-        project_root=Path.cwd(),
-        settings=settings,
-        news_limit=args.news_limit,
-        candidate_limit=args.limit,
-        scan_limit=args.scan_limit,
-        force_refresh_news=args.refresh_news,
-        force_refresh_macro=refresh_macro,
-        target_date=target_date,
-        logger=logger,
-        publisher=get_or_create_bus(),
-    )
+    with log_root(project_root):
+        report = run_next_day_watch(
+            mode=args.mode,
+            project_root=project_root,
+            settings=settings,
+            news_limit=args.news_limit,
+            candidate_limit=args.limit,
+            scan_limit=args.scan_limit,
+            force_refresh_news=args.refresh_news,
+            force_refresh_macro=refresh_macro,
+            target_date=target_date,
+            logger=logger,
+            publisher=get_or_create_bus(project_root=project_root),
+        )
 
     logger.info(
         "=== 完成 (%s): 題材 %d / 事件 %d / 候選 %d / 錯誤 %d / 簡報 %d bytes / %.1fs ===",

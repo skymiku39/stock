@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.intraday_history import (
     IntervalKind,
@@ -61,6 +62,7 @@ def _resolve_range(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         description="從 Shioaji 補齊分 K / Tick 歷史至 SQLite",
     )
@@ -102,9 +104,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--simulation", choices=("true", "false"), default=None,
         help="覆寫 SIMULATION (預設讀 .env)",
     )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("intraday-fetch")
+    root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("intraday-fetch", log_dir=root / "log")
     try:
         start_d, end_d = _resolve_range(
             start=args.start,
@@ -120,9 +127,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("symbol 不可為空")
         return 2
 
-    settings = Settings()
+    settings = Settings(_env_file=str(root / ".env"))  # type: ignore[call-arg]
     if args.simulation is not None:
-        settings = Settings(simulation=(args.simulation == "true"))
+        settings = Settings(
+            _env_file=str(root / ".env"),
+            simulation=(args.simulation == "true"),
+        )  # type: ignore[call-arg]
 
     if not settings.api_key or not settings.secret_key:
         logger.error("缺少 API_KEY / SECRET_KEY，無法登入 Shioaji 抓歷史資料")
@@ -135,7 +145,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("Shioaji 登入失敗")
         return 1
 
-    root = Path.cwd()
     db = StockDB.open(path=default_db_path(root))
     interval: IntervalKind = args.type
 
@@ -174,7 +183,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             if written == 0 and skipped == 0:
                 exit_code = max(exit_code, 1)
     finally:
-        broker.logout()
+        try:
+            broker.logout()
+        finally:
+            db.close()
 
     return exit_code
 

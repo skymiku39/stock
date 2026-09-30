@@ -47,6 +47,19 @@ def test_catalyst_events_includes_recent_wwdc_supply_chain(tmp_path: Path, monke
     assert any(e.get("event") == "全球科技" for e in events)
 
 
+def test_events_to_event_focus_preserves_rule_events_without_llm() -> None:
+    focus = pipeline._events_to_event_focus([
+        {"ticker": "2330", "name": "台積電", "event": "法說會", "event_time": "上午"},
+        {"ticker": "2317", "name": "鴻海", "event": "法說會", "event_time": "上午"},
+        {"ticker": "2330", "name": "台積電", "event": "全球科技", "event_time": "明日", "title": "GTC"},
+    ])
+
+    assert len(focus) == 2
+    assert focus[0]["event"] == "法說會"
+    assert {row["ticker"] for row in focus[0]["tickers"]} == {"2330", "2317"}
+    assert focus[1]["title"] == "GTC"
+
+
 def test_run_next_day_watch_scans_llm_discovered_candidates(
     tmp_path: Path,
     monkeypatch,
@@ -135,6 +148,74 @@ def test_run_next_day_watch_scans_llm_discovered_candidates(
     assert report.rankings[0].ticker == "2301"
     assert report.rankings[0].strength_score == 82.0
     assert report.rankings[0].today_pct_change == 4.2
+
+
+def test_run_next_day_watch_keeps_rule_event_focus_when_llm_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline,
+        "now_tw",
+        lambda: dt.datetime(2026, 6, 2, 18, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+    )
+    monkeypatch.setattr(pipeline, "fetch_today_news", lambda **_kwargs: [])
+    monkeypatch.setattr(pipeline, "news_to_compact_text", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(pipeline, "fetch_macro_snapshot", lambda **_kwargs: object())
+    monkeypatch.setattr(pipeline, "macro_to_dict", lambda _snap: {"adr_premiums": []})
+    monkeypatch.setattr(pipeline, "_macro_summary_text", lambda _macro: "macro")
+    monkeypatch.setattr(
+        pipeline,
+        "_catalyst_events",
+        lambda *_args, **_kwargs: [{
+            "ticker": "2330",
+            "name": "台積電",
+            "event": "法說會",
+            "event_time": "上午",
+            "title": "",
+        }],
+    )
+    monkeypatch.setattr(pipeline, "_watchlist_tickers", lambda _root: [])
+    monkeypatch.setattr(pipeline, "_consensus_tickers_today", lambda _root: [])
+    monkeypatch.setattr(
+        pipeline,
+        "_scan_today_strength",
+        lambda *_args, **_kwargs: {
+            "2330": {
+                "close": 100.0,
+                "pct_1d": 1.0,
+                "vol_ratio": 1.2,
+                "strength_score": 60.0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "bot.conference_calendar.ensure_calendar_fresh",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "bot.global_event_calendar.ensure_global_events_fresh",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeGeminiClient:
+        enabled = False
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "GeminiClient", FakeGeminiClient)
+
+    report = pipeline.run_next_day_watch(
+        project_root=tmp_path,
+        settings=SimpleNamespace(gemini_api_key="", gemini_model="model"),
+        force_refresh_technicals=False,
+    )
+
+    assert report.catalyst_count == 1
+    assert report.event_focus[0]["tickers"][0]["ticker"] == "2330"
+    payload = json.loads((Path(report.output_dir) / "report.json").read_text(encoding="utf-8"))
+    assert payload["event_focus"][0]["event"] == "法說會"
 
 
 def test_run_next_day_watch_mirrors_report_files(

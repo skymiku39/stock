@@ -13,10 +13,12 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import requests
 
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, now_tw
 
 TAIFEX_MIS_API_URL = "https://mis.taifex.com.tw/futures/api/getQuoteList"
@@ -165,6 +167,7 @@ def fetch_hot_stock_futures(
     direction: SortDirection = "volume",
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> HotStockFuturesResult:
     """抓取 TAIFEX 熱門個股期貨行情。"""
     log = logger or get_logger("hot-stock-futures")
@@ -181,6 +184,28 @@ def fetch_hot_stock_futures(
             json=dict(HOT_STOCK_FUTURES_PAGE_ATTR),
             timeout=25,
         )
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                SourceRegistry(Path(root)).capture_document(
+                    "taifex_hot_stock_futures",
+                    resp.content,
+                    source_url=TAIFEX_MIS_API_URL,
+                    source_ref=f"hot:{now_tw().isoformat(timespec='seconds')}",
+                    title="TAIFEX 熱門個股期貨行情",
+                    kind="http_response",
+                    suffix="json",
+                    mime_type=str(
+                        getattr(resp, "headers", {}).get("Content-Type", "")
+                        or "application/json"
+                    ),
+                    quality_status=(
+                        "ok" if 200 <= int(getattr(resp, "status_code", 200)) < 300
+                        else "invalid"
+                    ),
+                    metadata={"request": HOT_STOCK_FUTURES_PAGE_ATTR},
+                )
+            except Exception:
+                log.debug("TAIFEX 熱門期貨 raw 保存失敗", exc_info=True)
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:  # noqa: BLE001

@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.history_fetch_queue import (
     init_state,
     process_batch,
@@ -31,6 +32,7 @@ from bot.utils import get_logger, now_tw
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(description="慢速補齊歷史日 K")
     parser.add_argument("--init", action="store_true", help="重建待補佇列")
     parser.add_argument("--status", action="store_true", help="顯示進度")
@@ -49,10 +51,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--no-yfinance-fallback", action="store_true",
         help="TWSE 403 時不改用 yfinance",
     )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("history-fetch")
-    root = Path.cwd()
+    root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("history-fetch", log_dir=root / "log")
 
     if args.status:
         summary = status_summary(root)

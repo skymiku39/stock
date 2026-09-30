@@ -14,13 +14,16 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
 from bot.intraday_pipeline import run_intraday
+from bot.utils import log_root
 from bot.utils import get_logger
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-intraday",
         description="今日當沖戰情室 (主題雷達 → 候選股 → 排序 → LLM 簡報)",
@@ -28,19 +31,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--refresh-news", action="store_true", help="強制重抓新聞")
     parser.add_argument("--news-limit", type=int, default=120, help="新聞抓取數量")
     parser.add_argument("--limit", type=int, default=25, help="候選股輸出數量")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("stock-intraday")
-    settings = Settings()
-    report = run_intraday(
-        project_root=Path.cwd(),
-        settings=settings,
-        news_limit=args.news_limit,
-        candidate_limit=args.limit,
-        force_refresh_news=args.refresh_news,
-        logger=logger,
-        publisher=get_or_create_bus(),
-    )
+    project_root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("stock-intraday", log_dir=project_root / "log")
+    settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
+    with log_root(project_root):
+        report = run_intraday(
+            project_root=project_root,
+            settings=settings,
+            news_limit=args.news_limit,
+            candidate_limit=args.limit,
+            force_refresh_news=args.refresh_news,
+            logger=logger,
+            publisher=get_or_create_bus(project_root=project_root),
+        )
 
     logger.info(
         "=== 完成: 題材 %d / 候選 %d / 錯誤 %d / 簡報 %d bytes / 用時 %.1fs ===",

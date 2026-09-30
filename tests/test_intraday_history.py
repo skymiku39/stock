@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -111,10 +112,14 @@ class TestIntradayDb:
 
 
 class TestFetchAndStore:
-    def test_fetch_and_store_with_mock_broker(self, tmp_path: Path) -> None:
+    def test_fetch_and_store_with_mock_broker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         import datetime as dt
         from shioaji.data import Kbars
 
+        cloud = tmp_path / "cloud-cache"
+        monkeypatch.setenv("GOOGLE_CACHE_DIR", str(cloud))
         broker = MagicMock()
         broker.fetch_kbars.return_value = Kbars(
             ts=[_ns_at_utc("2024-01-02 09:00:00")],
@@ -138,3 +143,12 @@ class TestFetchAndStore:
         assert db.count_intraday_bars("2330", start="2024-01-02") == 1
         csv = tmp_path / "data" / "intraday" / "2330" / "1m_2024-01-02.csv"
         assert csv.exists()
+        assert (cloud / "data" / "intraday" / "2330" / "1m_2024-01-02.csv").exists()
+        bars = db.get_intraday_bars("2330", start="2024-01-02")
+        assert bars[0].quality_status == "partial"
+        assert bars[0].source_record_id.startswith("source-doc:shioaji_1m:")
+        source = db.get_source_document(bars[0].source_record_id)
+        assert source is not None
+        assert source.quality_status == "partial"
+        assert json.loads(source.metadata_json)["provenance_status"] == "cache_only"
+        assert json.loads((tmp_path / source.content_path).read_text(encoding="utf-8"))["rows"]

@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.daily_backtest import DailyBacktester
 from bot.intraday_backtest import BacktestSummary, IntradayBacktester
@@ -209,6 +210,7 @@ def _print_summary(summary: BacktestSummary, meta: dict) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(description="LLM 清單分 K 量化回測")
     parser.add_argument("--symbols", help="覆寫股票清單 (逗號分隔)；預設取近期 LLM 報告")
     parser.add_argument(
@@ -233,11 +235,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="匯出交易明細 CSV (預設 data/reports/backtest_YYYY-MM-DD.csv)",
     )
     parser.add_argument("--json", default="", help="另存 JSON 摘要")
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("intraday-backtest")
-    root = Path.cwd()
-    settings = Settings()
+    root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("intraday-backtest", log_dir=root / "log")
+    settings = Settings(_env_file=str(root / ".env"))  # type: ignore[call-arg]
     try:
         start, end = _resolve_dates(args.days, args.start, args.end)
     except ValueError as exc:
@@ -257,57 +263,62 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("區間: %s ~ %s | 粒度: %s", start, end, granularity)
 
     db = StockDB.open(path=default_db_path(root))
-    if args.fetch:
+    try:
+        if args.fetch:
+            if granularity == "daily":
+                _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
+            else:
+                _ensure_intraday_data(
+                    symbols, start, end, settings=settings, root=root, db=db, logger=logger,
+                )
+
+        meta = llm_symbol_metadata(root, symbols)
         if granularity == "daily":
-            _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
+            engine = DailyBacktester(settings)
         else:
-            _ensure_intraday_data(
-                symbols, start, end, settings=settings, root=root, db=db, logger=logger,
-            )
+            engine = IntradayBacktester(settings)
+        summary = engine.run_many(symbols, root=root, start=start, end=end, db=db)
 
-    meta = llm_symbol_metadata(root, symbols)
-    if granularity == "daily":
-        engine = DailyBacktester(settings)
-    else:
-        engine = IntradayBacktester(settings)
-    summary = engine.run_many(symbols, root=root, start=start, end=end, db=db)
+        tag = f"{start}_{end}_{granularity}"
+        csv_path = Path(args.csv) if args.csv else root / "data" / "reports" / f"backtest_{tag}.csv"
+        if not csv_path.is_absolute():
+            csv_path = root / csv_path
+        _export_csv(summary, csv_path)
+        logger.info("交易明細: %s", csv_path)
 
-    tag = f"{start}_{end}_{granularity}"
-    csv_path = Path(
-        args.csv or f"data/reports/backtest_{tag}.csv",
-    )
-    _export_csv(summary, csv_path)
-    logger.info("交易明細: %s", csv_path)
+        if args.json:
+            payload = {
+                "start": start,
+                "end": end,
+                "granularity": granularity,
+                "symbols": symbols,
+                "settings_note": summary.settings_note,
+                "total_pnl_twd": summary.total_pnl_twd,
+                "win_rate": summary.win_rate,
+                "trade_count": len(summary.all_trades),
+                "by_symbol": [
+                    {
+                        "symbol": r.symbol,
+                        "trades": len(r.trades),
+                        "wins": r.win_count,
+                        "pnl_twd": r.total_pnl_twd,
+                        "bar_days": r.bar_days,
+                        "skip_reason": r.skip_reason,
+                        "llm_meta": meta.get(r.symbol, {}),
+                    }
+                    for r in summary.results
+                ],
+            }
+            jp = Path(args.json)
+            if not jp.is_absolute():
+                jp = root / jp
+            mk_folder(str(jp.parent))
+            jp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if args.json:
-        payload = {
-            "start": start,
-            "end": end,
-            "granularity": granularity,
-            "symbols": symbols,
-            "settings_note": summary.settings_note,
-            "total_pnl_twd": summary.total_pnl_twd,
-            "win_rate": summary.win_rate,
-            "trade_count": len(summary.all_trades),
-            "by_symbol": [
-                {
-                    "symbol": r.symbol,
-                    "trades": len(r.trades),
-                    "wins": r.win_count,
-                    "pnl_twd": r.total_pnl_twd,
-                    "bar_days": r.bar_days,
-                    "skip_reason": r.skip_reason,
-                    "llm_meta": meta.get(r.symbol, {}),
-                }
-                for r in summary.results
-            ],
-        }
-        jp = Path(args.json)
-        mk_folder(str(jp.parent))
-        jp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    _print_summary(summary, meta)
-    return 0
+        _print_summary(summary, meta)
+        return 0
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
