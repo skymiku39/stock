@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import threading
 import time
@@ -125,7 +126,12 @@ class SjBroker:
                 self.logger.exception("登入失敗")
             return False
 
-        self.logger.info("登入成功，可用帳號: %s", accounts)
+        # Do not log person_id/account_id/username; broker logs are often
+        # retained alongside application diagnostics.
+        self.logger.info(
+            "登入成功，可用帳號數: %d",
+            len(accounts) if accounts else 0,
+        )
 
         if self._should_activate_ca():
             self.logger.info("啟用電子憑證 ...")
@@ -537,12 +543,57 @@ class SjBroker:
         contract = self.get_contract(symbol)
         if contract is None:
             return None
-        return self.api.ticks(
-            contract,
-            start=start,
-            end=end,
-            timeout=timeout_ms,
-        )
+
+        def _fetch_one(day: str):
+            """支援現版單日 date API，也相容舊版 start/end API。"""
+            try:
+                # Current Shioaji exposes ticks(contract, date=...).  The
+                # endpoint is inherently one trading day at a time.
+                return self.api.ticks(
+                    contract,
+                    date=day,
+                    timeout=timeout_ms,
+                )
+            except TypeError as current_error:
+                # Keep compatibility with SDK releases that still exposed
+                # the former start/end signature.  Only fall back for a
+                # signature mismatch; real API errors must remain visible.
+                try:
+                    return self.api.ticks(
+                        contract,
+                        start=day,
+                        end=day,
+                        timeout=timeout_ms,
+                    )
+                except TypeError:
+                    raise current_error
+
+        start_date = dt.date.fromisoformat(start)
+        end_date = dt.date.fromisoformat(end)
+        if start_date > end_date:
+            raise ValueError("start 不可晚於 end")
+
+        parts = [_fetch_one(start_date.isoformat())]
+        if start_date == end_date:
+            return parts[0]
+
+        # The current SDK is single-day only.  Merge model/dict payloads so
+        # ticks_to_bars() can consume a multi-day request without silently
+        # dropping all days after the first one.
+        for offset in range(1, (end_date - start_date).days + 1):
+            parts.append(_fetch_one((start_date + dt.timedelta(days=offset)).isoformat()))
+
+        merged = {}
+        for part in parts:
+            if part is None:
+                continue
+            data = part.model_dump() if hasattr(part, "model_dump") else dict(part)
+            for key, value in data.items():
+                if isinstance(value, list):
+                    merged.setdefault(key, []).extend(value)
+                elif key not in merged:
+                    merged[key] = value
+        return merged
 
     # ------------------------------------------------------------------
     # 快照 / 前日收盤
