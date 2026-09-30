@@ -85,20 +85,22 @@ def _sync_to_db(wl: WatchList, root: Optional[Path] = None) -> None:
 
         db_path = default_db_path(root)
         db = StockDB.open(path=db_path)
-
-        existing = {w.symbol for w in db.list_watchlist()}
-        keep: set[str] = set()
-        for it in wl.items:
-            keep.add(it.ticker)
-            db.upsert_watch(WatchlistRow(
-                symbol=it.ticker,
-                name=it.name,
-                tags=",".join(it.tags),
-                note=it.note,
-                added_at=it.added_at,
-            ))
-        for sym in existing - keep:
-            db.remove_watch(sym)
+        try:
+            existing = {w.symbol for w in db.list_watchlist()}
+            keep: set[str] = set()
+            for it in wl.items:
+                keep.add(it.ticker)
+                db.upsert_watch(WatchlistRow(
+                    symbol=it.ticker,
+                    name=it.name,
+                    tags=",".join(it.tags),
+                    note=it.note,
+                    added_at=it.added_at,
+                ))
+            for sym in existing - keep:
+                db.remove_watch(sym)
+        finally:
+            db.close()
     except Exception:
         get_logger("watchlist").exception("watchlist 同步到 SQLite 失敗 (忽略)")
 

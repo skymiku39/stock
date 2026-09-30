@@ -14,6 +14,10 @@ from bot.stock_db import (
     default_db_path,
     reset_db_singleton,
 )
+import bot.stock_db as stock_db_module
+
+
+_ORIGINAL_CONFIGURED_DB_PATH = stock_db_module._configured_stock_db_path
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +43,23 @@ def test_default_db_path_honors_env_override(
     assert default_db_path(tmp_path) == custom
 
 
+def test_default_db_path_reads_explicit_root_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI --root 必須使用目標專案的 STOCK_DB_PATH，而非目前 cwd。"""
+    monkeypatch.delenv("STOCK_DB_PATH", raising=False)
+    monkeypatch.setattr(
+        stock_db_module,
+        "_configured_stock_db_path",
+        _ORIGINAL_CONFIGURED_DB_PATH,
+    )
+    (tmp_path / ".env").write_text(
+        "STOCK_DB_PATH=data/project-specific.db\n",
+        encoding="utf-8",
+    )
+    assert default_db_path(tmp_path) == tmp_path / "data" / "project-specific.db"
+
+
 def test_backup_stock_db_copies_data(tmp_path: Path) -> None:
     src = tmp_path / "stock.db"
     db = StockDB.open(path=src)
@@ -48,6 +69,7 @@ def test_backup_stock_db_copies_data(tmp_path: Path) -> None:
     dest = backup_stock_db(src=src, dest_dir=tmp_path / "backups", keep=5)
     assert dest.is_file()
     assert dest.parent == tmp_path / "backups"
+    assert not list(dest.parent.glob(".*.tmp"))
 
     restored = StockDB.open(path=dest)
     info = restored.get_stock_info("2330")
@@ -80,6 +102,28 @@ def test_backup_cli_json_success(tmp_path: Path, capsys) -> None:
     payload = json.loads(out)
     assert payload["ok"] is True
     assert Path(payload["artifacts"]["backup"]).is_file()
+
+
+def test_backup_cli_root_resolves_default_db_outside_project_cwd(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    StockDB.open(root=project).close()
+    monkeypatch.chdir(outside)
+
+    code = backup_main([
+        "--root", str(project),
+        "--dest-dir", "backups",
+        "--json",
+    ])
+    payload = __import__("json").loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert Path(payload["src"]) == project / "data" / "stock.db"
+    assert Path(payload["artifacts"]["backup"]).parent == project / "backups"
 
 
 def test_backup_cli_missing_src_returns_2(tmp_path: Path, capsys) -> None:

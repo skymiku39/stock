@@ -60,7 +60,8 @@ uv run stock-db-backup
 **多機並行安全，且可從手機 / Forms 直接編輯。**
 
 `stock-cloud-sync --pull` 會先自動備份本地 DB（`data/backups/stock_*_pre-pull.db`），
-再以遠端資料 **整表覆蓋** 本地；遠端若為空表會清空對應本地表，請先確認 Sheets 內容。
+再以通過 schema／semantic audit 的遠端資料 **整表覆蓋** 本地；雲端 worksheet
+若只有 header 或完全空白，會保留本地資料，不會因同步誤清空 canonical table。
 
 ### B-1. 建立 Google Cloud Project (一次性)
 
@@ -127,12 +128,17 @@ uv sync --extra cloud
 2. 左側選「⚙️ 系統與診斷 → 資料庫 / 雲端同步」
 3. 點「**🔌 測試連線**」，應該看到 `連線成功 — Sheet 標題：「stock-bot-data」`
 4. 點「**⬆ Push 全部**」把本地空表結構推到雲端
-5. 回去 Google Sheet 確認，會看到自動建好的 5 個 worksheet:
+5. 回去 Google Sheet 確認，會看到目前 10 個可同步 worksheet:
    - `stock_info`
    - `etf_meta`
    - `monthly_revenue`
+   - `valuation_daily`
+   - `dividend_history`
    - `quarterly_report`
    - `watchlist`
+   - `price_history`
+   - `llm_analysis_history`
+   - `llm_daily_reports`
 6. 之後在 Sheet 上手動編輯 / 加 row → 回 dashboard 點「**⬇ Pull 全部**」就會拉進本地
 
 ### B-8. 多機協作流程
@@ -141,8 +147,32 @@ uv sync --extra cloud
 1. **開機 / 開始工作前** → 點「⬇ Pull 全部」或「🔄 智能同步」
 2. **下班 / 換機器前** → 點「⬆ Push 全部」或「🔄 智能同步」
 
-「智能同步」邏輯：比較本地與雲端的 `MAX(updated_at)`，新的覆蓋舊的。
-規則簡單可預期 — 想要更安全的話，固定 pull 後再做事、做完 push 就好。
+「智能同步」預設仍是相容模式：比較本地與雲端的 `MAX(updated_at)`，新的覆蓋舊的。
+對歷史表或多機同時寫入，建議改用逐列合併：
+
+```text
+uv run stock-cloud-sync --row-level
+uv run stock-cloud-sync --row-level --tables price_history,monthly_revenue
+```
+
+逐列模式依主鍵與 `updated_at` 合併，保留兩端各自新增的資料；同時間戳但內容
+不同時保留本地並在結果中回報衝突數。正式切換前請先在備份資料庫與測試 Sheet
+觀察一次結果。
+
+同步安全規則：Google Sheets 是可編輯鏡像，不是 raw archive 或 evidence 的來源。
+pull／row-level sync／table-level sync 會先檢查 canonical 資料的必要欄位、日期、
+數值與 OHLC invariant；無效資料整批拒絕，不會先清空本地資料。未變更的本地列會
+保留 `source_record_id`、品質與 evidence metadata；新增或被手動修改的雲端列會
+清除不可信的來源欄位並標為 `quality_status=unknown`，必須重新由正式來源擷取後
+才可作為有證據的分析資料。
+
+同步邊界同時在 CLI 與 `GoogleSheetSync` API 內強制執行：只有 10 張
+`SYNCABLE_TABLES` 可同步；`source_runs`、`evidence_items`、記憶、research
+與其他 local-only 表即使由程式直接呼叫 API 也會被拒絕，不能讓 Google Sheets
+取代本地 raw／evidence SSOT。
+
+Push 的寫入順序是「先更新新 payload，再清理多餘舊列」，不會先把 worksheet
+清空；若更新請求在網路中斷，原有雲端資料仍保留，避免同步失敗造成空表。
 
 ---
 
@@ -212,8 +242,7 @@ uv sync --extra cloud
 * 想自動定時同步？使用 CLI（見下方「LLM 多機同步 SOP」）或把
   `SCHEDULER_CLOUD_SYNC_INTERVAL_MIN` 設為正數，讓 `stock-scheduler` 定期執行
   `stock-cloud-sync`。
-* 想要更細的衝突解決 (row-level merge)？可以在 `cloud_sync.py` 自己加一個
-  `merge(table)` 方法，比對 PK 後依 `updated_at` 逐 row 取最新。
+* 想要更細的衝突解決 (row-level merge)，請使用 `stock-cloud-sync --row-level`。
 
 ---
 
@@ -233,7 +262,7 @@ uv sync --extra cloud
 | `data/meta/company_info.json` | 上市/上櫃公司基本資料快取 | 是 | 經 `stock_info` 表 |
 | `data/meta/market_map.json` | 市場別對照 (twse/tpex) | 是 | 否 |
 | `data/supply_chain.json` | 美股→台股供應鏈 | 是 | 否 |
-| `data/active_etfs.json` | 主動式 ETF 清單 | 是 | `etf_meta`（若寫入 DB） |
+| `data/active_etfs.json` | 主動式 ETF 清單 | 是 | `etf_meta`（研究管線啟動時以 config-only metadata 物化） |
 | `data/calendar/conferences_*.json` | 法說會行事曆 | 是 | 否 |
 | `data/calendar/exhibitions.json` | 展覽清單 | 是 | 否 |
 | `data/macro/macro_*.json` | 總經快取 | 是 | 否 |
@@ -243,6 +272,14 @@ uv sync --extra cloud
 | `data/etf_holdings/**` | ETF 持股 | 是 | 否 |
 | `data/mops_downloads/`, `data/mops_cache/` | MOPS 下載 | 是 | 否 |
 | `data/watchlist.json` | 觀察清單 JSON | 是 | `watchlist` |
+
+Row-level 同步若遇到兩端相同時間但內容不同，會保留雙方內容於本地
+`sync_conflicts`（不會同步到 Google Sheets）。可用下列指令查詢與裁決：
+
+```powershell
+uv run stock-sync-conflicts --root C:\skymiku\stock --status open --json
+uv run stock-sync-conflicts --root C:\skymiku\stock --resolve <conflict_id> --resolution "保留本地版本"
+```
 
 ### LLM 產物
 
@@ -293,7 +330,11 @@ uv run stock-cloud-sync                  # 全部 SYNCABLE 表智能 sync
 uv run stock-cloud-sync --push           # 本地 → Sheets
 uv run stock-cloud-sync --pull           # Sheets → 本地
 uv run stock-cloud-sync --tables llm_analysis_history,llm_daily_reports
+uv run stock-cloud-sync --root C:\skymiku\stock --push  # 從其他工作目錄啟動
 ```
+
+`--root` 會同時決定 `.env`、`data/stock.db` 與 pull 前備份位置；排程或
+Windows Task Scheduler 不應依賴啟動時的工作目錄。
 
 ---
 
@@ -313,7 +354,12 @@ Behavior:
 
 - When a fetcher writes a cache file under `data/`, the app mirrors it to the
   same relative path under `GOOGLE_CACHE_DIR`.
+- Immutable `data/raw/<source>/<sha256>.*` files registered by `SourceRegistry`
+  are mirrored as well; if a known raw file is missing locally, research replay
+  restores it from the mirror and still verifies the manifest SHA-256.
 - Before a fetcher calls the external source, it restores the local file from
   `GOOGLE_CACHE_DIR` if the local file is missing or older.
 - Keep `data/stock.db` local on each machine. Use Google Sheets for structured
   SQLite table sync, and use `GOOGLE_CACHE_DIR` for large/raw file caches.
+- Cloud mirror／restore 是 best-effort；Drive 權限、磁碟或網路暫時失敗時，
+  本地 canonical data 仍會保存，下一次同步可再補鏡像或還原。

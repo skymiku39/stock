@@ -5,6 +5,7 @@
     uv run stock-db-backup
     uv run stock-db-backup --keep 30
     uv run stock-db-backup --label before-migrate --json
+    uv run stock-db-backup --root C:\\skymiku\\stock --json
 """
 
 from __future__ import annotations
@@ -25,10 +26,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="用 SQLite online backup 複製 data/stock.db（或 STOCK_DB_PATH）",
     )
     parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="專案資料根目錄；未指定 --src 時從此根目錄解析 stock.db",
+    )
+    parser.add_argument(
         "--src",
         type=Path,
         default=None,
-        help="來源 DB 路徑（預設 default_db_path()）",
+        help="來源 DB 路徑（相對路徑以 --root 為基準；預設 default_db_path(root)）",
     )
     parser.add_argument(
         "--dest-dir",
@@ -59,12 +66,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception:
         pass
 
-    logger = get_logger("stock-db-backup")
-    src = args.src or default_db_path()
+    project_root = (args.root or Path.cwd()).resolve()
+    logger = get_logger("stock-db-backup", log_dir=project_root / "log")
+    src = Path(args.src) if args.src is not None else default_db_path(project_root)
+    if not src.is_absolute():
+        src = project_root / src
+    dest_dir = args.dest_dir
+    if dest_dir is not None and not dest_dir.is_absolute():
+        dest_dir = project_root / dest_dir
     try:
         dest = backup_stock_db(
             src=src,
-            dest_dir=args.dest_dir,
+            dest_dir=dest_dir,
             keep=args.keep,
             label=args.label,
         )
