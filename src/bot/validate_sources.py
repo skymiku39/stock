@@ -683,35 +683,213 @@ def check_shioaji(
     return out
 
 
-def check_mis(seconds: int) -> CheckResult:
-    """TWSE MIS 即時報價：前收價 + 連續輪詢取 tick。"""
+# TWSE 常規交易時段（官網 MIS 即時資訊時段 09:00–13:30）。不以星期幾單獨斷言開市。
+_MIS_SESSION_START = dt.time(9, 0)
+_MIS_SESSION_END = dt.time(13, 30)
+# MIS 盤中為即時資訊；新鮮 tick 須相對 now 在此秒數內。
+_MIS_MAX_FRESH_AGE = dt.timedelta(seconds=60)
+
+
+def _mis_time_of_day(value: dt.datetime) -> dt.time:
+    """回傳不含 tz 的 time-of-day，供盤中窗比較。"""
+    if value.tzinfo is not None:
+        return value.timetz().replace(tzinfo=None)
+    return value.time()
+
+
+def assess_mis_quote_freshness(
+    quote_dt: Optional[dt.datetime],
+    *,
+    now: Optional[dt.datetime] = None,
+    max_age: dt.timedelta = _MIS_MAX_FRESH_AGE,
+    session_start: dt.time = _MIS_SESSION_START,
+    session_end: dt.time = _MIS_SESSION_END,
+) -> Dict[str, Any]:
+    """依來源報價日／時判斷是否像「新鮮盤中 tick」。
+
+    規則（可辯護、不依賴「今天是星期幾 ⇒ 一定開市」）：
+    1. 必須有可解析的來源 ``d``/``t`` 時間戳。
+    2. ``now`` 本身須落在常規交易時段（09:00–13:30）。
+    3. 報價日期須與台灣 ``now`` 的當日相同。
+    4. 相對 ``now`` 的年齡 ≤ ``max_age``（預設 60 秒）。
+
+    因此盤後查詢（例如 now=13:35、戳記 13:30）會因 ``now`` 已離開時段而
+    ``fresh=False``，避免把收盤殘留列當成即時 tick。
+    """
+    clock = now or now_tw()
+    if clock.tzinfo is not None and quote_dt is not None and quote_dt.tzinfo is None:
+        quote_dt = quote_dt.replace(tzinfo=clock.tzinfo)
+    elif clock.tzinfo is None and quote_dt is not None and quote_dt.tzinfo is not None:
+        clock = clock.replace(tzinfo=quote_dt.tzinfo)
+
+    now_tod = _mis_time_of_day(clock)
+    now_in_session = session_start <= now_tod <= session_end
+    payload: Dict[str, Any] = {
+        "quote_at": quote_dt.isoformat(timespec="seconds") if quote_dt else "",
+        "asof": clock.isoformat(timespec="seconds"),
+        "age_seconds": None,
+        "session_stamp": False,
+        "now_in_session": now_in_session,
+        "fresh": False,
+        "reason": "missing_quote_timestamp",
+        "max_age_seconds": int(max_age.total_seconds()),
+        "session_window": f"{session_start.strftime('%H:%M')}-{session_end.strftime('%H:%M')}",
+    }
+    if quote_dt is None:
+        return payload
+
+    age = clock - quote_dt
+    age_seconds = age.total_seconds()
+    payload["age_seconds"] = int(age_seconds)
+    stamp_tod = _mis_time_of_day(quote_dt)
+    session_stamp = session_start <= stamp_tod <= session_end
+    payload["session_stamp"] = session_stamp
+
+    if not now_in_session:
+        payload["reason"] = "outside_session_now"
+        return payload
+    if quote_dt.date() != clock.date():
+        payload["reason"] = "quote_date_mismatch"
+        return payload
+    if age_seconds < 0:
+        # 來源時鐘略快時仍允許在 max_age 內視為新鮮。
+        if abs(age_seconds) <= max_age.total_seconds() and session_stamp:
+            payload["fresh"] = True
+            payload["reason"] = "fresh_in_session"
+        else:
+            payload["reason"] = "quote_in_future"
+        return payload
+    if not session_stamp:
+        payload["reason"] = "outside_session_stamp"
+        return payload
+    if age > max_age:
+        payload["reason"] = "stale_age"
+        return payload
+    payload["fresh"] = True
+    payload["reason"] = "fresh_in_session"
+    return payload
+
+
+def _quote_datetime_from_payload(quote: Dict[str, Any]) -> Optional[dt.datetime]:
+    """Prefer raw MIS ``d``/``t``; fall back to normalized quote_date/quote_time.
+
+    Parses ``d``/``t`` locally (same ``%Y%m%d %H:%M:%S`` + Taiwan tz as market
+    source) so tests that replace ``TwsePublicMarketSource`` do not turn the
+    parser into a MagicMock.
+    """
+    raw = quote.get("raw")
+    if isinstance(raw, dict):
+        raw_date = str(raw.get("d") or "").strip()
+        raw_time = str(raw.get("t") or "").strip()
+        if len(raw_date) == 8 and raw_date.isdigit() and raw_time:
+            try:
+                parsed = dt.datetime.strptime(
+                    f"{raw_date} {raw_time}", "%Y%m%d %H:%M:%S",
+                )
+                return parsed.replace(tzinfo=now_tw().tzinfo)
+            except ValueError:
+                pass
+    quote_date = str(quote.get("quote_date") or "").strip()
+    quote_time = str(quote.get("quote_time") or "").strip()
+    if not quote_date or not quote_time:
+        return None
+    try:
+        parsed = dt.datetime.strptime(
+            f"{quote_date} {quote_time}", "%Y-%m-%d %H:%M:%S",
+        )
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=now_tw().tzinfo)
+
+
+def check_mis(
+    seconds: int,
+    *,
+    now: Optional[dt.datetime] = None,
+) -> CheckResult:
+    """TWSE MIS 即時報價：前收價 + 以來源時間戳判斷新鮮盤中 tick。
+
+    不把第一次 poll 的 volume baseline（相對 ``-1``）當成 live tick；
+    必須通過 :func:`assess_mis_quote_freshness`。
+    """
     from bot.market_source import TwsePublicMarketSource
+
     r = CheckResult(name="TWSE MIS/即時報價 (連續 poll)", layer="parse")
     symbols = ["2330", "2317"]
+    r.details["freshness_rule"] = {
+        "session_window": (
+            f"{_MIS_SESSION_START.strftime('%H:%M')}-"
+            f"{_MIS_SESSION_END.strftime('%H:%M')}"
+        ),
+        "max_age_seconds": int(_MIS_MAX_FRESH_AGE.total_seconds()),
+        "note": (
+            "now 須在常規時段；來源 d/t 須為台灣當日且年齡 ≤60 秒；"
+            "不以星期幾單獨斷言開市"
+        ),
+    }
     try:
         src = TwsePublicMarketSource(symbols, poll_seconds=2)
         prev = src.get_prev_close(symbols)
         r.details["prev_close"] = prev
         deadline = time.time() + max(2, seconds)
-        tick_total = 0
+        fresh_total = 0
         polls = 0
+        latest_quotes: List[Dict[str, Any]] = []
         while time.time() < deadline:
-            ticks = src.poll()
-            tick_total += len(ticks)
+            clock = now if now is not None else now_tw()
+            quotes = src.get_quotes()
             polls += 1
-            if tick_total > 0:
+            snapshot: List[Dict[str, Any]] = []
+            poll_fresh = 0
+            for code in symbols:
+                quote = quotes.get(code) if isinstance(quotes, dict) else None
+                if not isinstance(quote, dict):
+                    snapshot.append({
+                        "symbol": code,
+                        "fresh": False,
+                        "reason": "missing_quote",
+                        "quote_at": "",
+                        "age_seconds": None,
+                        "session_stamp": False,
+                    })
+                    continue
+                quote_dt = _quote_datetime_from_payload(quote)
+                assessment = assess_mis_quote_freshness(quote_dt, now=clock)
+                row = {
+                    "symbol": code,
+                    "price": quote.get("price"),
+                    "volume": quote.get("volume"),
+                    "quote_date": quote.get("quote_date") or "",
+                    "quote_time": quote.get("quote_time") or "",
+                    **assessment,
+                }
+                snapshot.append(row)
+                if assessment.get("fresh"):
+                    poll_fresh += 1
+            latest_quotes = snapshot
+            fresh_total = poll_fresh
+            if fresh_total > 0:
                 break
             time.sleep(2)
-        r.rows = tick_total
+        r.rows = fresh_total
         r.details["polls"] = polls
-        if tick_total > 0:
+        r.details["quotes"] = latest_quotes
+        r.details["fresh_tick_count"] = fresh_total
+        if fresh_total > 0:
             r.ok = True
-            r.note = f"{polls} 次輪詢取得 {tick_total} 筆 tick"
+            r.note = f"{polls} 次輪詢取得 {fresh_total} 筆新鮮盤中 tick"
+            r.sample_date = next(
+                (str(q.get("quote_date") or "") for q in latest_quotes if q.get("fresh")),
+                "",
+            )
         elif prev:
             r.ok = True
-            r.note = "非盤中：取得前收價但無即時 tick (盤中限制，已明確標示)"
+            r.note = (
+                "非盤中／無新鮮 tick：取得前收價但無即時新鮮報價 "
+                "(盤後殘留列不計入 live tick，已明確標示)"
+            )
         else:
-            r.error = "無前收價亦無 tick"
+            r.error = "無前收價亦無新鮮 tick"
     except Exception as e:  # noqa: BLE001
         r.error = f"{type(e).__name__}: {e}"
     return r
