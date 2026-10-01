@@ -315,18 +315,54 @@ uv sync --extra dev
 
 ### 執行測試
 
-```bash
-# 建議：直接透過 venv 執行（避免與 stock-dashboard 程序鎖定衝突）
-.venv/Scripts/python.exe -m pytest tests/ -v
+先安裝開發依賴（含 pytest）：
 
-# 或使用 uv（需先關閉 stock-dashboard，否則可能因 .exe 被鎖定而失敗）
-uv run pytest tests/ -v
+```bash
+uv sync --extra dev
 ```
 
-> **注意**：若 `stock-dashboard`（Streamlit 儀表板）正在執行，`uv run pytest` 可能因
-> `.venv/Scripts/stock-dashboard.exe` 被鎖定而失敗。此時請改用上方 venv 直接執行，
-> 或先關閉儀表板程序。
+建議透過 `stock-test` 跑測試（內部以 `sys.executable -m pytest` 子行程執行，`cwd` 為專案 root，發現範圍錨定 `tests/`）：
 
+```bash
+# unit：套用 -m "not integration and not slow"
+uv run stock-test unit
+
+# regression：完整跑 tests/（不加 marker 過濾）
+uv run stock-test regression
+
+# 傳透 pytest 參數（`--` 之後原樣保留順序）
+uv run stock-test unit -- -q
+uv run stock-test regression -- -k "test_config or test_event_bus"
+
+# 指定專案 root（可放在子命令之前；預設為呼叫端 cwd，且須含 tests/）
+uv run stock-test --root C:\path\to\stock unit
+uv run stock-test --root C:\path\to\stock regression -- -q
+
+# 模組備援（入口尚未刷新或 shim 被鎖定時）
+uv run python -m bot.test_cli unit
+uv run --no-sync python -m bot.test_cli --root C:\path\to\stock regression -- -q
+```
+
+**Profile 語意**
+
+| Profile | 行為 |
+|---------|------|
+| `unit` | `pytest <root>/tests -m "not integration and not slow"` |
+| `regression` | `pytest <root>/tests`（不過濾 marker） |
+
+`pyproject.toml` 已註冊 `integration` / `slow` markers。多數既有測試尚未標註時，兩 profile 收集結果會重疊；為整合／慢測加上 marker 後，`unit` 會排除它們。`unit` 拒絕 `--` 後方的 `-m` / `-mslow` / `--markexpr`（避免蓋掉 unit 過濾）；自訂 marker 請用 `regression` 或直接呼叫 pytest。
+
+Exit code：原樣回傳 pytest 的結束碼（通常 `0` 通過／非 `0` 失敗）。若未安裝 pytest，回傳 `1` 並提示 `uv sync --extra dev`；`--root` 無效（不存在、非目錄、或缺 `tests/`）則回傳 `2`。
+
+> **注意**：若 `stock-dashboard`（Streamlit 儀表板）正在執行，`uv run …` 可能因
+> `.venv\Scripts\*.exe` 被鎖定而失敗。此時請改用模組備援，或先關閉儀表板程序。
+
+仍可直接呼叫 pytest（不經 `stock-test`）：
+
+```bash
+.venv/Scripts/python.exe -m pytest tests/ -v
+uv run pytest tests/ -v
+```
 ## 設定
 
 複製 `.env.example` 為 `.env`，填入你的實際資訊：
