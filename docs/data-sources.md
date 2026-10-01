@@ -1,7 +1,7 @@
 # 資料源清單與健康度驗證
 
 本文件列出系統使用的所有外部資料源、用途、是否需要憑證、以及失敗時的 fallback。
-可用 `uv run stock-validate` 一鍵做「只讀」健康度檢查 (見最後一節)。
+可用 `uv run stock-validate` 一鍵做健康度檢查 (見最後一節；**省略 `--root` 才是對正式 `data/` 的安全預設**)。
 
 > 三層驗證概念：**link** 連結有填且格式正確 → **http** 能抓到有效內容 → **parse** 解析後可被流程使用。
 
@@ -94,19 +94,32 @@ TWSE `STOCK_DAY_AVG_ALL` 且回應未提供可可靠確認的觀測日，系統�
 ## 一鍵健康度驗證
 
 ```bash
-uv run stock-validate                  # 全部公開資料源 (read-only，不碰正式 data/)
+# 安全預設：省略 --root → 暫存資料根（結束後清理），不碰正式 data/
+uv run stock-validate
 uv run stock-validate --json out.json  # 另存 JSON 摘要
 uv run stock-validate --md out.md      # 另存 Markdown 摘要
 uv run stock-validate --shioaji        # 額外嘗試 Shioaji 登入/contract/snapshot (需憑證)
 uv run stock-validate --mis-seconds 30 # MIS 即時 tick 連續輪詢 30 秒
 uv run stock-validate --cloud          # 對 Google Sheets 做 live ping
+
+# 明確 --root：該路徑會傳給收集器，可能寫入 cache / raw / provenance
+# （僅在你有意對該樹落地資料時使用；不要誤當成「只讀」）
+uv run stock-validate --root C:\path\to\project
 ```
 
-特性：
-- **只讀**：所有抓取導向暫存資料夾，不覆蓋正式 `data/`、不下單、不寫雲端。
-- **隔離驗證 root**：公司名冊、MOPS、網路搜尋與其他會保存 raw 的收集器，均接收同一個暫存 root；驗證前後正式 `data/raw` 與 provenance 計數應保持不變。
+### `--root` 語意（與實作對齊）
+
+| 呼叫方式 | 資料 root | 副作用 |
+|----------|-----------|--------|
+| **省略 `--root`** | `tempfile` 暫存目錄，檢查結束後刪除 | 不寫正式 `data/`；設定（`.env` 等）仍讀 **目前工作目錄** |
+| **`--root PATH`** | 明確傳入的 `PATH` | 收集器可寫入該 root 下的 **cache / raw / provenance**；設定也讀該 root |
+
+安全／近似只讀驗證請**省略 `--root`**（或指向用完即丟的目錄）。對正式專案樹加 `--root` 不是 read-only。
+
+其他特性：
+- **不下單**；雲端 live ping 僅在加 `--cloud` 時打到遠端。
 - **不洩漏金鑰**：僅顯示憑證「是否存在 (present=true/false)」，絕不印出金鑰內容。
 - **三層輸出**：每項回報 `layer / ok / rows / sample_date / error / note`。
-- **誠實標記**：MOPS 安全性阻擋、Shioaji 模擬 0 筆、ETF 新掛牌無持股等，皆以
-  `error` / `note` 明確標記，不會被當成「資料可用」。
+- **誠實標記**：MOPS 安全性阻擋、Shioaji 模擬 0 筆、ETF 新掛牌無持股、MIS 盤後殘留列等，皆以
+  `error` / `note` 明確標記，不會被當成「即時資料可用」。
 - 結束碼：有「真正失敗 (非警告)」回傳非 0，方便接 CI。

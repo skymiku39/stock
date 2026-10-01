@@ -1,9 +1,12 @@
-"""validate_sources -- 資料源「只讀」健康度 smoke test。
+"""validate_sources -- 資料源健康度 smoke test（``stock-validate``）。
 
 定位
 ====
-不改動正式 ``data/``、不下單、不寫雲端：所有抓取都導向暫存資料夾，
-逐一檢查每個外部資料源並輸出 JSON / Markdown 摘要。
+逐一檢查每個外部資料源並輸出 JSON / Markdown 摘要。資料 root 語意：
+
+* 省略 ``--root``：使用暫存 data root，結束後自動清理；不碰正式 ``data/``。
+* 明確 ``--root PATH``：將 ``PATH`` 傳給收集器，可能寫入 cache / raw / provenance。
+* 設定來源：省略 ``--root`` 時讀 CWD；明確 ``--root PATH`` 時讀 ``PATH``。
 
 三層驗證
 ========
@@ -13,17 +16,18 @@
 
 安全
 ====
-* 只顯示憑證「是否存在」(present=true/false)，**絕不印出金鑰內容**。
-* Shioaji / MIS / 雲端 live ping 預設關閉，需以旗標明確開啟。
+* 不下單；只顯示憑證「是否存在」(present=true/false)，**絕不印出金鑰內容**。
+* Shioaji / MIS / 雲端 live ping 預設關閉，需以旗標明確開啟；雲端僅在要求時 ping。
 
 用法
 ====
 ```bash
-uv run stock-validate                       # 預設全部公開資料源 (read-only)
+uv run stock-validate                       # 預設全部公開資料源 (暫存 root)
 uv run stock-validate --json out.json       # 另存 JSON
 uv run stock-validate --md out.md           # 另存 Markdown
 uv run stock-validate --shioaji             # 額外嘗試 Shioaji 登入/快照 (需憑證)
 uv run stock-validate --mis-seconds 30      # MIS 即時 tick 連續輪詢秒數
+uv run stock-validate --cloud               # 對雲端做 live ping
 ```
 """
 
@@ -1047,12 +1051,16 @@ def to_markdown(summary: Dict[str, Any]) -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     configure_console()
-    parser = argparse.ArgumentParser(description="資料源只讀健康度 smoke test")
+    parser = argparse.ArgumentParser(description="資料源健康度 smoke test；預設使用暫存 data root，明確指定 --root 時可能寫入選定目錄樹")
     parser.add_argument(
         "--root",
         type=Path,
         default=None,
-        help="專案資料／設定根目錄（未指定時資料檢查使用暫存目錄、設定使用目前工作目錄）",
+        help=(
+            "專案資料／設定根目錄（未指定時資料檢查用暫存目錄；"
+            "明確指定時該 root 會傳給收集器，可能寫入 cache/raw/provenance；"
+            "設定檔仍：未指定用 CWD，有指定用該 root）"
+        ),
     )
     parser.add_argument("--json", dest="json_path", default="", help="另存 JSON 報告路徑")
     parser.add_argument("--md", dest="md_path", default="", help="另存 Markdown 報告路徑")
