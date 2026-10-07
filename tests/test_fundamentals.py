@@ -453,6 +453,10 @@ class TestEnumerateMonths:
 
 
 class TestFetchKlineRange:
+    @pytest.fixture(autouse=True)
+    def _known_market(self, monkeypatch):
+        monkeypatch.setattr("bot.technicals._resolve_market", lambda *a, **kw: "twse")
+
     def test_writes_csv_and_progress_called(self, tmp_path: Path) -> None:
         captured = []
 
@@ -563,6 +567,10 @@ class TestGetKlineCoverage:
 
 
 class TestExtendBackward:
+    @pytest.fixture(autouse=True)
+    def _known_market(self, monkeypatch):
+        monkeypatch.setattr("bot.technicals._resolve_market", lambda *a, **kw: "twse")
+
     def test_uses_anchor_from_cache(self, tmp_path: Path) -> None:
         csv_dir = tmp_path / "data" / "technicals" / "2330"
         csv_dir.mkdir(parents=True)

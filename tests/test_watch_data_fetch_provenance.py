@@ -20,6 +20,7 @@ def test_resolve_symbols_reads_explicit_root_env(tmp_path: Path, monkeypatch) ->
 def test_watch_yfinance_fallback_preserves_normalized_provenance(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    monkeypatch.setattr("bot.watch_data_fetch.load_market_map", lambda **kwargs: {"2330": "twse"})
     class FakeTicker:
         def history(self, **_kwargs):
             return pd.DataFrame(

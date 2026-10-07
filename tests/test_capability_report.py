@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tomllib
 from pathlib import Path
 
 
@@ -31,11 +32,13 @@ def test_capability_report_counts_current_console_scripts() -> None:
     module = _load_report_generator()
     scripts = module._load_toml_scripts(ROOT / "pyproject.toml")
 
-    assert len(scripts) == 33
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["scripts"]
+    assert dict(scripts) == declared
     assert {name for name, _target in scripts} >= {
         "stock-system-preflight",
         "stock-evidence-link-repair",
         "stock-ask",
+        "stock-test",
     }
 
 

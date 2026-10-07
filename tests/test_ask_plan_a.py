@@ -53,7 +53,11 @@ def test_ask_live_disabled_is_not_no_evidence(tmp_path: Path) -> None:
 
 def test_ask_routes_professional_knowledge_to_dedicated_adapter(tmp_path: Path) -> None:
     db = StockDB.open(root=tmp_path)
-    with patch("bot.ask.ProfessionalKnowledgeAdapter") as adapter_cls:
+    with patch("bot.ask.ProfessionalKnowledgeAdapter") as adapter_cls, \
+            patch("bot.ask.LiveTickerAdapter") as ticker_cls:
+        ticker_cls.return_value.collect.return_value = ResourceResult(
+            resource="ticker_snapshot", evidence=[], live=True, status="partial",
+        )
         adapter_cls.return_value.collect.return_value = ResourceResult(
             resource="professional_knowledge",
             status="partial",

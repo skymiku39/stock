@@ -354,6 +354,11 @@ uv run --no-sync python -m bot.test_cli --root C:\path\to\stock regression -- -q
 
 Exit code：原樣回傳 pytest 的結束碼（通常 `0` 通過／非 `0` 失敗）。若未安裝 pytest，回傳 `1` 並提示 `uv sync --extra dev`；`--root` 無效（不存在、非目錄、或缺 `tests/`）則回傳 `2`。
 
+一般測試禁止真實 HTTP／socket 連線；漏掉來源替身會直接失敗，不會靠網路狀態決定結果。
+需要真實服務的案例須標記 `integration`，並明確執行
+`uv run stock-test regression -- -m integration --allow-network`；沒有這個選項時會跳過。
+CI 在 Windows 與 Linux 使用 Python 3.11、`uv sync --locked --extra dev` 及 unit profile。
+
 > **注意**：若 `stock-dashboard`（Streamlit 儀表板）正在執行，`uv run …` 可能因
 > `.venv\Scripts\*.exe` 被鎖定而失敗。此時請改用模組備援，或先關閉儀表板程序。
 

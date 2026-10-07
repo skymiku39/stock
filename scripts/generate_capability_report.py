@@ -55,6 +55,7 @@ CLI_META: Dict[str, Tuple[str, str]] = {
     "stock-nextday": ("research", "明日當沖關注名單（draft／update）"),
     "stock-preflight": ("validate", "交易可行性七區檢查（含封存／憑證／時段）"),
     "stock-system-preflight": ("validate", "系統完整性、資料稽核、記憶容量與模組 import 檢查"),
+    "stock-test": ("validate", "執行 unit／regression 測試，傳遞 pytest 參數與退出碼"),
     "stock-validate": ("validate", "公開資料源只讀健康度（link／http／parse）"),
     "stock-oddlot-test": ("trade", "零股下單煙測（僅模擬環境）"),
     "stock-scheduler": ("other", "背景排程：macro／研究／公司／雲端／歷史／監控"),

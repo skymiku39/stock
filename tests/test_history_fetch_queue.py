@@ -97,6 +97,7 @@ class TestHistoryFetchQueue:
             "volume": 12.5,
         }]
         monkeypatch.setattr("bot.history_fetch_queue.twse_is_available", lambda *args, **kwargs: False)
+        monkeypatch.setattr("bot.history_fetch_queue._resolve_market", lambda *args, **kwargs: "twse")
         monkeypatch.setattr(
             "bot.history_fetch_queue.fetch_monthly_kline_yfinance",
             lambda *args, **kwargs: rows,

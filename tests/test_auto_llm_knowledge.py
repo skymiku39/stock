@@ -31,7 +31,7 @@ def test_llm_research_batch_loads_settings_from_root(monkeypatch, tmp_path: Path
 
     def _settings(*args, **kwargs):
         seen["env_file"] = kwargs.get("_env_file")
-        return SimpleNamespace(gemini_api_key="")
+        return SimpleNamespace(llm_enabled=False)
 
     monkeypatch.setattr(module, "Settings", _settings)
     assert module.run_llm_research_batch(tickers=[], root=tmp_path) == 2

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import datetime as dt
 import json
 from pathlib import Path
@@ -162,6 +164,7 @@ def test_live_evidence_wins_same_resource_quota(tmp_path: Path) -> None:
         metadata={"live": True},
     )
     plan = plan_query("2330 最新盤中資料", ticker="2330")
+    plan = replace(plan, resource_needs=["ticker_snapshot"])
     with patch.object(engine, "_collect_local_ticker_evidence", return_value=([local], [], [])), \
             patch("bot.ask.LiveTickerAdapter") as ticker_cls:
         ticker_cls.return_value.collect.return_value = ResourceResult(

@@ -109,7 +109,8 @@ def test_empty_or_malformed_kline_frame_is_safe():
     assert _coerce_df(pd.DataFrame({"date": ["2026-09-01"]})).empty
 
 
-def test_recent_kline_source_failure_returns_empty_frame(tmp_path: Path):
+def test_recent_kline_source_failure_returns_empty_frame(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("bot.technicals._resolve_market", lambda *args, **kwargs: "twse")
     frame = fetch_recent_kline(
         "6669",
         months=1,
