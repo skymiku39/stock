@@ -77,7 +77,6 @@ from bot.stock_db import (  # noqa: E402
     SYNCABLE_TABLES,
     StockDB,
     StockInfo,
-    WatchlistRow,
     backup_stock_db,
     default_db_path,
     get_db,
@@ -2981,6 +2980,18 @@ def _build_scorecards(
     return out
 
 
+def _apply_watchlist_change(action) -> bool:
+    try:
+        action()
+        return True
+    except wl.WatchlistSnapshotError as exc:
+        st.warning(str(exc))
+        return False
+    except Exception as exc:
+        st.error(f"清單操作未完成：{exc}")
+        return False
+
+
 def page_watchlist() -> None:
     st.title("個股總覽 (Watchlist)")
     st.caption(
@@ -3004,13 +3015,13 @@ def page_watchlist() -> None:
         new_tag = c3.text_input("標籤", value="", placeholder="AI", key="wl_new_tag")
         if c3.button("加入", use_container_width=True, key="wl_add"):
             if new_ticker.strip():
-                wl.add(
+                if _apply_watchlist_change(lambda: wl.add(
                     new_ticker.strip(), name=new_name.strip(),
                     tags=[new_tag.strip()] if new_tag.strip() else [],
                     root=PROJECT_ROOT,
-                )
-                st.toast(f"已加入 {new_ticker}", icon="✅")
-                st.rerun()
+                )):
+                    st.toast(f"已加入 {new_ticker}", icon="✅")
+                    st.rerun()
 
         st.markdown("##### 一鍵從現有資料合併")
         s1, s2 = st.columns(2)
@@ -3031,8 +3042,10 @@ def page_watchlist() -> None:
                 key="wl_del",
             )
             if st.button("移除", key="wl_del_btn"):
-                wl.remove(del_t.split()[0], root=PROJECT_ROOT)
-                st.rerun()
+                symbol = del_t.split()[0]
+                revision = next(i.revision for i in wlist.items if i.ticker == symbol)
+                if _apply_watchlist_change(lambda: wl.remove(symbol, root=PROJECT_ROOT, expected_revision=revision)):
+                    st.rerun()
 
     # ------ 評分量表規則 ------
     with st.expander("評分規則速覽 (四時間框架 × 8 個 factor)", expanded=False):
@@ -4183,8 +4196,8 @@ def page_ticker_detail() -> None:
 
     if cadd.button("加入 Watchlist", use_container_width=True, key="detail_add"):
         if free_t.strip():
-            wl.add(free_t.strip(), root=PROJECT_ROOT)
-            st.toast(f"已加入 {free_t} 到 Watchlist", icon="✅")
+            if _apply_watchlist_change(lambda: wl.add(free_t.strip(), root=PROJECT_ROOT)):
+                st.toast(f"已加入 {free_t} 到 Watchlist", icon="✅")
 
     ticker = st.session_state.get("detail_ticker", free_t.strip())
     if not ticker:
@@ -6576,9 +6589,15 @@ def page_database() -> None:
     # --- watchlist ---
     with tabs[1]:
         st.caption("使用者監控清單 (與雲端同步可在多機共用)")
+        if "db_watchlist_snapshot" not in st.session_state:
+            st.session_state["db_watchlist_snapshot"] = wl.load(PROJECT_ROOT)
+        if st.button("重新載入清單", key="db_watchlist_reload"):
+            st.session_state["db_watchlist_snapshot"] = wl.load(PROJECT_ROOT)
+            st.rerun()
         watch_rows = db.list_watchlist()
         if watch_rows:
             df = pd.DataFrame([dataclasses_asdict(w) for w in watch_rows])
+            df = df.drop(columns=["revision", "deleted_at", "restored_from"], errors="ignore")
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("Watchlist 是空的。")
@@ -6594,17 +6613,24 @@ def page_database() -> None:
                 if not wsym.strip():
                     st.error("symbol 必填")
                 else:
-                    db.upsert_watch(WatchlistRow(
-                        symbol=wsym.strip(), name=wname.strip(),
-                        tags=wtags.strip(), note=wnote.strip(),
-                    ))
-                    st.success(f"{wsym} 已加入 watchlist")
-                    st.rerun()
+                    snapshot = st.session_state["db_watchlist_snapshot"]
+                    item = next((i for i in snapshot.items if i.ticker == wsym.strip()), None)
+                    if item is None:
+                        item = wl.WatchItem(wsym.strip())
+                        snapshot.items.append(item)
+                    item.name, item.tags, item.note = wname.strip(), [t.strip() for t in wtags.split(",") if t.strip()], wnote.strip()
+                    if _apply_watchlist_change(lambda: wl.save(snapshot, PROJECT_ROOT)):
+                        st.session_state.pop("db_watchlist_snapshot", None)
+                        st.success(f"{wsym} 已儲存")
+                        st.rerun()
             del_sym = ba2.text_input("欲刪除 symbol", key="wl_del")
             if st.button("刪除", key="wl_del_btn") and del_sym.strip():
-                db.remove_watch(del_sym.strip())
-                st.success(f"{del_sym} 已刪除")
-                st.rerun()
+                snapshot = st.session_state["db_watchlist_snapshot"]
+                item = next((i for i in snapshot.items if i.ticker == del_sym.strip()), None)
+                if _apply_watchlist_change(lambda: wl.remove(del_sym.strip(), root=PROJECT_ROOT, expected_revision=item.revision if item else "")):
+                    st.session_state.pop("db_watchlist_snapshot", None)
+                    st.success(f"{del_sym} 已刪除")
+                    st.rerun()
 
     # --- etf_meta ---
     with tabs[2]:

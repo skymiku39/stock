@@ -21,7 +21,7 @@ from bot.source_registry import SourceRegistry
 
 def test_research_tables_and_exact_source_identity(tmp_path: Path) -> None:
     db = StockDB.open(root=tmp_path)
-    assert db.latest_schema_version() == 5
+    assert db.latest_schema_version() >= 5
     source = SourceRegistry(tmp_path).capture_document(
         "fixture", "原始文件 2330 10%", source_ref="fixture:1", title="fixture"
     )

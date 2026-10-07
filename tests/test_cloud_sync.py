@@ -289,7 +289,7 @@ class TestSync:
         _patch_get_or_create(sync, {"watchlist": ws})
 
         result = sync.sync("watchlist")
-        assert result.direction == "sync-pull"
+        assert result.direction == "sync-merge-pull"
         latest = db.get_watch("2330")
         assert latest is not None
         assert latest.name == "雲端版"
@@ -306,7 +306,7 @@ class TestSync:
         _patch_get_or_create(sync, {"watchlist": ws})
 
         result = sync.sync("watchlist")
-        assert result.direction == "sync-push"
+        assert result.direction == "sync-merge-push"
         # 雲端應該被寫入，但不需要先清空 worksheet
         assert ws.updated
 
@@ -320,9 +320,7 @@ class TestSync:
             (ts, "2330"),
         )
         header = cols
-        row = ["2330", "X", "", "", ts, ts]
-        while len(row) < len(header):
-            row.append("")
+        row = [db.fetch_all_rows("watchlist")[0][col] for col in header]
         ws = FakeWorksheet([header, row])
         _patch_get_or_create(sync, {"watchlist": ws})
 
@@ -552,3 +550,65 @@ class TestConfigDisabled:
         sync = GoogleSheetSync(cfg, db=db)
         with pytest.raises(CloudSyncDependencyError):
             sync._ensure_client()
+
+
+@pytest.mark.parametrize("operation", ["sync", "sync_row_level", "pull", "push"])
+def test_watchlist_tombstone_survives_stale_remote(operation, sync, db):
+    db.upsert_watch(WatchlistRow(symbol="2330", note="before"))
+    stale = db.fetch_all_rows("watchlist")[0]
+    db.remove_watch("2330")
+    # Even a clock-skewed old client cannot resurrect a deleted item.
+    stale["updated_at"] = "2099-01-01T00:00:00+08:00"
+    columns = db._table_columns("watchlist")
+    ws = FakeWorksheet([columns, [stale.get(c, "") for c in columns]])
+    _patch_get_or_create(sync, {"watchlist": ws})
+    assert getattr(sync, operation)("watchlist").ok
+    assert db.get_watch("2330") is None
+    assert db.fetch_all_rows("watchlist")[0]["deleted_at"]
+
+
+def test_explicit_readd_wins_its_observed_tombstone(sync, db):
+    db.upsert_watch(WatchlistRow(symbol="2330"))
+    db.remove_watch("2330")
+    tombstone = db.fetch_all_rows("watchlist")[0]
+    db.upsert_watch(WatchlistRow(symbol="2330", note="readded"))
+    columns = db._table_columns("watchlist")
+    ws = FakeWorksheet([columns, [tombstone[c] for c in columns]])
+    _patch_get_or_create(sync, {"watchlist": ws})
+    assert sync.sync_row_level("watchlist").ok
+    assert db.get_watch("2330").note == "readded"
+    assert ws.values[1][columns.index("deleted_at")] == ""
+
+
+def test_watchlist_legacy_header_is_upgraded_with_rows(sync, db, monkeypatch):
+    legacy = db._table_columns("watchlist")[:6]
+    ws = FakeWorksheet([legacy, ["2330", "legacy", "", "keep", "", ""]])
+    sheet = MagicMock()
+    sheet.worksheet.return_value = ws
+    monkeypatch.setattr(sync, "_ensure_sheet", lambda: sheet)
+    assert sync.sync_row_level("watchlist").ok
+    assert db.get_watch("2330").note == "keep"
+    assert ws.values[0] == db._table_columns("watchlist")
+    assert len(ws.updated) == 1  # No header-only rewrite ahead of the data.
+
+
+def test_sync_rejects_local_edits_after_snapshot(sync, db, monkeypatch):
+    columns = db._table_columns("watchlist")
+    remote = {"symbol": "REMOTE", "note": "remote"}
+    ws = FakeWorksheet([columns, [remote.get(c, "") for c in columns]])
+    _patch_get_or_create(sync, {"watchlist": ws})
+    original = db.replace_table_rows
+    def concurrent_edit(table, rows, **kwargs):
+        db.upsert_watch(WatchlistRow(symbol="LOCAL", note="keep"))
+        return original(table, rows, **kwargs)
+    monkeypatch.setattr(db, "replace_table_rows", concurrent_edit)
+    result = sync.sync_row_level("watchlist")
+    assert not result.ok
+    assert db.get_watch("LOCAL").note == "keep"
+    assert not ws.updated
+
+
+def test_merge_compares_instants_with_different_timezones():
+    local = {"symbol": "2330", "note": "older", "updated_at": "2026-10-07T10:00:00+08:00"}
+    remote = {"symbol": "2330", "note": "newer", "updated_at": "2026-10-07T03:00:00Z"}
+    assert merge_rows_by_key("watchlist", [local], [remote]).rows[0]["note"] == "newer"

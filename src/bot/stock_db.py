@@ -38,7 +38,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -262,7 +262,7 @@ class QuarterlyReport:
 
 @dataclass
 class WatchlistRow:
-    """使用者自訂監控清單 (取代/相容 watchlist.json)。"""
+    """使用者自訂監控清單列（SQLite SSOT；JSON 見 bot.watchlist）。"""
 
     symbol: str
     name: str = ""
@@ -270,6 +270,9 @@ class WatchlistRow:
     note: str = ""
     added_at: str = ""
     updated_at: str = ""
+    revision: str = ""
+    deleted_at: str = ""
+    restored_from: str = ""
 
 
 @dataclass
@@ -1627,6 +1630,8 @@ class StockDB:
                 self._ensure_columns(c, _EVIDENCE_PROVENANCE_COLUMNS)
                 self._ensure_columns(c, _INTERNAL_COLUMNS)
                 self._record_schema_migrations(c)
+                from bot.schema_migrations import apply_migrations
+                apply_migrations(c)
                 self._backfill_source_health(c)
                 c.execute(
                     "CREATE INDEX IF NOT EXISTS idx_intraday_bars_symbol_interval_ts "
@@ -1737,9 +1742,7 @@ class StockDB:
                 """
                 INSERT INTO schema_migrations(version, name, checksum, applied_at)
                 VALUES (?,?,?,?)
-                ON CONFLICT(version) DO UPDATE SET
-                  name = excluded.name,
-                  checksum = excluded.checksum
+                ON CONFLICT(version) DO NOTHING
                 """,
                 (version, name, checksum, applied_at),
             )
@@ -1941,6 +1944,8 @@ class StockDB:
         self,
         table: str,
         rows: Iterable[Dict[str, Any]],
+        *,
+        expected_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """同步用：用雲端的整批資料覆蓋本地。回傳寫入筆數。"""
         rows = list(rows)
@@ -1952,10 +1957,18 @@ class StockDB:
             f"({','.join(col_names)}) VALUES ({placeholders})"
         )
         with self.transaction() as c:
+            if expected_rows is not None:
+                actual = self.fetch_all_rows(table)
+                normalize = lambda data: sorted(json.dumps(r, sort_keys=True) for r in data)
+                if normalize(actual) != normalize(expected_rows):
+                    raise RuntimeError(f"{table} 在同步期間已更新，請重試同步")
             c.execute(f"DELETE FROM {table}")
             for r in rows:
                 values = [r.get(name, _default_for(table, name)) for name in col_names]
                 c.execute(sql, values)
+            if table == "watchlist":
+                from bot.watchlist_repository import WatchlistRepository
+                WatchlistRepository.mark_initialized(c)
         return len(rows)
 
     def upsert_rows(
@@ -2344,47 +2357,32 @@ class StockDB:
             )
 
     # =================================================================
-    # watchlist DAO (取代 watchlist.json，向後相容)
+    # watchlist DAO — durable SSOT（JSON 僅 bootstrap／相容快照，見 bot.watchlist）
     # =================================================================
 
     def get_watch(self, symbol: str) -> Optional[WatchlistRow]:
         row = self.conn.execute(
-            "SELECT * FROM watchlist WHERE symbol = ?", (symbol,)
+            "SELECT * FROM watchlist WHERE symbol = ? AND deleted_at = ''", (symbol,)
         ).fetchone()
         return _row_to_dc(WatchlistRow, row) if row else None
 
     def list_watchlist(self) -> List[WatchlistRow]:
         rows = self.conn.execute(
-            "SELECT * FROM watchlist ORDER BY added_at DESC, symbol"
+            "SELECT * FROM watchlist WHERE deleted_at = '' ORDER BY added_at DESC, symbol"
         ).fetchall()
         return [_row_to_dc(WatchlistRow, r) for r in rows]
 
     def upsert_watch(self, item: WatchlistRow) -> None:
-        now_iso = now_tw().isoformat(timespec="seconds")
-        if not item.added_at:
-            item.added_at = now_iso
-        item.updated_at = now_iso
-        with self.transaction() as c:
-            c.execute(
-                """
-                INSERT INTO watchlist
-                  (symbol, name, tags, note, added_at, updated_at)
-                VALUES (?,?,?,?,?,?)
-                ON CONFLICT(symbol) DO UPDATE SET
-                  name = CASE WHEN excluded.name != '' THEN excluded.name ELSE watchlist.name END,
-                  tags = excluded.tags,
-                  note = excluded.note,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    item.symbol, item.name, item.tags, item.note,
-                    item.added_at, item.updated_at,
-                ),
-            )
+        from bot.watchlist_repository import WatchlistRepository
+        repository = WatchlistRepository(self)
+        repository.upsert(asdict(item))
+        persisted = repository.get(item.symbol)
+        for name in ("added_at", "updated_at", "revision", "deleted_at", "restored_from"):
+            setattr(item, name, persisted[name])
 
     def remove_watch(self, symbol: str) -> None:
-        with self.transaction() as c:
-            c.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,))
+        from bot.watchlist_repository import WatchlistRepository
+        WatchlistRepository(self).remove(symbol)
 
     # =================================================================
     # price_history DAO  (歷史 K 線 OHLCV)

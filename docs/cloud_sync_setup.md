@@ -212,7 +212,9 @@ Push 的寫入順序是「先更新新 payload，再清理多餘舊列」，不�
 
 懶得寫公式，每天看一次就好。
 
-之後在 dashboard 按「⬇ Pull」就會把手機新增的股票拉進本地 DB 與 JSON。
+之後在 dashboard 按「⬇ Pull」會把手機新增的股票寫入本地 SQLite `watchlist`
+（SSOT）。`data/watchlist.json` 僅在本機透過 `bot.watchlist` 新增／更新／移除時
+寫成衍生相容快照；Pull 本身不會改 JSON，也不應再以過期 JSON 刪 SQLite 列。
 
 ---
 
@@ -271,7 +273,7 @@ Push 的寫入順序是「先更新新 payload，再清理多餘舊列」，不�
 | `data/technicals/<ticker>/` | K 線 CSV | 是 | `price_history` |
 | `data/etf_holdings/**` | ETF 持股 | 是 | 否 |
 | `data/mops_downloads/`, `data/mops_cache/` | MOPS 下載 | 是 | 否 |
-| `data/watchlist.json` | 觀察清單 JSON | 是 | `watchlist` |
+| `data/watchlist.json` | 觀察清單相容快照（SQLite 為 SSOT；僅未初始化時匯入一次） | 是 | 經 SQLite `watchlist` |
 
 Row-level 同步若遇到兩端相同時間但內容不同，會保留雙方內容於本地
 `sync_conflicts`（不會同步到 Google Sheets）。可用下列指令查詢與裁決：
@@ -363,3 +365,17 @@ Behavior:
   SQLite table sync, and use `GOOGLE_CACHE_DIR` for large/raw file caches.
 - Cloud mirror／restore 是 best-effort；Drive 權限、磁碟或網路暫時失敗時，
   本地 canonical data 仍會保存，下一次同步可再補鏡像或還原。
+
+
+## Watchlist 保存與刪除規則
+
+- SQLite 提交成功後才原子更新 JSON 相容快照。資料庫錯誤會直接回報；若只剩快照寫入失敗，訊息會明確告知 SQLite 已儲存。
+- JSON 只在首次初始化且 SQLite 沒有列時匯入。已初始化的空清單不再重匯舊 JSON。
+- 編輯器以載入版本檢查衝突；未修改的舊列不會覆蓋其他人的新修改。遇到衝突，重新載入後再編輯。
+- 移除會保留 `deleted_at` 與 `revision`，這些刪除標記也會同步。缺列不代表刪除，請從清單操作移除；不要從 Sheets 直接刪除資料列。
+- Watchlist 的 `sync`、`push` 一律先逐列合併，再寫回 Sheets；`pull` 在本地合併且保留刪除標記。此例外避免整表覆寫清掉另一端的刪除紀錄或新增項目。
+- 明確重新加入項目才可恢復，並由 `restored_from` 記錄已觀察到的刪除版本。請保留這三個同步欄位，不要自行編輯。
+- 舊版六欄 Sheets 可在首次同步時隨資料一併升級；所有同步端必須先升級此版本，再恢復跨機同步，避免舊程式移除新欄位。
+- Google Sheets 沒有提供此流程所需的整表條件式提交；目前可偵測本地快照過期，但多台同時寫 Sheets 仍需錯開操作並再次同步確認。離線測試不代表真實帳號或多機同步已驗收。
+
+資料庫 migration 1–5 保留既有歷史校驗碼；從 migration 6 起使用固定 SQL 與不可變校驗碼，升級與紀錄在同一交易提交。遇到校驗碼不符會停止開啟，請先備份資料庫並核對程式版本，不要手動改寫校驗碼。

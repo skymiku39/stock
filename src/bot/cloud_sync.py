@@ -196,7 +196,10 @@ def _timestamp_value(value: Any) -> dt.datetime:
     if not text:
         return dt.datetime.min
     try:
-        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone(dt.timedelta(hours=8)))
+        return parsed.astimezone(dt.timezone.utc).replace(tzinfo=None)
     except ValueError:
         # 不可解析的時間不應該贏過可解析的時間；同時保留原字串供衝突報告。
         return dt.datetime.min
@@ -265,7 +268,13 @@ def _validate_remote_rows(table: str, rows: Iterable[Dict[str, Any]]) -> None:
 def _prefer_row(
     left: Dict[str, Any],
     right: Dict[str, Any],
+    table: str = "",
 ) -> Tuple[Dict[str, Any], str]:
+    if table == "watchlist":
+        from bot.watchlist_repository import choose_watchlist_row
+        selected = choose_watchlist_row(left, right)
+        if selected is not None:
+            return selected, "left" if selected is left else "right"
     left_ts = _timestamp_value(left.get("updated_at"))
     right_ts = _timestamp_value(right.get("updated_at"))
     if right_ts > left_ts:
@@ -290,13 +299,13 @@ def merge_rows_by_key(
         if key not in local_map:
             local_map[key] = dict(row)
         else:
-            local_map[key], _ = _prefer_row(local_map[key], dict(row))
+            local_map[key], _ = _prefer_row(local_map[key], dict(row), table)
     for index, row in enumerate(remote_rows):
         key = _row_identity(table, row, side="remote", index=index)
         if key not in remote_map:
             remote_map[key] = dict(row)
         else:
-            remote_map[key], _ = _prefer_row(remote_map[key], dict(row))
+            remote_map[key], _ = _prefer_row(remote_map[key], dict(row), table)
 
     ordered_keys = list(local_map)
     ordered_keys.extend(key for key in remote_map if key not in local_map)
@@ -319,12 +328,9 @@ def merge_rows_by_key(
             continue
         local_ts = _timestamp_value(local.get("updated_at"))
         remote_ts = _timestamp_value(remote.get("updated_at"))
-        if remote_ts > local_ts:
-            merged.append(remote)
-            decision = "remote"
-        else:
-            merged.append(local)
-            decision = "local"
+        selected, side = _prefer_row(local, remote, table)
+        merged.append(selected)
+        decision = "remote" if side == "right" else "local"
         if remote_ts == local_ts:
             conflicts.append(RowConflict(
                 table=table,
@@ -462,6 +468,10 @@ class GoogleSheetSync:
                 if repair_header:
                     ws.update("A1", [columns])
             elif existing != columns:
+                if table == "watchlist" and existing == columns[:6]:
+                    # Legacy schema is a known prefix. Read using that header;
+                    # only the complete merged write may add the new columns.
+                    return ws
                 if not repair_header:
                     raise ValueError(
                         f"worksheet {table} 欄位不符；為保護資料，拒絕自動改寫 header"
@@ -485,6 +495,8 @@ class GoogleSheetSync:
     # ----- push (本地 → 雲端) -----
 
     def push(self, table: str) -> TableSyncResult:
+        if table == "watchlist":
+            return self.sync_row_level(table)
         unsupported = self._unsupported_table_result(table, "push")
         if unsupported is not None:
             return unsupported
@@ -520,7 +532,7 @@ class GoogleSheetSync:
                 return TableSyncResult(table=table, direction="pull",
                                         rows=0, skipped=True,
                                         note="雲端 worksheet 是空的；保留本地資料")
-            if header != cols_local:
+            if header != cols_local and not (table == "watchlist" and header == cols_local[:6]):
                 return TableSyncResult(
                     table=table,
                     direction="pull",
@@ -538,8 +550,10 @@ class GoogleSheetSync:
             typed_rows = [_coerce_row(table, cols_local, r) for r in rows]
             local_rows = self.db.fetch_all_rows(table)
             safe_rows = _sanitize_remote_rows(table, local_rows, typed_rows)
+            if table == "watchlist":
+                safe_rows = merge_rows_by_key(table, local_rows, safe_rows).rows
             _validate_remote_rows(table, safe_rows)
-            n = self.db.replace_table_rows(table, safe_rows)
+            n = self.db.replace_table_rows(table, safe_rows, expected_rows=local_rows)
             self.db.mark_pulled(table, n)
             return TableSyncResult(table=table, direction="pull", rows=n)
         except Exception as e:
@@ -582,8 +596,8 @@ class GoogleSheetSync:
     def sync_row_level(self, table: str) -> TableSyncResult:
         """依主鍵合併 local/remote，保留兩端各自新增的歷史列。
 
-        這個方法不取代舊的 ``sync``，以免既有排程突然改變行為；CLI 可用
-        ``--row-level`` 啟用，完成一次驗證後再把它設成正式預設。
+        Watchlist 的 sync/push 固定走此路徑以保留刪除標記。其他表仍可
+        明確選擇舊的整表 sync，CLI 預設使用逐列合併。
         """
         unsupported = self._unsupported_table_result(table, "sync-row-level")
         if unsupported is not None:
@@ -600,7 +614,7 @@ class GoogleSheetSync:
             ws = self._get_or_create_worksheet(
                 table, columns, repair_header=False,
             )
-            _, remote_raw = self._worksheet_to_rows(ws)
+            remote_header, remote_raw = self._worksheet_to_rows(ws)
             remote_rows = [_coerce_row(table, columns, row) for row in remote_raw]
             local_rows = self.db.fetch_all_rows(table)
             safe_remote_rows = _sanitize_remote_rows(table, local_rows, remote_rows)
@@ -625,9 +639,9 @@ class GoogleSheetSync:
                 )
 
             local_changed = signature(local_rows) != signature(merge.rows)
-            remote_changed = signature(remote_rows) != signature(merge.rows)
+            remote_changed = remote_header != columns or signature(remote_rows) != signature(merge.rows)
             if local_changed:
-                n_local = self.db.replace_table_rows(table, merge.rows)
+                n_local = self.db.replace_table_rows(table, merge.rows, expected_rows=local_rows)
                 self.db.mark_pulled(table, n_local)
             if remote_changed:
                 n_remote = self._write_rows(ws, columns, merge.rows)
@@ -659,6 +673,8 @@ class GoogleSheetSync:
     # ----- sync (雙向自動，依 updated_at 最大值) -----
 
     def sync(self, table: str) -> TableSyncResult:
+        if table == "watchlist":
+            return self.sync_row_level(table)
         unsupported = self._unsupported_table_result(table, "sync")
         if unsupported is not None:
             return unsupported
