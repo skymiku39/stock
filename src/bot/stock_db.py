@@ -4297,6 +4297,8 @@ def _prepare_provenance(item: Any, *, ohlcv: bool = False) -> None:
         )
         if errors:
             item.quality_status = "invalid"
+            if any("is not finite" in error for error in errors):
+                raise ValueError("拒絕寫入非有限 OHLCV 數值: " + "; ".join(errors))
             if hasattr(item, "note"):
                 note = str(getattr(item, "note", "") or "")
                 marker = "quality: " + "; ".join(errors)

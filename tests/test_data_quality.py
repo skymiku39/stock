@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from bot.data_quality import (
     QUALITY_INVALID,
     QUALITY_OK,
@@ -85,6 +87,32 @@ def test_validate_ohlcv_catches_inconsistent_prices() -> None:
         volume=10,
     )
     assert "OHLC invariant violated" in errors
+
+
+@pytest.mark.parametrize("field", ["open_price", "high", "low", "close", "volume", "amount"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "NaN", "Infinity"])
+def test_ohlcv_rejects_nonfinite_values(field, value):
+    values = dict(open_price=100, high=110, low=90, close=105, volume=10, amount=1000)
+    values[field] = value
+    assert any("not finite" in error for error in validate_ohlcv(**values))
+
+
+def test_ohlcv_accepts_finite_and_explicit_all_zero_bars():
+    assert validate_ohlcv(open_price=100, high=110, low=90, close=105, volume=0) == []
+    assert validate_ohlcv(open_price=0, high=0, low=0, close=0, volume=0) == []
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_bar_cannot_overwrite_canonical_history(tmp_path, value):
+    from bot.stock_db import PriceBar
+    db = StockDB.open(path=tmp_path / "finite.db")
+    try:
+        db.upsert_price_bar(PriceBar(symbol="2330", date="2026-10-07", open=100, high=110, low=90, close=105))
+        with pytest.raises(ValueError, match="OHLCV"):
+            db.upsert_price_bar(PriceBar(symbol="2330", date="2026-10-07", open=100, high=110, low=90, close=value))
+        assert db.fetch_all_rows("price_history")[0]["close"] == 105
+    finally:
+        db.close()
 
 
 def test_evidence_id_is_stable_and_has_trace_fields() -> None:

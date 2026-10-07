@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
@@ -81,8 +82,11 @@ def validate_ohlcv(
     }.items():
         try:
             parsed = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             errors.append(f"{name} is not numeric")
+            continue
+        if not math.isfinite(parsed):
+            errors.append(f"{name} is not finite")
             continue
         values[name] = parsed
         if parsed < 0:
