@@ -10,6 +10,26 @@
 
 Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表分析的台股策略機器人，核心採用 **Market Source / Broker / Strategy** 分層架構，讓行情來源、下單執行與策略邏輯彼此解耦。
 
+## 研究功能的設計框架
+
+研究功能沿用 Python、Streamlit、Pydantic 與 SQLite，採模組化單體逐步分層。
+新增功能的依賴方向為「Dashboard／CLI → 應用操作 → 領域規則與資料存取介面 → SQLite／外部來源」。
+畫面負責輸入、呈現與錯誤回饋；交易、版本衝突和來源驗證放在可獨立測試的模組。
+
+Watchlist 已建立第一個完整邊界：`watchlist.py` 管理應用操作與 JSON 衍生快照，
+`watchlist_repository.py` 管理 SQLite 交易、版本檢查和刪除標記；`StockDB` 保留既有 DAO 相容入口。
+從 migration 6 起，`schema_migrations.py` 管理不可變的增量升級。
+Sheets 是同步介面；SQLite 是本機持久狀態，JSON 是可重建快照。
+跨機合併與升級限制見 [cloud_sync_setup.md](cloud_sync_setup.md#watchlist-保存與刪除規則)。
+
+回答流程保留 `SourceRegistry → canonical／evidence → QueryPlan／EvidencePack → answer_verifier`。
+驗證範圍是來源可追溯、引文支持與回答覆蓋；不將詞彙相似度視為語意正確。
+排程則分開保存程序心跳與各任務結果，詳見 [operations.md](operations.md)。
+
+目前 `dashboard/pages.py` 與 `stock_db.py` 仍包含大量既有職責。後續可依研究問答、來源管理、
+持股清單等功能逐一抽出應用模組，再拆畫面與 DAO；每次保留相容入口並跑相應契約測試。
+多使用者權限、跨機強一致同步與正式部署仍需獨立設計及實機驗證。
+
 ## 執行模式
 
 | 模式 | 行情來源 | 登入 Shioaji | 啟用 CA | 下單 | 主要輸出 |
