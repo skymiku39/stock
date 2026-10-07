@@ -88,8 +88,23 @@ def _render_sidebar_quick_controls() -> None:
             st.sidebar.caption(
                 f"排程狀態: {state} · worker PID {status_pid} · 最近任務: {last_job} {last_at}"
             )
-            if status.get("last_success") is False or state == "degraded":
+            jobs = status.get("jobs") or {}
+            failed_jobs = [name for name, entry in jobs.items()
+                           if entry.get("state") in {"failed", "timed_out", "interrupted"}]
+            if failed_jobs:
+                st.sidebar.warning("尚未成功重跑的任務：" + "、".join(failed_jobs))
+            elif (not jobs and status.get("last_success") is False) or state == "degraded":
                 st.sidebar.warning(f"排程最近一次任務失敗：{status.get('last_error') or '請查看日誌'}")
+            if jobs:
+                labels = {"running": "執行中", "succeeded": "成功", "failed": "失敗",
+                          "timed_out": "逾時", "interrupted": "中斷", "dry_run": "僅演練"}
+                with st.sidebar.expander("各任務執行結果"):
+                    for name, entry in sorted(jobs.items()):
+                        job_state = str(entry.get("state") or "unknown")
+                        st.caption(f"{name}：{labels.get(job_state, job_state)}")
+                        st.caption(f"最近成功：{entry.get('last_success_at') or '尚無成功紀錄'}")
+                        if entry.get("error"):
+                            st.caption(str(entry["error"]))
         else:
             st.sidebar.caption("排程正在啟動，等待第一個心跳...")
 
