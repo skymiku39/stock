@@ -172,7 +172,7 @@ def build_snapshot(
     auto_fill_missing: bool = True,
     auto_llm: bool = True,
     macro_cache_only: bool = False,
-    allow_live_sources: bool = True,
+    allow_live_sources: Optional[bool] = None,
 ) -> TickerSnapshot:
     """整合所有資料源，組出單一個股快照。
 
@@ -181,10 +181,12 @@ def build_snapshot(
             不因本地缺資料而自動補抓外部資料源。
         auto_llm: False 時不在 snapshot 組裝期間自動呼叫 Gemini。
         macro_cache_only: True 時 macro 只讀本地快取，避免快速頁面卡在外部 API。
-        allow_live_sources: False 時不從 MOPS／行事曆組合即時素材；供
-            ``!ask`` 等唯讀熱路徑使用。
+        allow_live_sources: 預設跟隨 auto_fill_missing；False 時不從 MOPS／
+            行事曆組合即時素材。可明確設為 True 單獨允許補抓素材。
     """
     log = get_logger("ticker-view")
+    if allow_live_sources is None:
+        allow_live_sources = auto_fill_missing
     snap = TickerSnapshot(
         ticker=ticker,
         name=name_hint,

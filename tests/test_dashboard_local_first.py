@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pandas as pd
 
@@ -68,6 +69,8 @@ def test_macro_cache_only_hit_reads_local_cache(monkeypatch, tmp_path: Path) -> 
 
 
 def test_build_snapshot_local_first_does_not_auto_fill(monkeypatch, tmp_path: Path) -> None:
+    live_sections = Mock(return_value={})
+    monkeypatch.setattr("bot.auto_llm.build_live_source_sections", live_sections)
     fund_refresh_calls: list[bool] = []
     tech_refresh_calls: list[bool] = []
     macro_cache_only_calls: list[bool] = []
@@ -125,3 +128,4 @@ def test_build_snapshot_local_first_does_not_auto_fill(monkeypatch, tmp_path: Pa
     assert fund_refresh_calls == [False]
     assert tech_refresh_calls == [False]
     assert macro_cache_only_calls == [True]
+    live_sections.assert_not_called()
