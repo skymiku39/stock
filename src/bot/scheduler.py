@@ -36,6 +36,7 @@ from bot.config import Settings
 from bot.events import SchedulerJobCompleted, SchedulerStarted
 from bot.events.protocols import EventPublisher
 from bot.events.wiring import publish_if_bus
+from bot.job_process import run_with_deadline
 from bot.utils import get_logger, now_tw
 
 # 台股交易時段 (含盤前/盤後緩衝)，用於 market_hours_only 判斷。
@@ -158,10 +159,16 @@ class Scheduler:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.status_path = self.project_root / "data" / "scheduler_status.json"
         self._stop = threading.Event()
+        self._status_lock = threading.RLock()
         self.jobs: List[Job] = self._build_jobs()
         self._monitor_runner = None  # 延遲建立，避免無謂 import
 
-    def _write_status(
+    def _write_status(self, state: str, **kwargs) -> None:
+        # Heartbeat and concurrent job completions must not lose each other's updates.
+        with self._status_lock:
+            self._write_status_unlocked(state, **kwargs)
+
+    def _write_status_unlocked(
         self,
         state: str,
         *,
@@ -169,6 +176,9 @@ class Scheduler:
         last_job: Optional[str] = None,
         last_success: Optional[bool] = None,
         last_error: Optional[str] = None,
+        job_state: Optional[str] = None,
+        job_exit_code: Optional[int] = None,
+        job_log_path: Optional[str] = None,
     ) -> None:
         """Publish a durable heartbeat for the dashboard and diagnostics."""
         try:
@@ -194,6 +204,25 @@ class Scheduler:
                 payload["last_success"] = last_success
             if last_error is not None:
                 payload["last_error"] = last_error
+            jobs = dict(previous.get("jobs") or {})
+            if state == "starting":
+                for name, prior in jobs.items():
+                    if prior.get("state") == "running":
+                        jobs[name] = {**prior, "state": "interrupted", "finished_at": heartbeat,
+                                      "error": "scheduler restarted before completion was recorded"}
+            if last_job is not None and job_state is not None:
+                entry = dict(jobs.get(last_job) or {})
+                entry.update(state=job_state, error=last_error or "", exit_code=job_exit_code)
+                if job_log_path is not None:
+                    entry["log_path"] = job_log_path
+                if job_state == "running":
+                    entry.update(started_at=heartbeat, finished_at="")
+                else:
+                    entry["finished_at"] = heartbeat
+                if job_state == "succeeded":
+                    entry["last_success_at"] = heartbeat
+                jobs[last_job] = entry
+            payload["jobs"] = jobs
             # Use a process/thread-specific temporary file.  A fixed
             # ``scheduler_status.tmp`` lets two scheduler instances race on
             # Windows, where one process can replace/delete the other's open
@@ -430,10 +459,10 @@ class Scheduler:
 
     def _run_job(self, job: Job, now: Optional[dt.datetime] = None) -> int:
         scheduled_at = now or now_tw()
-        self._write_status("running", last_job=job.name)
         cmd = _resolve_cmd(job.console_script, job.module, self._job_extra_args(job, scheduled_at))
         ts = time.strftime("%Y%m%d_%H%M%S")
         log_path = self.log_dir / f"scheduler_{job.name}_{ts}.log"
+        self._write_status("running", last_job=job.name, job_state="running", job_log_path=str(log_path))
         self.logger.info("▶ 執行任務 %s: %s → %s", job.name, " ".join(cmd), log_path.name)
         rc = 0
         if self.dry_run:
@@ -451,24 +480,33 @@ class Scheduler:
                     log_path=str(log_path),
                 ),
             )
-            self._write_status("running", last_job=job.name, last_success=True, last_error="")
+            self._write_status("running", last_job=job.name, last_error="", job_state="dry_run", job_exit_code=0)
             return 0
 
         env = _child_env(self.project_root)
+        error = ""
+        job_state = "failed"
         try:
             with open(log_path, "w", encoding="utf-8", buffering=1) as fp:
                 fp.write(f"# job={job.name} cmd={' '.join(cmd)} start={ts}\n# ---\n")
                 fp.flush()
-                rc = subprocess.run(
+                rc = run_with_deadline(
                     cmd, cwd=str(self.project_root), env=env,
-                    stdout=fp, stderr=subprocess.STDOUT,
-                ).returncode
+                    stdout=fp, timeout=self.settings.scheduler_job_timeout_seconds,
+                )
                 fp.write(f"\n# ---\n# exit_code: {rc}\n")
             level = self.logger.info if rc == 0 else self.logger.warning
             level("■ 任務 %s 結束 (exit=%s)", job.name, rc)
-        except Exception:
+            job_state = "succeeded" if rc == 0 else "failed"
+        except subprocess.TimeoutExpired:
+            rc = 124
+            job_state = "timed_out"
+            error = f"timeout after {self.settings.scheduler_job_timeout_seconds}s"
+            self.logger.warning("任務 %s 逾時：%s", job.name, error)
+        except Exception as exc:
             self.logger.exception("任務 %s 執行失敗", job.name)
             rc = -1
+            error = f"{type(exc).__name__}: {exc}"
         finally:
             job.last_run_epoch = time.time()
             if job.run_once_per_day and rc == 0:
@@ -487,7 +525,9 @@ class Scheduler:
                 "running",
                 last_job=job.name,
                 last_success=rc == 0,
-                last_error="" if rc == 0 else f"exit_code={rc}",
+                last_error="" if rc == 0 else error or f"exit_code={rc}",
+                job_state=job_state,
+                job_exit_code=rc,
             )
         return rc
 

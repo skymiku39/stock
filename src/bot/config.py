@@ -337,6 +337,7 @@ class Settings(BaseSettings):
     # 讓資料更新與盤中監測「持續自動執行」，不需開著儀表板。
     scheduler_enabled: bool = True
     scheduler_tick_seconds: int = 30          # 主迴圈每隔幾秒檢查一次有無到期任務
+    scheduler_job_timeout_seconds: int = Field(default=3600, ge=1)
     # 輕量行情/總經刷新 (不打 LLM，成本低)；<=0 停用
     scheduler_macro_interval_min: int = 30
     scheduler_fundamentals_interval_min: int = 360

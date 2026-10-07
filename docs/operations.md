@@ -2,6 +2,15 @@
 
 Windows 常駐排程與 Task Scheduler 設定請見 [automation-plan.md](automation-plan.md)；本手冊其餘章節列出日常人工操作與 log 檢查。
 
+排程任務的執行上限由 `SCHEDULER_JOB_TIMEOUT_SECONDS` 設定，預設 3600 秒且必須大於 0。
+逾時會終止該任務的子行程樹、釋放任務鎖並記錄 exit code 124；完成前已提交的資料不會自動回滾。
+盤中長駐 monitor 有獨立啟停生命週期，不套用這個單次任務上限。
+
+`data/scheduler_status.json` 的 `heartbeat_at` 只表示排程器存活。檢查實際成果請看
+`jobs.<任務>.state`、`exit_code`、`started_at`、`finished_at`、`last_success_at` 與 `log_path`。
+狀態分為 `running`、`succeeded`、`failed`、`timed_out`、`interrupted`、`dry_run`；
+啟動時若發現上次仍為 running，會標記 interrupted。dry-run 不更新真正的成功時間。
+
 ## 零、研究系統整合體檢（唯讀）
 
 交易用 `stock-preflight` 與研究系統的整合體檢是兩個不同入口。每天啟動研究或

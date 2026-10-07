@@ -49,7 +49,7 @@ def test_scheduler_research_extra_args_parsed() -> None:
 
     sch = Scheduler(_settings(scheduler_research_args="--no-brief --days 3"), dry_run=True)
     research = next(j for j in sch.jobs if j.name == "research")
-    assert research.extra_args == ["--no-brief", "--days", "3"]
+    assert research.extra_args == ["--no-brief", "--days", "3", "--auto-research-limit", "12"]
 
 
 def test_scheduler_fundamentals_extra_args_parsed() -> None:
