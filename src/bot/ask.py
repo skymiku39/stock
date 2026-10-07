@@ -90,11 +90,10 @@ _RESOURCE_KIND_MAP = {
     "macro": {"macro"},
     "news": {"news", "news_cache"},
     "ticker_snapshot": {"ticker_snapshot"},
-    # MOPS details are intentionally stored as ``kind=news`` for compatibility
-    # with the existing evidence schema, but remain a distinct required
-    # resource in QueryPlan so official announcements are not hidden inside a
-    # generic news fallback.
-    "mops": {"news"},
+    # Official research emits kind=mops_material; legacy MOPS rows use
+    # kind=news with source=mops. Matching also checks source (see
+    # ``_evidence_matches_resource``) so generic news cannot satisfy mops.
+    "mops": {"mops_material", "news"},
     "taifex": {"taifex_futures"},
 }
 
@@ -230,6 +229,9 @@ def _memory_to_evidence(row: MemoryItemRow) -> Dict[str, Any]:
 def _evidence_matches_resource(item: Dict[str, Any], resource: str) -> bool:
     """判斷證據能否滿足某個 QueryPlan resource。"""
     kind = str(item.get("kind") or "")
+    if resource == "mops":
+        source = str(item.get("source") or "")
+        return source == "mops" and kind in {"mops_material", "news"}
     return kind in _RESOURCE_KIND_MAP.get(resource, {resource})
 
 
@@ -854,6 +856,7 @@ class AskEngine:
                     quality_status=valuation.quality_status,
                     source_document_id=valuation_source_id,
                     provenance_status="exact" if valuation_source_id else "unresolved",
+                    metadata={"symbol": valuation.symbol},
                 ))
 
             dividends = [
@@ -883,12 +886,13 @@ class AskEngine:
                     as_of=str(dividend.year),
                     retrieved_at=dividend.retrieved_at,
                     excerpt=(
-                        f"{dividend.symbol} {dividend.year} 現金股利 {dividend.cash_dividend:g}、"
+                        f"{dividend.symbol} {dividend.year} 現金股利 {dividend.cash_dividend:g} 元、"
                         f"股票股利 {dividend.stock_dividend:g}"
                     ),
                     quality_status=dividend.quality_status,
                     source_document_id=dividend_source_id,
                     provenance_status="exact" if dividend_source_id else "unresolved",
+                    metadata={"symbol": dividend.symbol},
                 ))
 
             quarterlies = self.db.get_quarterly_report(plan.ticker)

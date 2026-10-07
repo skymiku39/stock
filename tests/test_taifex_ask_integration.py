@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
 from pathlib import Path
 
 from bot.ask_adapters import collect_snapshot_resource_evidence
@@ -62,7 +63,10 @@ def test_ask_snapshot_uses_exact_taifex_evidence(tmp_path: Path) -> None:
         db.close()
 
 
-def test_ask_engine_collects_market_level_taifex_without_ticker(tmp_path: Path) -> None:
+def test_ask_engine_collects_market_level_taifex_without_ticker(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "bot.evidence.now_tw", lambda: dt.datetime.fromisoformat("2026-09-18T12:00:00+08:00"),
+    )
     raw = json.dumps([{
         "Contract": "TX",
         "ContractMonth(Week)": "202610",

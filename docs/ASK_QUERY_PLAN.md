@@ -143,9 +143,12 @@ resource need 並 abstain，明確表示未找到可驗證的專業來源。
 ## 邊界
 
 - QueryPlan 是資源選擇，不是投資建議。
-- Evidence ID linkage 加上原文片段、數字與關鍵詞的保守核對，是目前的最低來源
-  驗證，不等於完整語意真偽證明；回答還要求 `confidence` 為 0 到 1 的有限數字，
-  格式或主張支持不合格就 abstain。後續若部署本地 NLI／embedding 模型，也應放在
+- `claims.text` 必須是所引用 excerpt 的可核對摘錄；不再用關鍵詞重疊推論支持。
+  回答正文逐句檢查與 claims／同一來源的一致性，數值以完整 token 核對，避免
+  把 `110%` 視為 `10%`，或將「上升」改寫為「下降」後仍通過。
+  `verification.scope=source_grounding` 與 `verified` 表示來源核對通過，
+  不等於完整語意真偽證明；`confidence` 仍須為 0 到 1 的有限數字。
+  無法核對的改寫會保守拒答。後續若部署本地 NLI／embedding 模型，也應放在
   這個 verifier 後面，不能取代來源 ID 與時間／品質閘門。
 - 回答驗證失敗時最多再呼叫一次 `ask_answer`；第二次仍不合格就停止，避免無限
   回爐與 token／延遲失控。repair 不會取得新的來源，也不能放寬原本的 QueryPlan。

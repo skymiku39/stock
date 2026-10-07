@@ -1,5 +1,5 @@
 id: ask_answer
-version: "1.1"
+version: "1.2"
 description: !ask 證據限定回答
 model_hint: gemini-2.5-flash
 max_output_tokens: 2048
@@ -45,6 +45,11 @@ template: |
 
   規則：
   - 每個重要主張都放入 claims，並列出實際支援它的 evidence_ids。
+  - claims.text 必須摘錄某一筆 evidence 的 excerpt 原文，不可改寫增減方向、
+    公司、指標、期間或單位，也不可省略「不／未／預計／可能」等限定語。
+  - answer 以已列出的 claims 原文逐句組成，用句號分隔；保留數值、期間與單位。
+    不得在正文加上 claims 沒有支持的解釋或因果關係。
+  - 通過驗證只表示來源原文可核對，不代表來源內容或預測已被證明正確。
   - evidence_ids 只能使用 EvidencePack 方括號內的 ID。
   - 若資料不足、來源衝突或問題要求的資源尚未取得，answer 必須直接說「我不確定」，
     並清楚指出原因；不要用常識補空白。

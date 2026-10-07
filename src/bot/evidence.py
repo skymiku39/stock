@@ -23,16 +23,20 @@ FRESHNESS_WINDOWS = {
 # 財報與營收的 observed_at 通常代表「資料所屬期間」，不是抓取時間。
 # 技術面 last_date、籌碼彙總日、macro asof 亦同：在 schema 尚未分離
 # as_of / retrieved_at 前，不可因超過 24h 就誤判不可用。
-# quarterly_report 依 ASK／Evidence 契約同樣以 retrieved_at 判斷 freshness。
+# quarterly_report／valuation_daily／dividend_history 依 ASK／Evidence
+# 契約以 retrieved_at 判斷 freshness；估值／股利嚴格窗口不 fallback。
 PERIOD_BASED_KINDS = {
     "fundamental",
     "monthly_revenue",
     "quarterly_report",
+    "valuation_daily",
+    "dividend_history",
     "technical",
     "chips",
     "etf",
     "macro",
 }
+_RETRIEVAL_ONLY_PERIOD_KINDS = frozenset({"valuation_daily", "dividend_history"})
 
 # quality_status = 內容品質；provenance_status = 能否回到 exact raw document。
 # 兩者必須分離：缺少 source_document_id 不代表資料內容錯誤。
@@ -290,7 +294,8 @@ def is_evidence_fresh(
 
     ``as_available``／``unbounded`` 不做時間淘汰。期間型資料使用
     ``retrieved_at`` 判斷「最近是否重新取得」，而不是把財務期間的
-    ``as_of`` 誤當成抓取時間；沒有 retrieved time 時採保守策略視為過期。
+    ``as_of`` 誤當成抓取時間。估值／股利嚴格窗口只接受 ``retrieved_at``；
+    缺擷取時間視為過期。其他期間型保留 ``observed_at`` fallback 相容舊資料。
     """
     policy = str(freshness or "as_available").strip().lower()
     if policy in {"as_available", "unbounded"}:
@@ -299,7 +304,10 @@ def is_evidence_fresh(
     if window is None:
         return False
     kind = str(item.get("kind") or "").strip().lower()
-    if kind in PERIOD_BASED_KINDS:
+    if kind in _RETRIEVAL_ONLY_PERIOD_KINDS:
+        # 估值／股利的 observed_at 是資料期間，不能取代缺失的擷取時間。
+        observed = _parse_observed_at(item.get("retrieved_at"))
+    elif kind in PERIOD_BASED_KINDS:
         observed = _parse_observed_at(
             item.get("retrieved_at") or item.get("observed_at")
         )

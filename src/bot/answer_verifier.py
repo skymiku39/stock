@@ -24,7 +24,8 @@ class VerificationResult:
     claim_support: List[Dict[str, Any]] = field(default_factory=list)
     conflicts: List[Dict[str, Any]] = field(default_factory=list)
     numeric_checks: List[Dict[str, Any]] = field(default_factory=list)
-    method: str = "evidence_id_linkage+lexical_claim_support+numeric_date_checks"
+    method: str = "evidence_id_linkage+extractive_claim_support+answer_coverage+numeric_date_checks"
+    scope: str = "source_grounding"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -35,6 +36,7 @@ class VerificationResult:
             "conflicts": list(self.conflicts),
             "numeric_checks": list(self.numeric_checks),
             "method": self.method,
+            "scope": self.scope,
         }
 
 
@@ -66,10 +68,103 @@ _MEASUREMENT_UNITS = (
 )
 
 
+def _normalized_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+    # Formatting differences are harmless; changes to the value are not.
+    text = re.sub(r"(\d+)\.(\d+)", lambda m: (
+        m[1] + ("." + m[2].rstrip("0") if m[2].rstrip("0") else "")
+    ), text)
+    return text
+
+
 def _match_text(value: Any) -> str:
     """建立適合保守比對的文字；不做同義詞推論。"""
-    text = unicodedata.normalize("NFKC", str(value or "")).lower()
-    return _PUNCT_RE.sub("", text)
+    return _PUNCT_RE.sub("", _normalized_text(value))
+
+
+def _number_tokens(value: Any) -> Set[str]:
+    text = unicodedata.normalize("NFKC", str(value or "")).replace(",", "")
+    return {_match_text(token) for token in _NUMBER_RE.findall(text)}
+
+
+def _contains_statement(statement: str, source: str) -> bool:
+    """Require an extractive match, including complete numeric/ASCII tokens.
+
+    A percentage substring (10% inside 110%) or removal of an immediately
+    preceding negation/forecast qualifier must not establish support.
+    This establishes source grounding, not semantic truth or an NLI score.
+    """
+    needle = _match_text(statement)
+    original = _normalized_text(source)
+    positions = [m.start() for m in re.finditer(r"[0-9a-z\u3400-\u9fff%+\-.]", original)]
+    haystack = "".join(original[pos] for pos in positions)
+    if not needle:
+        return False
+    for match in re.finditer(re.escape(needle), haystack):
+        left = original[:positions[match.start()]]
+        right = original[positions[match.end() - 1] + 1:]
+        if left and re.match(r"[a-z0-9.+-]", needle[0]) and re.match(r"[a-z0-9.+-]", left[-1]):
+            continue
+        if right and re.match(r"[a-z0-9.]", needle[-1]) and (
+            re.match(r"[a-z0-9%]", right[0]) or re.match(r"\.\d", right)
+        ):
+            continue
+        if re.search(r"(?:並非|不是|不代表|否認|沒有|未證實|不|未|預計|預估|估計|可能|預測)$", left.rstrip()):
+            continue
+        return True
+    return False
+
+
+_ATTRIBUTION_RE = re.compile(
+    r"^(?:根據|依據)\s*(?:公告|來源|證據|資料|本地資料|本地估值|本地股利資料|"
+    r"本地營收資料|MOPS|TWSE|TPEx|TAIFEX)[，,:：]\s*", re.IGNORECASE,
+)
+
+
+def _answer_covered_by_claims(
+    answer: str, claims: List[Any], usable_by_id: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Every factual clause must come from a claim and its linked source.
+
+    Permit a known entity prefix on canonical evidence (e.g. ``2330 PER 20``),
+    but never take a prefix from another claim/evidence to invent a relation.
+    """
+    text = unicodedata.normalize("NFKC", answer)
+    text = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", text)
+    text = _ATTRIBUTION_RE.sub("", text.strip())
+    clauses = re.split(r"[。！？!?；;，,\n]+|(?<!\d)\.(?!\d)", text)
+    for raw in clauses:
+        clause = _ATTRIBUTION_RE.sub("", raw.strip())
+        if not _match_text(clause):
+            continue
+        covered = False
+        for claim in claims:
+            if not isinstance(claim, Mapping):
+                continue
+            statement = str(claim.get("text") or claim.get("statement") or "")
+            if not _contains_statement(statement, clause):
+                continue
+            for evidence_id in _as_ids(claim.get("evidence_ids")):
+                item = usable_by_id.get(evidence_id)
+                if item is None:
+                    continue
+                source = str(item.get("excerpt") or "")
+                if not _contains_statement(statement, source):
+                    continue
+                metadata = item.get("metadata") or {}
+                symbol = str(metadata.get("symbol") or metadata.get("ticker") or "") if isinstance(metadata, Mapping) else ""
+                if (
+                    _match_text(clause) == _match_text(statement)
+                    or _contains_statement(clause, source)
+                    or (symbol and _match_text(clause) == _match_text(symbol + statement))
+                ):
+                    covered = True
+                    break
+            if covered:
+                break
+        if not covered:
+            return False
+    return True
 
 
 def _claim_anchors(value: Any) -> List[str]:
@@ -109,40 +204,12 @@ def _claim_support(
     statement: str,
     evidence_items: Iterable[Mapping[str, Any]],
 ) -> tuple[float, List[str]]:
-    """回傳最佳文字支持分數與匹配的 evidence IDs。
-
-    這不是 NLI 或事實真偽證明，而是回答送出前的低成本保守閘門：數字若出現
-    於主張中必須在來源片段中出現；文字主張至少要有足夠的原文片段重疊。
-    """
-    claim_text = _match_text(statement)
-    if not claim_text:
-        return 0.0, []
-    claim_numbers = [token.replace(" ", "") for token in _NUMBER_RE.findall(statement)]
-    anchors = _claim_anchors(statement)
-    best_score = 0.0
-    matched_ids: List[str] = []
-    for item in evidence_items:
-        evidence_id = str(item.get("id") or "")
-        evidence_text = _match_text(
-            " ".join((str(item.get("title") or ""), str(item.get("excerpt") or "")))
-        )
-        if not evidence_text:
-            continue
-        if claim_text in evidence_text:
-            score = 1.0
-        else:
-            if claim_numbers and not all(number in evidence_text for number in claim_numbers):
-                continue
-            overlap = sum(anchor in evidence_text for anchor in anchors)
-            if not anchors or overlap < max(2, math.ceil(len(anchors) * 0.5)):
-                continue
-            score = overlap / len(anchors)
-        if score > best_score:
-            best_score = score
-            matched_ids = [evidence_id]
-        elif score == best_score and score > 0 and evidence_id not in matched_ids:
-            matched_ids.append(evidence_id)
-    return best_score, matched_ids
+    """可核對的原文摘錄才有支持；不以文字重疊推論語意。"""
+    matched_ids = list(dict.fromkeys(
+        str(item.get("id") or "") for item in evidence_items
+        if _contains_statement(statement, str(item.get("excerpt") or ""))
+    ))
+    return (1.0 if matched_ids else 0.0), matched_ids
 
 
 def _claim_conflicts(
@@ -244,15 +311,16 @@ def verify_answer_payload(
     ]
     if not is_uncertain_answer and cited_items:
         answer_numbers, answer_dates = _answer_measurements(answer)
-        cited_text = _match_text(" ".join(
+        cited_text = " ".join(
             str(item.get("title") or "") + " " + str(item.get("excerpt") or "")
             for item in cited_items
-        ))
+        )
+        cited_numbers = _number_tokens(cited_text)
         missing_answer_numbers = [
-            value for value in answer_numbers if _match_text(value) not in cited_text
+            value for value in answer_numbers if _match_text(value) not in cited_numbers
         ]
         missing_answer_dates = [
-            value for value in answer_dates if _match_text(value) not in cited_text
+            value for value in answer_dates if not _contains_statement(value, cited_text)
         ]
         numeric_checks.append({
             "scope": "answer",
@@ -320,7 +388,11 @@ def verify_answer_payload(
                         str(item.get("title") or "") + " " + str(item.get("excerpt") or "")
                         for item in linked_items
                     ))
-                    missing_numbers = [v for v in claim_numbers if v not in linked_text]
+                    linked_numbers = set().union(*(
+                        _number_tokens(str(item.get("title") or "") + " " + str(item.get("excerpt") or ""))
+                        for item in linked_items
+                    ))
+                    missing_numbers = [v for v in claim_numbers if _match_text(v) not in linked_numbers]
                     missing_dates = [v for v in claim_dates if _match_text(v) not in linked_text]
                     numeric_checks.append({
                         "index": index,
@@ -369,6 +441,11 @@ def verify_answer_payload(
                         conflicts.extend({"index": index, **value} for value in claim_conflicts)
                         if not uncertainty and not is_uncertain_answer:
                             errors.append(f"claims[{index}] 的來源存在未解決衝突")
+
+    if not is_uncertain_answer and isinstance(claims, list) and not _answer_covered_by_claims(
+        answer, claims, usable_by_id,
+    ):
+        errors.append("回答正文包含無法由 claims 與其來源原文核對的內容")
 
     return VerificationResult(
         valid=not errors,

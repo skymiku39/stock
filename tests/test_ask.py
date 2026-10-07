@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from bot.ask import AskEngine, UNCERTAIN_ANSWER
+from bot.ask import AskEngine, UNCERTAIN_ANSWER, _evidence_matches_resource
 from bot.answer_verifier import verify_answer_payload
 from bot.evidence import (
     EvidencePack,
@@ -109,17 +109,20 @@ def test_evidence_quota_keeps_news_when_local_evidence_fills_first(
     tmp_path: Path,
 ) -> None:
     engine = AskEngine(root=tmp_path, client=None, enable_live_sources=True)
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(
+        timespec="seconds",
+    )
     news = make_evidence(
         "news",
         source="fixture-news",
-        observed_at="2026-09-19T10:00:00+08:00",
+        observed_at=now,
         excerpt="台積電重大訊息 fixture",
     )
     local = [
         make_evidence(
             "ticker_snapshot",
             source=f"local-{index}",
-            observed_at="2026-09-19T10:00:00+08:00",
+            observed_at=now,
             excerpt=f"local {index}",
         )
         for index in range(8)
@@ -299,6 +302,57 @@ def test_evidence_freshness_is_conservative_for_strict_windows() -> None:
         excerpt="季報",
     )
     assert not is_evidence_fresh(quarterly_without_retrieval, "24h", now=reference)
+
+
+def test_valuation_and_dividend_strict_freshness_uses_retrieved_at_only() -> None:
+    """valuation_daily／dividend_history 嚴格 freshness 只看 retrieved_at。"""
+    reference = dt.datetime(2026, 9, 10, 12, 0, tzinfo=dt.timezone.utc)
+    recent_observed = "2026-09-10T11:55:00+08:00"
+    old_period = "2026-08-01"
+    fresh_retrieved = "2026-09-10T11:00:00+08:00"
+    stale_retrieved = "2026-09-08T11:00:00+08:00"
+
+    for kind in ("valuation_daily", "dividend_history"):
+        missing_retrieval = make_evidence(
+            kind,
+            source="official",
+            observed_at=recent_observed,
+            as_of=old_period,
+            excerpt=kind,
+        )
+        assert not is_evidence_fresh(missing_retrieval, "24h", now=reference)
+
+        fresh_retrieval_old_period = make_evidence(
+            kind,
+            source="official",
+            observed_at=old_period,
+            as_of=old_period,
+            retrieved_at=fresh_retrieved,
+            excerpt=kind,
+        )
+        assert is_evidence_fresh(fresh_retrieval_old_period, "24h", now=reference)
+
+        stale_retrieval = make_evidence(
+            kind,
+            source="official",
+            observed_at=recent_observed,
+            as_of=old_period,
+            retrieved_at=stale_retrieved,
+            excerpt=kind,
+        )
+        assert not is_evidence_fresh(stale_retrieval, "24h", now=reference)
+
+        assert is_evidence_fresh(missing_retrieval, "as_available", now=reference)
+        assert is_evidence_fresh(missing_retrieval, "unbounded", now=reference)
+
+    # 其他期間型仍維持 retrieved_at → observed_at fallback。
+    other_period = make_evidence(
+        "fundamental",
+        source="official",
+        observed_at=recent_observed,
+        excerpt="月營收",
+    )
+    assert is_evidence_fresh(other_period, "24h", now=reference)
 
 
 def test_evidence_keeps_distinct_time_semantics() -> None:
@@ -869,3 +923,135 @@ def test_answer_verifier_rejects_unsupported_number_in_answer_body() -> None:
     assert result.valid is False
     assert any("回答正文的數值" in error for error in result.errors)
     assert result.numeric_checks[0]["missing_numbers"] == ["999"]
+
+
+def test_evidence_matches_mops_material_and_legacy_mops_news() -> None:
+    mops_material = make_evidence(
+        "mops_material",
+        source="mops",
+        excerpt="官方 MOPS 材料",
+    )
+    legacy_mops_news = make_evidence(
+        "news",
+        source="mops",
+        excerpt="既有 MOPS 新聞格式",
+    )
+    generic_news = make_evidence(
+        "news",
+        source="fixture-news",
+        excerpt="一般新聞",
+    )
+
+    assert _evidence_matches_resource(mops_material, "mops") is True
+    assert _evidence_matches_resource(legacy_mops_news, "mops") is True
+    assert _evidence_matches_resource(generic_news, "mops") is False
+    assert _evidence_matches_resource(generic_news, "news") is True
+    assert _evidence_matches_resource(mops_material, "news") is False
+
+
+def test_collect_evidence_rejects_non_mops_news_for_mops_resource(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    engine = AskEngine(root=tmp_path, client=None, enable_live_sources=True)
+    observed = "2026-09-28T10:00:00+08:00"
+    monkeypatch.setattr("bot.evidence.now_tw", lambda: dt.datetime.fromisoformat(observed))
+    generic_news = make_evidence(
+        "news",
+        source="fixture-news",
+        observed_at=observed,
+        published_at=observed,
+        retrieved_at=observed,
+        excerpt="2330 一般新聞 fixture",
+        quality_status="ok",
+    )
+    plan = plan_query("2330 最近重大訊息", ticker="2330")
+    with patch.object(
+        engine, "_collect_local_ticker_evidence", return_value=([], [], []),
+    ), patch("bot.ask.WebSearchAdapter") as web_cls, \
+            patch("bot.ask.MopsAdapter") as mops_cls, \
+            patch("bot.ask.LiveTickerAdapter") as ticker_cls:
+        web_cls.return_value.collect.return_value = ResourceResult(
+            resource="news", evidence=[generic_news], live=True, status="ok",
+        )
+        mops_cls.return_value.collect.return_value = ResourceResult(
+            resource="mops", evidence=[], live=True, status="partial",
+        )
+        ticker_cls.return_value.collect.return_value = ResourceResult(
+            resource="ticker_snapshot", evidence=[], live=True, status="partial",
+        )
+        pack = engine._collect_evidence(plan)
+
+    assert "news" not in pack.missing_resources
+    assert "mops" in pack.missing_resources
+
+
+def test_ask_official_mops_material_prevents_false_missing_mops(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db = StockDB.open(root=tmp_path)
+    observed = "2026-09-28T10:00:00+08:00"
+    monkeypatch.setattr("bot.evidence.now_tw", lambda: dt.datetime.fromisoformat(observed))
+    mops_item = make_evidence(
+        "mops_material",
+        source="mops",
+        source_ref="mops:2330:fixture-material",
+        title="MOPS 官方重大訊息",
+        observed_at=observed,
+        published_at=observed,
+        retrieved_at=observed,
+        excerpt="2330 公布重大訊息 fixture",
+        quality_status="ok",
+    )
+    # Use news_cache so the news resource is met without the legacy kind=news
+    # false-positive that currently also clears the mops requirement.
+    news_item = make_evidence(
+        "news_cache",
+        source="fixture-news",
+        source_ref="news:2330:fixture",
+        title="相關新聞",
+        observed_at=observed,
+        published_at=observed,
+        retrieved_at=observed,
+        excerpt="2330 相關新聞 fixture",
+        quality_status="ok",
+    )
+    MemoryStore(db).put_long(
+        "2330 重大訊息",
+        memory_id="memory:2330:mops-material",
+        summary="2330 官方重大訊息",
+        subject="2330",
+        quality_status="ok",
+        evidence=[mops_item, news_item],
+    )
+    client = MagicMock()
+    client.enabled = True
+    client.model = "test-model"
+    payload = {
+        "answer": "根據 MOPS，2330 公布重大訊息 fixture。",
+        "confidence": 0.9,
+        "evidence_ids": [mops_item["id"]],
+        "claims": [{
+            "text": "2330 公布重大訊息 fixture",
+            "evidence_ids": [mops_item["id"]],
+        }],
+        "uncertainty": "",
+    }
+    with patch("bot.ask.gemini_call", return_value=(
+        json.dumps(payload, ensure_ascii=False),
+        {"prompt_id": "ask_answer", "prompt_version": "1.0"},
+    )) as mocked_call:
+        result = AskEngine(
+            root=tmp_path,
+            db=db,
+            client=client,
+            use_llm_planner=False,
+        ).ask("2330 最近重大訊息", ticker="2330")
+
+    assert "mops" not in result.evidence.missing_resources
+    assert "mops" not in result.pending_resources
+    assert not any("尚未取得必要資源" in err for err in result.verification.errors)
+    assert result.status == "answered"
+    assert result.verified is True
+    assert any(call.args[0] == "ask_answer" for call in mocked_call.call_args_list)
