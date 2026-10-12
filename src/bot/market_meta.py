@@ -117,6 +117,7 @@ def load_market_map(
     root: Optional[Path] = None,
     session: Optional[requests.Session] = None,
     force_refresh: bool = False,
+    cache_only: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, str]:
     """載入 (或建立) 市場別對照表，每日快取一次。"""
@@ -126,6 +127,13 @@ def load_market_map(
         return cached_map
 
     path = _map_path(root)
+    if cache_only:
+        # Rendering a saved report must not start an external lookup or cloud restore.
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            return {str(k): str(v) for k, v in (cached.get("map") or {}).items()}
+        except (OSError, ValueError, AttributeError):
+            return {}
     restore_file_from_cloud(path, root=root)
     today = now_tw().date().isoformat()
     if not force_refresh and path.exists():
@@ -166,13 +174,14 @@ def detect_market(
     *,
     root: Optional[Path] = None,
     session: Optional[requests.Session] = None,
+    cache_only: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> str:
     """回傳個股市場別：'twse'(上市) / 'tpex'(上櫃) / 'unknown'。"""
     ticker = str(ticker).strip()
     if not ticker:
         return UNKNOWN
-    mp = load_market_map(root=root, session=session, logger=logger)
+    mp = load_market_map(root=root, session=session, logger=logger, cache_only=cache_only)
     return mp.get(ticker, UNKNOWN)
 
 
