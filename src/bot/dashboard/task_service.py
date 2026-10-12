@@ -173,7 +173,10 @@ class TaskService:
                 task["kind"], task["params"], self.root,
                 lambda message, fraction=None: self._progress(task["id"], message, fraction),
             )
-            if not isinstance(result, TaskResult):
+            # Streamlit may reload this module while an older supervisor lives.
+            # The dispatcher then returns the newly loaded TaskResult class.
+            from bot.dashboard.task_service import TaskResult as CurrentTaskResult
+            if not isinstance(result, (TaskResult, CurrentTaskResult)):
                 result = TaskResult(result)
             encoded = json.dumps(
                 {"data": result.data, "warnings": result.warnings}, ensure_ascii=False, allow_nan=False,

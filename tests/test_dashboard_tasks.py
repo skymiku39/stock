@@ -177,6 +177,21 @@ def test_missing_numeric_values_are_saved_as_null():
     }
 
 
+def test_supervisor_accepts_result_from_reloaded_module(tmp_path):
+    from dataclasses import make_dataclass
+    from types import FunctionType
+
+    old_result = make_dataclass("TaskResult", ["data"])
+    old_globals = {**TaskService._run.__globals__, "TaskResult": old_result}
+    stale_run = FunctionType(TaskService._run.__code__, old_globals)
+    service = TaskService(tmp_path, lambda *args: TaskResult({"price": 2540}), start=False)
+    task_id = service.submit("ticker", "分析", "個股深入分析", {})
+    stale_run(service, service._claim())
+    row = service.get(task_id)
+    assert row["state"] == "succeeded", row["error"]
+    assert row["result"]["data"] == {"price": 2540}
+
+
 def test_research_partial_failures_keep_successful_results(monkeypatch, tmp_path):
     from bot.dashboard.task_operations import execute_task
 
