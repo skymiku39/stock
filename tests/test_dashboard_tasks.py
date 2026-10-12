@@ -143,6 +143,40 @@ def test_ticker_task_defaults_remain_local_only(monkeypatch, tmp_path):
     assert seen[0]["macro_cache_only"] is True
 
 
+def test_ticker_job_persists_numpy_values_from_technical_calculations(monkeypatch, tmp_path):
+    import numpy as np
+    from bot.dashboard.task_operations import restore_cards
+    from bot.ticker_view import TickerSnapshot
+    from bot.technicals import TechnicalSnapshot
+
+    snapshot = TickerSnapshot(
+        ticker="2330", price=np.float64(100), volume=np.int64(1200),
+        technicals=TechnicalSnapshot(ticker="2330", candle_bias=np.bool_(True)),
+    )
+    monkeypatch.setattr("bot.ticker_view.build_snapshot", lambda *a, **k: snapshot)
+    worker = TaskService(tmp_path)
+    try:
+        task_id = worker.submit("ticker", "分析", "個股深入分析", {"tickers": ["2330"]})
+        task = wait_for(worker, task_id)
+        assert task["state"] == "succeeded", task["error"]
+        restored, _ = restore_cards(task["result"]["data"])[0]
+        assert restored.technicals.candle_bias is True
+        assert restored.price == 100
+        assert restored.volume == 1200
+    finally:
+        worker.close()
+
+
+def test_missing_numeric_values_are_saved_as_null():
+    import numpy as np
+    from bot.dashboard.task_operations import to_data
+
+    data = to_data({"values": np.array([1.0, np.nan, np.inf]), "missing": float("-inf")})
+    assert json.loads(json.dumps(data, allow_nan=False)) == {
+        "values": [1.0, None, None], "missing": None,
+    }
+
+
 def test_research_partial_failures_keep_successful_results(monkeypatch, tmp_path):
     from bot.dashboard.task_operations import execute_task
 

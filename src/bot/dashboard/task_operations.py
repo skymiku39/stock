@@ -4,14 +4,24 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import math
 import types
 from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
+
+import numpy as np
 
 from bot.dashboard.task_service import TaskResult
 
 
 def to_data(value):
+    # Pandas calculations retain NumPy scalar types, including bool_.
+    if isinstance(value, np.generic):
+        return to_data(value.item())
+    if isinstance(value, np.ndarray):
+        return to_data(value.tolist())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if dataclasses.is_dataclass(value):
         return {f.name: to_data(getattr(value, f.name)) for f in dataclasses.fields(value)}
     if isinstance(value, dict):
