@@ -3692,12 +3692,12 @@ def page_ticker_detail() -> None:
         if options:
             right.selectbox("從追蹤清單選擇", [""] + options, key="detail_pick_wl", on_change=_detail_choose_watchlist)
         free_t = left.text_input("股票代號", placeholder="例如 2330、2317、0050", key="detail_symbol", max_chars=12)
-        with st.expander("資料與分析選項 · 預設只讀本地資料"):
+        with st.expander("資料與分析選項 · 預設更新日K與收盤價"):
             a, b, c = st.columns(3)
             auto_fill_missing = a.toggle("缺資料補抓", value=False, key="detail_auto_fill", help="本地缺資料時呼叫外部來源。")
             auto_llm = b.toggle("自動 LLM", value=False, key="detail_auto_llm", help="缺少分析時呼叫 LLM，可能消耗額度。")
             refresh_chips = c.toggle("即時抓籌碼", value=False, key="detail_rc")
-            refresh_technicals = a.toggle("抓日K + 指標", value=False, key="detail_rt")
+            refresh_technicals = a.toggle("抓日K + 指標", value=True, key="detail_refresh_daily", help="分析前更新日線收盤資料；關閉後只使用本地資料。這不是即時報價。")
             refresh_fundamentals = b.toggle("更新基本面", value=False, key="detail_rf")
             refresh_distribution = c.toggle("更新 TDCC", value=False, key="detail_rd")
         go, add = st.columns([2, 1])
@@ -3793,7 +3793,12 @@ def page_ticker_detail() -> None:
     )
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("現價", f"{snap.price:.2f}" if snap.price else "—")
+    k1.metric("日線收盤價", f"{snap.price:.2f}" if snap.price else "—")
+    from bot.utils import now_tw
+    price_date = snap.technicals.last_date if snap.technicals else ""
+    k1.caption(f"行情日期：{price_date or '未知'} · 非即時報價")
+    if not price_date or str(price_date)[:10] < now_tw().date().isoformat():
+        st.warning(f"目前使用 {price_date or '日期未知'} 的日線資料，尚無今日收盤資料。分析時間不代表行情更新時間；休市、尚未公布或更新失敗都可能造成此情況。")
     k2.metric("漲跌%", f"{snap.pct_change:+.2f}%" if snap.pct_change else "—")
     if snap.chip_summary:
         k3.metric("外資累計 (張)", f"{snap.chip_summary.get('foreign_net', 0):+.0f}")

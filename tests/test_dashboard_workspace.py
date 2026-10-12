@@ -35,6 +35,8 @@ def workspace(monkeypatch, tmp_path):
         if kind == "movers":
             return {"rows": [], "scanned": 0, "quoted": 0}
         snap = TickerSnapshot(ticker=params["tickers"][0], name="離線測試", fetched_at="2026-10-12T10:00:00")
+        from bot.technicals import TechnicalSnapshot
+        snap.technicals = TechnicalSnapshot(ticker=snap.ticker, last_date="2020-01-02", last_close=100, rows=1)
         return [{"snapshot": to_data(snap), "scorecard": to_data(score_snapshot(snap))}]
 
     manager = TaskService(tmp_path, execute)
@@ -79,11 +81,13 @@ def test_analysis_survives_navigation_and_browser_session_recreation(workspace):
     at.button(key="nav_個股深入分析").click().run()
     assert_clean(at)
     at.text_input(key="detail_symbol").set_value("2330").run()
+    assert at.toggle(key="detail_refresh_daily").value is True
     assert calls == []  # Editing a ticker does not launch research.
     at.button(key="detail_go").click().run(timeout=20)
     assert_clean(at)
     assert entered.wait(3)
     task_id = manager.recent()[0]["id"]
+    assert manager.get(task_id)["params"]["options"]["refresh_technicals"] is True
     at.button(key="nav_本次更新").click().run()
     assert manager.get(task_id)["state"] == "running"
     release.set()
@@ -91,6 +95,9 @@ def test_analysis_survives_navigation_and_browser_session_recreation(workspace):
     at.button(key="nav_個股深入分析").click().run(timeout=20)
     assert_clean(at)
     assert any("離線測試" in m.value for m in at.markdown)
+    assert any(m.label == "日線收盤價" for m in at.metric)
+    assert any("行情日期：2020-01-02" in c.value for c in at.caption)
+    assert any("分析時間不代表行情更新時間" in w.value for w in at.warning)
     assert len(calls) == 1
     # A fresh browser session finds the persisted result without submitting again.
     reopened = AppTest.from_file(str(SCRIPT)).run(timeout=20)
