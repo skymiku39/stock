@@ -424,6 +424,10 @@ $env:RUN_MODE="report"; $env:SYMBOLS="2330,0050"; uv run stock-bot
 
 ## Web 儀表板 (推薦)
 
+最新介面為 **Stock Lab 台股研究工作台**：首頁提供常用研究入口，側欄可搜尋功能，
+分析與市場搜尋可在「任務中心」跨頁追蹤。「本次更新」會列出可核對的改動。
+操作與背景任務範圍請見 [2026-10-12 介面更新](docs/dashboard-update-2026-10-12.md)。
+
 把所有功能聚合成一個 Streamlit 網頁，免記指令、免手改 `.env`：
 
 ```bash

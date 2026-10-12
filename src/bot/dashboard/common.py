@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(
         str(Path(__file__).resolve().parents[3]),
     )
 ).expanduser().resolve()
-DASHBOARD_UI_BUILD = "movers-cache-v18"
+DASHBOARD_UI_BUILD = "workspace-2026.10.12"
 
 
 # ======================================================================

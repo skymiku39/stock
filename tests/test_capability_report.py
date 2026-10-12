@@ -47,7 +47,15 @@ def test_capability_report_preserves_page_and_prompt_inventory() -> None:
     pages, _groups = module._parse_nav_pages(ROOT / "src" / "bot" / "dashboard" / "nav.py")
     prompts = module._read_prompt_meta(ROOT / "prompts")
 
-    assert len(pages) == 30
+    assert len(pages) == 32
+    assert set(pages) == {
+        "功能總覽", "今日當沖戰情室", "今日當沖即時追蹤", "明日當沖關注", "K 線看板",
+        "盤中強弱排行", "個股總覽", "目前持股分析", "個股深入分析", "自動化管線",
+        "美股 / 跨市場", "熱門個股期貨", "跟單訊號", "主動 ETF 追蹤", "LLM 法說分析",
+        "啟動 / 監控", "🛡 風控中心", "交易可行性檢查", "交易紀錄", "報表分析", "模擬交易",
+        "組態設定", "資料庫 / 雲端同步", "Prompt 管理", "LLM 呼叫紀錄", "記憶與證據管理",
+        "日誌檢視", "通知測試", "策略與文件", "台股行事曆", "任務中心", "本次更新",
+    }
     assert len(prompts) == 15
     assert {p["id"] for p in prompts} >= {
         "query_plan",

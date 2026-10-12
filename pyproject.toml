@@ -13,7 +13,7 @@ dependencies = [
     "python-dotenv",
     "pandas",
     "requests",
-    "streamlit>=1.32",
+    "streamlit>=1.41",
     "altair>=5.0",
     "google-genai>=1.0",
     "websockets>=16.0",
