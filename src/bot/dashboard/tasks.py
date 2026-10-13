@@ -13,7 +13,8 @@ from bot.dashboard.common import PROJECT_ROOT, _human_duration
 from bot.dashboard.task_service import ACTIVE, get_task_service
 
 LABELS = {"queued": "排隊中", "running": "執行中", "succeeded": "已完成",
-          "partial": "部分完成", "failed": "失敗", "interrupted": "已中斷", "cancelled": "已取消"}
+          "partial": "部分完成", "failed": "失敗", "interrupted": "已中斷", "cancelled": "已取消",
+          "timed_out": "已逾時", "termination_failed": "需人工停止工作程序"}
 SLOTS = {"ticker": "detail", "watchlist": "watchlist", "research": "research",
          "pipeline": "pipeline", "intraday": "intraday", "nextday": "nextday",
          "presentation": "presentation", "macro": "macro", "movers": "movers"}
@@ -59,7 +60,7 @@ def task_result(slot, kind, match=None):
         st.info(f"{job['message']}。切換頁面或重新整理後仍會繼續，可至「任務中心」追蹤。")
         if job["progress"] is not None:
             st.progress(job["progress"])
-    elif job["state"] in ("failed", "interrupted"):
+    elif job["state"] in ("failed", "interrupted", "timed_out", "termination_failed"):
         st.error(job["error"] or job["message"])
     if job["result"]:
         for warning in job["result"].get("warnings", []):
@@ -140,7 +141,7 @@ def _task_list():
     mode = st.radio("顯示任務", ["全部", "進行中", "需要處理", "已完成"], horizontal=True)
     filtered = [r for r in rows if mode == "全部"
                 or (mode == "進行中" and r["state"] in ACTIVE)
-                or (mode == "需要處理" and r["state"] in ("failed", "interrupted", "partial"))
+                or (mode == "需要處理" and r["state"] in ("failed", "interrupted", "partial", "timed_out", "termination_failed"))
                 or (mode == "已完成" and r["state"] == "succeeded")]
     if not filtered:
         st.info("這個分類目前沒有任務。")
@@ -170,7 +171,7 @@ def _task_list():
             st.json(job["result"], expanded=False)
             st.download_button("下載結果 JSON", json.dumps(job["result"], ensure_ascii=False, indent=2),
                                file_name=f"stock-task-{job['id'][:8]}.json", mime="application/json", key=f"dl_{job['id']}")
-        if job["state"] in ("failed", "interrupted", "partial", "cancelled"):
+        if job["state"] in ("failed", "interrupted", "partial", "cancelled", "timed_out"):
             st.caption("重試會使用原設定，可能再次呼叫外部資料源或 LLM。")
             if st.button("以原設定重試", key=f"retry_{job['id']}"):
                 submit_task(SLOTS[job["kind"]], job["kind"], job["title"], job["page"], job["params"])

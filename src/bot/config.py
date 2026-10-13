@@ -324,6 +324,9 @@ class Settings(BaseSettings):
     # Dashboard 未設定 token 時維持唯讀；實際管理操作仍需明確驗證。
     memory_admin_token: str = ""
 
+    # Dashboard 單次背景任務期限，逾時終止工作程序，不自動重試。
+    dashboard_task_timeout_seconds: int = Field(default=3600, ge=1)
+
     # --- 自動化研究管線 ---
     pipeline_chip_lookback_days: int = 5
     pipeline_min_consensus: int = 2
