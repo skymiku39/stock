@@ -16,9 +16,10 @@ _WILDCARD = "*"
 class InMemoryEventBus:
     """執行緒安全的記憶體內事件匯流排。"""
 
-    def __init__(self) -> None:
+    def __init__(self, logger: logging.Logger | None = None) -> None:
         self._handlers: DefaultDict[str, List[EventHandler]] = defaultdict(list)
         self._lock = threading.RLock()
+        self._logger = logger or logging.getLogger("events.bus")
 
     def publish(self, event: DomainEvent) -> None:
         key = event.event_type
@@ -26,7 +27,15 @@ class InMemoryEventBus:
             handlers = list(self._handlers.get(key, ()))
             handlers.extend(self._handlers.get(_WILDCARD, ()))
         for handler in handlers:
-            handler(event)
+            try:
+                handler(event)
+            except Exception:
+                # 單一 handler 失敗不得中斷其餘訂閱者（fault isolation）
+                self._logger.exception(
+                    "event handler failed: event=%s handler=%r",
+                    key,
+                    handler,
+                )
 
     def subscribe(
         self,

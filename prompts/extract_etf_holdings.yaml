@@ -1,6 +1,6 @@
 id: extract_etf_holdings
-version: "1.1"
-description: 從投信網頁 HTML / PDF 文字抽取主動式 ETF 持股清單為 JSON
+version: "1.2"
+description: 從投信網頁 HTML / PDF 文字抽取主動式 ETF／共同基金持股清單為 JSON
 model_hint: gemini-2.5-flash
 max_output_tokens: 4096
 temperature: 0.0
@@ -14,7 +14,7 @@ inputs:
     max_chars: 60000
 output_format: json
 template: |
-  以下是主動式 ETF「{etf_symbol} {etf_name}」的官方持股資訊頁面內容
+  以下是主動式 ETF 或共同基金「{etf_symbol} {etf_name}」的官方持股資訊頁面內容
   (HTML 或從 PDF 抽出的純文字)。請抽取所有「成分股」並回傳 JSON。
 
   輸出**必須**是合法 JSON 陣列，每個元素 schema：

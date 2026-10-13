@@ -30,7 +30,8 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
-from bot.utils import get_logger, mk_folder, now_tw
+from bot.source_registry import SourceRegistry
+from bot.utils import TW_TZ, get_logger, mk_folder, now_tw
 
 
 CNYES_TW_STOCK = "https://api.cnyes.com/media/api/v1/newslist/category/tw_stock"
@@ -62,6 +63,7 @@ class NewsItem:
     published_at: str = ""        # ISO 8601
     keywords: List[str] = field(default_factory=list)
     related_tickers: List[str] = field(default_factory=list)
+    source_document_id: str = ""
 
 
 # ----------------------------------------------------------------------
@@ -111,7 +113,9 @@ def _parse_cnyes_item(d: Dict[str, Any]) -> Optional[NewsItem]:
         summary = summary[:297] + "…"
     pub_ts = d.get("publishAt") or d.get("publish_at") or 0
     try:
-        pub_iso = dt.datetime.fromtimestamp(int(pub_ts), tz=dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+        pub_iso = dt.datetime.fromtimestamp(
+            int(pub_ts), tz=dt.timezone.utc,
+        ).astimezone(TW_TZ).isoformat(timespec="seconds")
     except Exception:
         pub_iso = ""
     news_id = str(d.get("newsId") or d.get("id") or "")
@@ -185,7 +189,26 @@ def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[List[NewsItem]]
         return None
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        return [NewsItem(**d) for d in raw.get("items", []) or []]
+        items = [NewsItem(**d) for d in raw.get("items", []) or []]
+        # raw archive 與 derived cache 必須可逐字重播；若快取 JSON 沒有
+        # 內嵌 ID，透過 exact source_ref 回查 manifest，不改寫快取內容。
+        if items and not any(item.source_document_id for item in items):
+            registry = SourceRegistry(root or Path.cwd())
+            try:
+                source_ref = f"news:{date.isoformat()}"
+                documents = [
+                    row for row in registry.db.list_source_documents(
+                        source="cnyes", kind="news_cache", limit=200
+                    )
+                    if row.source_ref == source_ref
+                ]
+                if documents:
+                    document_id = documents[0].document_id
+                    for item in items:
+                        item.source_document_id = document_id
+            finally:
+                registry.close()
+        return items
     except Exception:
         return None
 
@@ -193,12 +216,107 @@ def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[List[NewsItem]]
 def _save_cache(items: List[NewsItem], date: dt.date, root: Optional[Path]) -> Path:
     p = _cache_path(date, root)
     mk_folder(str(p.parent))
-    p.write_text(json.dumps(
-        {"asof": date.isoformat(), "items": [asdict(i) for i in items]},
+    # Manifest identity belongs to SourceRegistry, not to the replay payload.
+    # Keep the raw/cache bytes independent from the document ID so the same
+    # response can be replayed and verified byte-for-byte.
+    payload_items = []
+    for item in items:
+        item_payload = asdict(item)
+        item_payload["source_document_id"] = ""
+        payload_items.append(item_payload)
+    payload = json.dumps(
+        {"asof": date.isoformat(), "items": payload_items},
         ensure_ascii=False, indent=2,
-    ), encoding="utf-8")
+    )
+    # Raw-first: preserve the exact response-derived cache payload under a
+    # content-addressed path before any later parser/cache rewrite can occur.
+    # A registry failure must not discard the usable local news cache.
+    registry = None
+    try:
+        registry = SourceRegistry(root or Path.cwd())
+        run = registry.start_ingestion("cnyes", source_url=CNYES_TW_STOCK)
+        try:
+            document = registry.register_document(
+                "cnyes",
+                payload,
+                kind="news_cache",
+                source_ref=f"news:{date.isoformat()}",
+                url=CNYES_TW_STOCK,
+                title=f"鉅亨台股新聞 {date.isoformat()}",
+                suffix="json",
+                mime_type="application/json",
+                as_of=date.isoformat(),
+                retrieved_at=now_tw().isoformat(timespec="seconds"),
+                ingestion_run_id=run.run_id,
+                metadata={"item_count": len(items), "cache_path": str(p)},
+            )
+            # 回傳給本次呼叫的 in-memory rows 帶 exact ID；磁碟上的 raw/cache
+            # payload 不帶 ID，避免 manifest identity 汙染可重播內容。
+            for item in items:
+                item.source_document_id = document.document_id
+            ingest_status = "ok"
+            ingest_error = ""
+            try:
+                from bot.news_research import materialize_news_cache_slice
+
+                research_result = materialize_news_cache_slice(
+                    root=root or Path.cwd(),
+                    source_document_id=document.document_id,
+                    items=items,
+                    db=registry.db,
+                )
+                if research_result.status == "failed":
+                    ingest_status = "partial"
+                    ingest_error = (
+                        str(research_result.error or "").strip()
+                        or "新聞 research slice 失敗"
+                    )
+                    get_logger("news").warning(
+                        "新聞 research slice 失敗: %s", research_result.error,
+                    )
+            except Exception as exc:
+                # raw cache 與來源 manifest 已成功保存；research slice 失敗
+                # 必須可稽核，但不能讓可用新聞快取整批消失。
+                ingest_status = "partial"
+                ingest_error = f"{type(exc).__name__}: {exc}"
+                get_logger("news").exception("新聞 research slice 寫入失敗")
+            registry.finish_ingestion(
+                run.run_id,
+                status=ingest_status,
+                document_count=1,
+                error=ingest_error,
+            )
+        except Exception as exc:
+            registry.finish_ingestion(
+                run.run_id,
+                status="failed",
+                error=str(exc),
+            )
+            raise
+    except Exception:
+        get_logger("news").exception("新聞 raw manifest 寫入失敗，仍保留日快取")
+    finally:
+        if registry is not None:
+            registry.close()
+    # write_bytes avoids Windows newline translation; the cache must be the
+    # exact byte replay of the immutable raw archive.
+    p.write_bytes(payload.encode("utf-8"))
     mirror_file_to_cloud(p, root=root)
     return p
+
+
+def load_cached_news_only(
+    *,
+    root: Optional[Path] = None,
+    date: Optional[dt.date] = None,
+    limit: int = 200,
+) -> List[NewsItem]:
+    """只讀本地日快取，快取不存在時回空清單（不打外網）。"""
+    day = date or now_tw().date()
+    cached = _load_cache(day, root)
+    if not cached:
+        return []
+    return cached[:limit]
 
 
 def fetch_today_news(
@@ -248,5 +366,6 @@ __all__ = [
     "NewsItem",
     "fetch_cnyes",
     "fetch_today_news",
+    "load_cached_news_only",
     "news_to_compact_text",
 ]

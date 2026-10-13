@@ -1,26 +1,20 @@
-"""watchlist -- 使用者自訂的個股監控清單。
+"""Watchlist application API. SQLite commits precede derived JSON snapshots.
 
-設計
-====
-* **雙寫 (Dual-write)**：每次新增/修改/刪除同時更新
-    1. JSON 檔 (`data/watchlist.json`) — 向後相容、易閱讀、可手編
-    2. SQLite (`stock_db.watchlist` table) — 支援雲端同步、複雜查詢
-* 每檔含 ticker / name / tags / note / added_at
-* 提供「合併 ETF 共識焦點」與「合併最近一次 pipeline 焦點」的便利方法
-
-> 若 SQLite 寫入失敗，JSON 依然會成功；watchlist 永遠至少有一份備援。
+JSON is imported once, only before initialization. Explicit deletions remain as
+SQLite tombstones and missing items in an editor snapshot never imply deletion.
 """
-
 from __future__ import annotations
 
-import datetime as dt
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
-from bot.utils import get_logger, mk_folder, now_tw
+from bot.stock_db import StockDB, default_db_path
+from bot.watchlist_repository import WatchlistConflictError, WatchlistRepository, version_token
 
 
 @dataclass
@@ -30,135 +24,166 @@ class WatchItem:
     tags: List[str] = field(default_factory=list)
     note: str = ""
     added_at: str = ""
+    revision: str = ""
 
 
 @dataclass
 class WatchList:
     items: List[WatchItem] = field(default_factory=list)
+    _baseline: dict = field(default_factory=dict, repr=False, compare=False)
+
+
+class WatchlistSnapshotError(RuntimeError):
+    """The durable commit succeeded but refreshing its JSON projection failed."""
+    committed = True
 
 
 def _path(root: Optional[Path] = None) -> Path:
     return (root or Path.cwd()) / "data" / "watchlist.json"
 
 
-def load(root: Optional[Path] = None) -> WatchList:
+def _item_row(item: WatchItem) -> dict:
+    return dict(symbol=item.ticker, name=item.name, tags=",".join(item.tags),
+                note=item.note, added_at=item.added_at)
+
+
+def _load_json(root: Optional[Path] = None) -> WatchList:
     p = _path(root)
-    restore_file_from_cloud(p, root=root)
     if not p.exists():
         return WatchList()
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        items = []
-        for r in raw.get("items", []):
-            items.append(WatchItem(
-                ticker=str(r.get("ticker", "")).strip(),
-                name=str(r.get("name", "")),
-                tags=list(r.get("tags", []) or []),
-                note=str(r.get("note", "")),
-                added_at=str(r.get("added_at", "")),
-            ))
-        return WatchList(items=[i for i in items if i.ticker])
-    except Exception:
-        get_logger("watchlist").exception("讀取 watchlist 失敗")
-        return WatchList()
+    # Malformed legacy data must not be silently accepted as an empty list.
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    return WatchList(items=[WatchItem(
+        ticker=str(r.get("ticker", "")).strip(), name=str(r.get("name", "")),
+        tags=list(r.get("tags", []) or []), note=str(r.get("note", "")),
+        added_at=str(r.get("added_at", "")),
+    ) for r in raw.get("items", []) if str(r.get("ticker", "")).strip()])
 
 
-def save(wl: WatchList, root: Optional[Path] = None) -> Path:
+def _write_json(wl: WatchList, root: Optional[Path] = None) -> Path:
     p = _path(root)
-    mk_folder(str(p.parent))
-    p.write_text(
-        json.dumps(
-            {"items": [asdict(i) for i in wl.items]},
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
-    )
+    p.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=p.parent,
+                                         prefix=".watchlist-", suffix=".tmp", delete=False) as fp:
+            temporary = Path(fp.name)
+            json.dump({"items": [asdict(i) for i in wl.items]}, fp, ensure_ascii=False, indent=2)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(temporary, p)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     mirror_file_to_cloud(p, root=root)
-    _sync_to_db(wl, root)
     return p
 
 
-def _sync_to_db(wl: WatchList, root: Optional[Path] = None) -> None:
-    """JSON 寫入後同步到 SQLite (失敗不影響主流程)。"""
+def _read(repo: WatchlistRepository) -> WatchList:
+    result = WatchList(items=[WatchItem(
+        ticker=r["symbol"], name=r["name"], tags=[t.strip() for t in r["tags"].split(",") if t.strip()],
+        note=r["note"], added_at=r["added_at"], revision=version_token(r),
+    ) for r in repo.rows()])
+    result._baseline = {i.ticker: asdict(i) for i in result.items}
+    return result
+
+
+def _open(root: Optional[Path]) -> tuple[StockDB, WatchlistRepository]:
+    db = StockDB.open(path=default_db_path(root))
+    repo = WatchlistRepository(db)
     try:
-        from bot.stock_db import StockDB, WatchlistRow, default_db_path
-
-        db_path = default_db_path(root)
-        db = StockDB.open(path=db_path)
-
-        existing = {w.symbol for w in db.list_watchlist()}
-        keep: set[str] = set()
-        for it in wl.items:
-            keep.add(it.ticker)
-            db.upsert_watch(WatchlistRow(
-                symbol=it.ticker,
-                name=it.name,
-                tags=",".join(it.tags),
-                note=it.note,
-                added_at=it.added_at,
-            ))
-        for sym in existing - keep:
-            db.remove_watch(sym)
+        if not repo.initialized():
+            # Existing SQLite rows always take precedence over legacy JSON.
+            legacy = WatchList()
+            if not repo.rows(include_deleted=True):
+                restore_file_from_cloud(_path(root), root=root)
+                legacy = _load_json(root)
+            repo.initialize(_item_row(i) for i in legacy.items)
+        return db, repo
     except Exception:
-        get_logger("watchlist").exception("watchlist 同步到 SQLite 失敗 (忽略)")
+        db.close()
+        raise
 
 
-def add(
-    ticker: str,
-    *,
-    name: str = "",
-    tags: Optional[List[str]] = None,
-    note: str = "",
-    root: Optional[Path] = None,
-) -> WatchList:
+def _project(repo: WatchlistRepository, root: Optional[Path]) -> WatchList:
+    result = _read(repo)
+    try:
+        _write_json(result, root)
+    except Exception as exc:
+        raise WatchlistSnapshotError("SQLite 已儲存；JSON 快照更新失敗，請重新載入清單") from exc
+    return result
+
+
+def load(root: Optional[Path] = None) -> WatchList:
+    db, repo = _open(root)
+    try:
+        return _read(repo)
+    finally:
+        db.close()
+
+
+def save(wl: WatchList, root: Optional[Path] = None) -> Path:
+    """Atomically save edited rows, checking the versions loaded by the editor."""
+    db, repo = _open(root)
+    try:
+        changes = []
+        seen = set()
+        for item in wl.items:
+            if not item.ticker or item.ticker in seen:
+                raise ValueError("watchlist ticker 必須非空且不可重複")
+            seen.add(item.ticker)
+            original = wl._baseline.get(item.ticker)
+            if original is None or asdict(item) != original:
+                expected = original["revision"] if original is not None else item.revision
+                changes.append((_item_row(item), expected))
+        repo.save(changes)
+        current = _project(repo, root)
+        wl.items, wl._baseline = current.items, current._baseline
+        return _path(root)
+    finally:
+        db.close()
+
+
+def add(ticker: str, *, name: str = "", tags: Optional[List[str]] = None,
+        note: str = "", root: Optional[Path] = None) -> WatchList:
     ticker = ticker.strip()
     if not ticker:
         return load(root)
+    db, repo = _open(root)
+    try:
+        current = repo.get(ticker)
+        active = current if current and not current.get("deleted_at") else {}
+        row = dict(symbol=ticker, name=active.get("name") or name,
+                   tags=",".join(sorted(set(filter(None, active.get("tags", "").split(","))) | set(tags or []))),
+                   note=active.get("note") or note, added_at=active.get("added_at", ""))
+        repo.save([(row, version_token(current))])
+        return _project(repo, root)
+    finally:
+        db.close()
+
+
+def remove(ticker: str, root: Optional[Path] = None, *, expected_revision: str | None = None) -> WatchList:
+    db, repo = _open(root)
+    try:
+        if ticker.strip():
+            current = repo.get(ticker.strip())
+            repo.remove(ticker.strip(), expected=expected_revision if expected_revision is not None else version_token(current))
+        return _project(repo, root)
+    finally:
+        db.close()
+
+
+def update(ticker: str, *, name: Optional[str] = None, tags: Optional[List[str]] = None,
+           note: Optional[str] = None, root: Optional[Path] = None) -> WatchList:
     wl = load(root)
-    for it in wl.items:
-        if it.ticker == ticker:
-            if name and not it.name:
-                it.name = name
-            if tags:
-                it.tags = sorted(set((it.tags or []) + list(tags)))
-            if note and not it.note:
-                it.note = note
-            save(wl, root)
-            return wl
-    wl.items.append(WatchItem(
-        ticker=ticker, name=name,
-        tags=sorted(set(tags or [])),
-        note=note,
-        added_at=now_tw().isoformat(timespec="seconds"),
-    ))
-    save(wl, root)
-    return wl
-
-
-def remove(ticker: str, root: Optional[Path] = None) -> WatchList:
-    wl = load(root)
-    wl.items = [i for i in wl.items if i.ticker != ticker]
-    save(wl, root)
-    return wl
-
-
-def update(
-    ticker: str,
-    *,
-    name: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    note: Optional[str] = None,
-    root: Optional[Path] = None,
-) -> WatchList:
-    wl = load(root)
-    for it in wl.items:
-        if it.ticker == ticker:
+    for item in wl.items:
+        if item.ticker == ticker:
             if name is not None:
-                it.name = name
+                item.name = name
             if tags is not None:
-                it.tags = sorted(set(tags))
+                item.tags = sorted(set(tags))
             if note is not None:
-                it.note = note
+                item.note = note
             break
     save(wl, root)
     return wl
@@ -215,6 +240,8 @@ def merge_pipeline_focus(
 __all__ = [
     "WatchItem",
     "WatchList",
+    "WatchlistConflictError",
+    "WatchlistSnapshotError",
     "add",
     "load",
     "merge_etf_focus",

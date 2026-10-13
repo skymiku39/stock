@@ -191,14 +191,19 @@ class DailyBacktester:
         db: Optional[StockDB] = None,
     ) -> BacktestSummary:
         from pathlib import Path
+        owns_db = db is None
         database = db or StockDB.open(path=default_db_path(Path(root or ".")))
-        lo, hi = resolve_entry_range("", self.settings)
-        results = [
-            self.run_symbol(database, sym, start=start, end=end)
-            for sym in symbols
-        ]
-        note = (
-            f"[日K近似] entry {lo:.1f}~{hi:.1f}% | sl {self.settings.stop_loss_pct}% | "
-            f"trail {self.settings.take_profit_pct}%/{self.settings.trailing_stop_pct}%"
-        )
-        return BacktestSummary(results=results, settings_note=note)
+        try:
+            lo, hi = resolve_entry_range("", self.settings)
+            results = [
+                self.run_symbol(database, sym, start=start, end=end)
+                for sym in symbols
+            ]
+            note = (
+                f"[日K近似] entry {lo:.1f}~{hi:.1f}% | sl {self.settings.stop_loss_pct}% | "
+                f"trail {self.settings.take_profit_pct}%/{self.settings.trailing_stop_pct}%"
+            )
+            return BacktestSummary(results=results, settings_note=note)
+        finally:
+            if owns_db:
+                database.close()

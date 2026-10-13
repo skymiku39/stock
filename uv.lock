@@ -2343,6 +2343,7 @@ dependencies = [
     { name = "requests" },
     { name = "shioaji" },
     { name = "streamlit" },
+    { name = "websockets" },
     { name = "yfinance" },
 ]
 
@@ -2372,7 +2373,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests" },
     { name = "shioaji" },
-    { name = "streamlit", specifier = ">=1.32" },
+    { name = "streamlit", specifier = ">=1.41" },
+    { name = "websockets", specifier = ">=16.0" },
     { name = "yfinance", specifier = ">=0.2.40" },
 ]
 provides-extras = ["dev", "cloud"]

@@ -20,6 +20,7 @@ from bot.events.types import (
 )
 
 _default_bus: Optional[InMemoryEventBus] = None
+_default_bus_root: Optional[Path] = None
 _trading_wired_bus_ids: Set[int] = set()
 _jsonl_attached_bus_ids: Set[int] = set()
 _chain_wired_bus_ids: Set[int] = set()
@@ -33,20 +34,34 @@ def create_event_bus(*, enable_logging: bool = True) -> InMemoryEventBus:
     return bus
 
 
-def get_event_bus() -> InMemoryEventBus:
+def get_event_bus(*, project_root: Optional[Path] = None) -> InMemoryEventBus:
     """程序內單例匯流排（CLI / 排程器 / BOT 共用）。"""
-    global _default_bus
-    if _default_bus is None:
+    global _default_bus, _default_bus_root
+    requested_root = project_root.resolve() if project_root is not None else None
+    root_changed = (
+        requested_root is not None
+        and _default_bus_root is not None
+        and requested_root != _default_bus_root
+    )
+    if _default_bus is None or root_changed:
+        if _default_bus is not None:
+            old_bus_id = id(_default_bus)
+            _default_bus.clear()
+            _trading_wired_bus_ids.discard(old_bus_id)
+            _jsonl_attached_bus_ids.discard(old_bus_id)
+            _chain_wired_bus_ids.discard(old_bus_id)
         _default_bus = create_event_bus()
+        _default_bus_root = requested_root
     return _default_bus
 
 
 def reset_event_bus() -> None:
     """測試用：重設單例與 wiring 狀態。"""
-    global _default_bus
+    global _default_bus, _default_bus_root
     if _default_bus is not None:
         _default_bus.clear()
     _default_bus = None
+    _default_bus_root = None
     _trading_wired_bus_ids.clear()
     _jsonl_attached_bus_ids.clear()
     _chain_wired_bus_ids.clear()
@@ -132,11 +147,20 @@ def wire_application_handlers(
     project_root: Optional[Path] = None,
 ) -> InMemoryEventBus:
     """應用程式層預設 wiring：logging + JSONL 稽核 + 可選事件鏈。"""
-    resolved = bus if isinstance(bus, InMemoryEventBus) else get_event_bus()
+    resolved_root = project_root.resolve() if project_root is not None else None
+    resolved = (
+        bus
+        if isinstance(bus, InMemoryEventBus)
+        else get_event_bus(project_root=resolved_root)
+    )
     bus_id = id(resolved)
 
     if enable_jsonl and bus_id not in _jsonl_attached_bus_ids:
-        path = jsonl_path or Path("data/events/domain_events.jsonl")
+        path = jsonl_path or (
+            resolved_root / "data" / "events" / "domain_events.jsonl"
+            if resolved_root is not None
+            else Path("data/events/domain_events.jsonl")
+        )
         attach_jsonl_recorder(resolved, path)
         _jsonl_attached_bus_ids.add(bus_id)
 

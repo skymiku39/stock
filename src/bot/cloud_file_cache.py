@@ -11,12 +11,34 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 
 ENV_CACHE_DIR = "GOOGLE_CACHE_DIR"
+
+
+def _atomic_copy2(source: Path, destination: Path) -> None:
+    """Copy a cache file without exposing a partially written destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    os.close(fd)
+    try:
+        shutil.copy2(source, temporary_path)
+        os.replace(temporary_path, destination)
+    except Exception:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def cloud_cache_root(root: Optional[Path] = None) -> Optional[Path]:
@@ -66,8 +88,11 @@ def restore_file_from_cloud(
                 return False
         except OSError:
             return False
-    local.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(cloud, local)
+    try:
+        _atomic_copy2(cloud, local)
+    except OSError:
+        # Cloud cache 是 optional；本地資料路徑不可因 Drive 暫時不可用而失敗。
+        return False
     return True
 
 
@@ -96,9 +121,12 @@ def restore_tree_from_cloud(
                     continue
             except OSError:
                 continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        copied += 1
+        try:
+            _atomic_copy2(src, dst)
+            copied += 1
+        except OSError:
+            # 逐檔降級，讓同一棵 cache 中其他可用檔案仍能還原。
+            continue
     return copied
 
 
@@ -110,8 +138,11 @@ def mirror_file_to_cloud(local_path: Path, *, root: Optional[Path] = None) -> bo
     cloud = cloud_path_for(local, root=root)
     if cloud is None or _same_path(local, cloud):
         return False
-    cloud.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(local, cloud)
+    try:
+        _atomic_copy2(local, cloud)
+    except OSError:
+        # Optional mirror must never block local canonical writes.
+        return False
     return True
 
 

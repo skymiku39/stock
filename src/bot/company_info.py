@@ -29,6 +29,7 @@ from typing import Dict, Optional
 import requests
 
 from bot.cloud_file_cache import restore_file_from_cloud, write_json_cache
+from bot.data_quality import persist_source_result, response_to_rows
 from bot.stock_db import StockInfo
 from bot.utils import get_logger, mk_folder, now_tw
 
@@ -49,8 +50,13 @@ INDUSTRY_CODE_MAP: Dict[str, str] = {
     "37": "運動休閒", "38": "居家生活", "80": "管理股票",
 }
 
-# 程序內快取：{symbol: StockInfo}
-_COMPANY_MAP: Optional[Dict[str, StockInfo]] = None
+# 程序內快取按 project root 隔離；否則同一個長駐程序先讀 A 專案後，
+# B 專案會錯誤重用 A 的公司名冊。
+_COMPANY_MAP_CACHE: Dict[str, Dict[str, StockInfo]] = {}
+
+
+def _root_key(root: Optional[Path]) -> str:
+    return str((root or Path.cwd()).resolve())
 
 
 def industry_label(code: str) -> str:
@@ -99,7 +105,7 @@ def _map_path(root: Optional[Path]) -> Path:
     return base / "company_info.json"
 
 
-def _parse_twse(rows: list) -> Dict[str, StockInfo]:
+def _parse_twse(rows: list, *, source_record_id: str = "") -> Dict[str, StockInfo]:
     out: Dict[str, StockInfo] = {}
     for r in rows or []:
         code = str(r.get("公司代號") or "").strip()
@@ -112,11 +118,15 @@ def _parse_twse(rows: list) -> Dict[str, StockInfo]:
             market="TWSE",
             industry=industry_label(r.get("產業別") or ""),
             listed_date=_date_to_iso(r.get("上市日期") or ""),
+            source_url=URL_TWSE_COMPANY,
+            retrieved_at=now_tw().isoformat(timespec="seconds"),
+            quality_status="ok",
+            source_record_id=str(source_record_id or ""),
         )
     return out
 
 
-def _parse_tpex(rows: list) -> Dict[str, StockInfo]:
+def _parse_tpex(rows: list, *, source_record_id: str = "") -> Dict[str, StockInfo]:
     out: Dict[str, StockInfo] = {}
     for r in rows or []:
         code = str(r.get("SecuritiesCompanyCode") or r.get("Symbol") or "").strip()
@@ -129,6 +139,10 @@ def _parse_tpex(rows: list) -> Dict[str, StockInfo]:
             market="TPEX",
             industry=industry_label(r.get("SecuritiesIndustryCode") or ""),
             listed_date=_date_to_iso(r.get("DateOfListing") or ""),
+            source_url=URL_TPEX_COMPANY,
+            retrieved_at=now_tw().isoformat(timespec="seconds"),
+            quality_status="ok",
+            source_record_id=str(source_record_id or ""),
         )
     return out
 
@@ -136,23 +150,61 @@ def _parse_tpex(rows: list) -> Dict[str, StockInfo]:
 def _build_company_map(
     *, session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> Dict[str, StockInfo]:
     log = logger or get_logger("company-info")
     sess = session or _session()
     out: Dict[str, StockInfo] = {}
+    successful_sources = 0
     try:
         r = sess.get(URL_TWSE_COMPANY, timeout=30)
-        if r.status_code == 200:
-            out.update(_parse_twse(r.json()))
+        result = response_to_rows(
+            r,
+            source="twse_company_info",
+            url=URL_TWSE_COMPANY,
+            min_rows=1,
+        )
+        source_document_id = persist_source_result(result, root=root)
+        if result.usable:
+            parsed = _parse_twse(
+                result.rows,
+                source_record_id=source_document_id or "",
+            )
+            if parsed:
+                out.update(parsed)
+                successful_sources += 1
+            else:
+                log.warning("TWSE 公司資料解析後為 0 筆 (schema=%s)", result.schema_hash)
+        else:
+            log.warning("TWSE 公司資料品質=%s: %s", result.status, result.error)
     except Exception:
         log.exception("讀取上市公司基本資料失敗")
     try:
         r = sess.get(URL_TPEX_COMPANY, timeout=30)
-        if r.status_code == 200:
-            for code, info in _parse_tpex(r.json()).items():
+        result = response_to_rows(
+            r,
+            source="tpex_company_info",
+            url=URL_TPEX_COMPANY,
+            min_rows=1,
+        )
+        source_document_id = persist_source_result(result, root=root)
+        if result.usable:
+            parsed = _parse_tpex(
+                result.rows,
+                source_record_id=source_document_id or "",
+            )
+            for code, info in parsed.items():
                 out.setdefault(code, info)  # 上市優先，不覆蓋
+            if parsed:
+                successful_sources += 1
+            else:
+                log.warning("TPEx 公司資料解析後為 0 筆 (schema=%s)", result.schema_hash)
+        else:
+            log.warning("TPEx 公司資料品質=%s: %s", result.status, result.error)
     except Exception:
         log.exception("讀取上櫃公司基本資料失敗")
+    if successful_sources == 0:
+        log.error("TWSE / TPEx 公司資料均未通過品質契約")
     return out
 
 
@@ -162,32 +214,58 @@ def load_company_map(
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, StockInfo]:
     """載入 (或建立) 全市場公司基本資料對照表，每日快取一次。"""
-    global _COMPANY_MAP
-    if _COMPANY_MAP is not None and not force_refresh:
-        return _COMPANY_MAP
+    key = _root_key(root)
+    cached_map = _COMPANY_MAP_CACHE.get(key)
+    if cached_map is not None and not force_refresh:
+        return cached_map
 
     path = _map_path(root)
     restore_file_from_cloud(path, root=root)
     today = now_tw().date().isoformat()
+    cached_map: Dict[str, StockInfo] = {}
     if not force_refresh and path.exists():
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
             if cached.get("date") == today and cached.get("map"):
-                _COMPANY_MAP = {
+                cached_map = {
                     str(k): StockInfo(**v) for k, v in cached["map"].items()
                 }
-                return _COMPANY_MAP
+                _COMPANY_MAP_CACHE[key] = cached_map
+                return cached_map
         except Exception:
             pass
+    elif path.exists():
+        # force_refresh 仍先讀取舊快取，用來阻擋「只抓到半邊市場」覆蓋完整名冊。
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            cached_map = {
+                str(k): StockInfo(**v) for k, v in (cached.get("map") or {}).items()
+            }
+        except Exception:
+            cached_map = {}
 
-    mp = _build_company_map(logger=logger)
+    mp = _build_company_map(logger=logger, root=root)
     if mp:
+        # 來源回應突然變小通常是封鎖、schema 變更或只成功一個市場；
+        # 有完整舊快取時不允許它被部分結果覆蓋。
+        if cached_map and len(mp) < max(1, int(len(cached_map) * 0.6)):
+            log = logger or get_logger("company-info")
+            log.error(
+                "公司名冊疑似部分回應：new=%d cached=%d，保留舊快取",
+                len(mp), len(cached_map),
+            )
+            _COMPANY_MAP_CACHE[key] = cached_map
+            return cached_map
         try:
             serializable = {
                 k: {
                     "symbol": v.symbol, "name": v.name, "short_name": v.short_name,
                     "market": v.market, "industry": v.industry,
                     "listed_date": v.listed_date,
+                    "source_url": v.source_url, "source_date": v.source_date,
+                    "retrieved_at": v.retrieved_at,
+                    "quality_status": v.quality_status,
+                    "source_record_id": v.source_record_id,
                 }
                 for k, v in mp.items()
             }
@@ -198,7 +276,7 @@ def load_company_map(
             )
         except Exception:
             pass
-        _COMPANY_MAP = mp
+        _COMPANY_MAP_CACHE[key] = mp
         return mp
 
     # 建表失敗 → 盡量用舊快取
@@ -206,12 +284,13 @@ def load_company_map(
     if path.exists():
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
-            _COMPANY_MAP = {str(k): StockInfo(**v) for k, v in (cached.get("map") or {}).items()}
-            return _COMPANY_MAP
+            cached_map = {str(k): StockInfo(**v) for k, v in (cached.get("map") or {}).items()}
+            _COMPANY_MAP_CACHE[key] = cached_map
+            return cached_map
         except Exception:
             pass
-    _COMPANY_MAP = {}
-    return _COMPANY_MAP
+    _COMPANY_MAP_CACHE[key] = {}
+    return _COMPANY_MAP_CACHE[key]
 
 
 def lookup_company_info(
@@ -230,7 +309,48 @@ def lookup_company_info(
     return StockInfo(
         symbol=info.symbol, name=info.name, short_name=info.short_name,
         market=info.market, industry=info.industry, listed_date=info.listed_date,
+        source_url=info.source_url, source_date=info.source_date,
+        retrieved_at=info.retrieved_at, quality_status=info.quality_status,
+        source_record_id=info.source_record_id,
     )
+
+
+def _normalize_company_name(name: str) -> str:
+    """正規化投信/MoneyDJ 常見公司簡稱：去空白、尾端 *、全形空白。"""
+    s = str(name or "").replace("\u3000", " ").strip()
+    s = s.rstrip("*＊").strip()
+    return s
+
+
+def lookup_symbol_by_name(
+    name: str,
+    *,
+    root: Optional[Path] = None,
+    logger: Optional[logging.Logger] = None,
+    company_map: Optional[Dict[str, StockInfo]] = None,
+) -> Optional[str]:
+    """以公司簡稱/全名反查證券代號。
+
+    對齊順序：簡稱精確 → 全名精確 → 去 * 後簡稱精確。
+    多檔同名時取代號較小者（穩定、可重現）。查無回 None。
+    """
+    key = _normalize_company_name(name)
+    if not key:
+        return None
+    mp = company_map if company_map is not None else load_company_map(root=root, logger=logger)
+    exact_short: list[str] = []
+    exact_full: list[str] = []
+    for sym, info in mp.items():
+        short = _normalize_company_name(info.short_name)
+        full = _normalize_company_name(info.name)
+        if short == key:
+            exact_short.append(sym)
+        elif full == key:
+            exact_full.append(sym)
+    hits = exact_short or exact_full
+    if not hits:
+        return None
+    return sorted(hits)[0]
 
 
 def backfill_stock_info(
@@ -284,6 +404,15 @@ def _merge(existing: Optional[StockInfo], fetched: StockInfo) -> StockInfo:
         shares_outstanding=existing.shares_outstanding or fetched.shares_outstanding,
         cfi_code=existing.cfi_code or fetched.cfi_code,
         note=existing.note or fetched.note,
+        source_url=existing.source_url or fetched.source_url,
+        source_date=existing.source_date or fetched.source_date,
+        retrieved_at=existing.retrieved_at or fetched.retrieved_at,
+        quality_status=(
+            existing.quality_status
+            if existing.quality_status not in ("", "unknown")
+            else fetched.quality_status
+        ),
+        source_record_id=existing.source_record_id or fetched.source_record_id,
     )
 
 
@@ -295,4 +424,5 @@ __all__ = [
     "industry_label",
     "load_company_map",
     "lookup_company_info",
+    "lookup_symbol_by_name",
 ]

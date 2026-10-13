@@ -1,12 +1,13 @@
 """Dashboard navigation and main Streamlit app shell."""
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 from pathlib import Path
 
 import streamlit as st
-from pathlib import Path
 
 from bot.dashboard.common import (
     DASHBOARD_UI_BUILD,
@@ -17,10 +18,21 @@ from bot.dashboard.common import (
     write_dashboard_heartbeat,
 )
 from bot.dashboard import pages as dash_pages
+from bot.dashboard.workspace import apply_theme, brand, page_updates
+from bot.dashboard.tasks import task_indicator, page_tasks
 from bot.dashboard.cache_helpers import cached_env_values, cached_llm_today_stats
-from bot.env_io import env_path
+from bot.env_io import env_path, llm_provider_ready
 from bot.process_runner import get_runner, get_scheduler_runner
 from bot.prompt_registry import get_registry
+
+
+def _read_scheduler_status() -> dict:
+    path = PROJECT_ROOT / "data" / "scheduler_status.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _render_sidebar_quick_controls() -> None:
@@ -30,14 +42,14 @@ def _render_sidebar_quick_controls() -> None:
     bot_running = bot_runner.is_running()
     scheduler_running = scheduler_runner.is_running()
 
-    st.sidebar.markdown("#### 快速啟動")
-    st.sidebar.markdown(
+    st.markdown("#### 快速啟動")
+    st.markdown(
         f"{_badge('自動更新 ON' if scheduler_running else '自動更新 OFF', 'green' if scheduler_running else 'gray')} "
         f"{_badge('BOT ON' if bot_running else 'BOT OFF', 'green' if bot_running else 'gray')}",
         unsafe_allow_html=True,
     )
 
-    include_reports = st.sidebar.toggle(
+    include_reports = st.toggle(
         "包含當沖 LLM 報告",
         value=True,
         key="quick_auto_llm_reports",
@@ -47,51 +59,91 @@ def _render_sidebar_quick_controls() -> None:
             "同一天已有報告時會跳過，避免重複呼叫 Gemini。"
         ),
     )
-    if include_reports and not env_values.get("GEMINI_API_KEY"):
-        st.sidebar.caption("尚未設定 GEMINI_API_KEY；當沖報告會無法產生 LLM 簡報。")
+    if include_reports and not llm_provider_ready(env_values):
+        st.caption("尚未設定可用的 LLM 提供者；當沖報告會無法產生 LLM 簡報。")
 
-    c1, c2 = st.sidebar.columns(2)
+    c1, c2 = st.columns(2)
     if c1.button("啟動自動更新", disabled=scheduler_running, use_container_width=True):
         rec = scheduler_runner.start(
             run_mode="scheduler",
             extra_env=dash_pages._quick_scheduler_env(include_reports),
         )
-        st.sidebar.success(f"自動更新已啟動 PID {rec.pid}")
+        st.success(f"自動更新已啟動 PID {rec.pid}")
         st.rerun()
     if c2.button("停止更新", disabled=not scheduler_running, use_container_width=True):
         ok = scheduler_runner.stop()
-        st.sidebar.success("自動更新已停止" if ok else "自動更新停止逾時")
+        st.success("自動更新已停止" if ok else "自動更新停止逾時")
         st.rerun()
 
     scheduler_record = scheduler_runner.current()
     if scheduler_running and scheduler_record:
         elapsed = time.time() - scheduler_record.started_at
-        st.sidebar.caption(f"更新 PID {scheduler_record.pid} · {_human_duration(elapsed)}")
+        st.caption(f"更新 PID {scheduler_record.pid} · {_human_duration(elapsed)}")
+        status = _read_scheduler_status()
+        # `uv run` / console-script 啟動時，wrapper PID 可能和 scheduler
+        # 子行程 PID 不同；只要狀態檔是有效的就顯示真實 heartbeat。
+        if status:
+            state = str(status.get("state") or "unknown")
+            last_job = str(status.get("last_job") or "尚未執行任務")
+            last_at = str(status.get("last_job_at") or status.get("heartbeat_at") or "")
+            status_pid = status.get("pid") or "?"
+            st.caption(
+                f"排程狀態: {state} · worker PID {status_pid} · 最近任務: {last_job} {last_at}"
+            )
+            jobs = status.get("jobs") or {}
+            failed_jobs = [name for name, entry in jobs.items()
+                           if entry.get("state") in {"failed", "timed_out", "interrupted"}]
+            if failed_jobs:
+                st.warning("尚未成功重跑的任務：" + "、".join(failed_jobs))
+            elif (not jobs and status.get("last_success") is False) or state == "degraded":
+                st.warning(f"排程最近一次任務失敗：{status.get('last_error') or '請查看日誌'}")
+            if jobs:
+                labels = {"running": "執行中", "succeeded": "成功", "failed": "失敗",
+                          "timed_out": "逾時", "interrupted": "中斷", "dry_run": "僅演練"}
+                with st.expander("各任務執行結果"):
+                    for name, entry in sorted(jobs.items()):
+                        job_state = str(entry.get("state") or "unknown")
+                        st.caption(f"{name}：{labels.get(job_state, job_state)}")
+                        st.caption(f"最近成功：{entry.get('last_success_at') or '尚無成功紀錄'}")
+                        if entry.get("error"):
+                            st.caption(str(entry["error"]))
+        else:
+            st.caption("排程正在啟動，等待第一個心跳...")
 
     mode_options = ["watch", "report", "trade"]
     default_mode = env_values.get("RUN_MODE", "watch")
     mode_index = mode_options.index(default_mode) if default_mode in mode_options else 0
-    bot_mode = st.sidebar.selectbox(
+    bot_mode = st.selectbox(
         "BOT 模式",
         mode_options,
         index=mode_index,
         key="quick_bot_mode",
         help="watch=看盤監測；report=公開資料報表；trade=依設定交易。",
     )
-    b1, b2 = st.sidebar.columns(2)
-    if b1.button("啟動 BOT", disabled=bot_running, use_container_width=True):
+    simulation = str(env_values.get("SIMULATION", "true")).strip().lower() not in {"false", "0", "no"}
+    real_trade_quick_start = bot_mode == "trade" and not simulation
+    if real_trade_quick_start:
+        st.warning("真實 trade 不允許從快速啟動進入；請到「啟動 / 監控」完成交易可行性檢查。")
+    b1, b2 = st.columns(2)
+    if b1.button(
+        "啟動 BOT",
+        disabled=bot_running or real_trade_quick_start,
+        use_container_width=True,
+    ):
         rec = bot_runner.start(run_mode=bot_mode)
-        st.sidebar.success(f"BOT 已啟動 PID {rec.pid}")
+        st.success(f"BOT 已啟動 PID {rec.pid}")
         st.rerun()
     if b2.button("停止 BOT", disabled=not bot_running, use_container_width=True):
         ok = bot_runner.stop()
-        st.sidebar.success("BOT 已停止" if ok else "BOT 停止逾時")
+        st.success("BOT 已停止" if ok else "BOT 停止逾時")
         st.rerun()
 
-    st.sidebar.write("")
+    st.write("")
 
 
 PAGES = {
+    "任務中心": page_tasks,
+    "本次更新": page_updates,
     # 研究與分析
     "功能總覽": dash_pages.page_overview,
     "今日當沖戰情室": dash_pages.page_intraday,
@@ -121,6 +173,7 @@ PAGES = {
     "資料庫 / 雲端同步": dash_pages.page_database,
     "Prompt 管理": dash_pages.page_prompts,
     "LLM 呼叫紀錄": dash_pages.page_llm_log,
+    "記憶與證據管理": dash_pages.page_memory_admin,
     "日誌檢視": dash_pages.page_logs,
     "通知測試": dash_pages.page_notifier,
     "策略與文件": dash_pages.page_docs,
@@ -137,7 +190,7 @@ NAV_GROUPS = {
     ],
     "⚡ 執行與紀錄": ["啟動 / 監控", "模擬交易", "🛡 風控中心", "交易可行性檢查", "交易紀錄", "報表分析"],
     "⚙️ 系統與診斷": ["組態設定", "資料庫 / 雲端同步", "Prompt 管理",
-                  "LLM 呼叫紀錄", "日誌檢視", "通知測試", "策略與文件"],
+                  "LLM 呼叫紀錄", "記憶與證據管理", "日誌檢視", "通知測試", "策略與文件"],
 }
 
 PAGES["台股行事曆"] = dash_pages.page_market_calendar
@@ -162,100 +215,74 @@ except Exception:
 
 
 def main_app() -> None:
+    # Streamlit 可從任意工作目錄啟動；dashboard 內仍有相容層會使用
+    # env_path()/load_env()/Settings() 的相對路徑。先固定 cwd，避免設定、
+    # LLM audit、快取或舊版頁面把資料寫到啟動者的目錄。
+    if Path.cwd().resolve() != PROJECT_ROOT.resolve():
+        os.chdir(PROJECT_ROOT)
+
     st.set_page_config(
-        page_title="Stock Bot Dashboard",
+        page_title="Stock Lab｜台股研究工作台",
         page_icon="📈",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    st.sidebar.title("Stock Bot")
-    st.sidebar.caption("台股當沖機器人 儀表板")
-    _render_sidebar_quick_controls()
-
-    if "page" not in st.session_state:
+    apply_theme()
+    if "page" not in st.session_state or st.session_state.page not in PAGES:
         st.session_state.page = "功能總覽"
 
-    page_keys = list(PAGES.keys())
-    if st.session_state.page not in page_keys:
-        st.session_state.page = page_keys[0]
+    with st.sidebar:
+        brand()
+        query = st.text_input("尋找功能", placeholder="搜尋頁面名稱…", label_visibility="collapsed", key="nav_search")
+        common = ["功能總覽", "個股深入分析", "個股總覽", "K 線看板", "任務中心"]
 
-    # 分組導覽：每個區塊用 markdown 標題 + 一組 radio
-    for group_name, pages_in_group in NAV_GROUPS.items():
-        st.sidebar.markdown(f"#### {group_name}")
-        for p in pages_in_group:
-            is_current = st.session_state.page == p
-            label = f"▸ {p}" if is_current else f"　{p}"
-            if st.sidebar.button(
-                label,
-                key=f"nav_{p}",
-                use_container_width=True,
-                type="primary" if is_current else "secondary",
-            ):
-                if st.session_state.page != p:
-                    st.session_state.page = p
-                    st.rerun()
-        st.sidebar.write("")  # 區塊之間的空隙
+        def nav_button(page):
+            label = "研究工作台" if page == "功能總覽" else page
+            if st.button(label, key=f"nav_{page}", use_container_width=True,
+                         type="primary" if st.session_state.page == page else "secondary"):
+                st.session_state.page = page
+                st.rerun()
+
+        if query.strip():
+            matches = [p for p in PAGES if query.strip().lower() in (p + ("研究工作台" if p == "功能總覽" else "")).lower()]
+            if not matches:
+                st.caption("找不到符合的功能。")
+            for page in matches:
+                nav_button(page)
+        else:
+            st.caption("常用工作")
+            for page in common:
+                nav_button(page)
+            labels = ["市場與研究", "持股與訊號", "執行與紀錄", "系統設定"]
+            for (group, names), label in zip(NAV_GROUPS.items(), labels):
+                pages = [p for p in names if p not in common]
+                with st.expander(label, expanded=st.session_state.page in pages):
+                    for page in pages:
+                        nav_button(page)
+            nav_button("本次更新")
+        task_indicator()
+        with st.expander("服務控制"):
+            _render_sidebar_quick_controls()
+        with st.expander("診斷資訊"):
+            st.caption(f"專案：{PROJECT_ROOT}")
+            st.caption(f"UI build: {DASHBOARD_UI_BUILD}")
+            env = cached_env_values()
+            st.caption("LLM 已設定" if llm_provider_ready(env) else "LLM 尚未設定")
+            try:
+                calls, tokens_in, tokens_out = cached_llm_today_stats(str(PROJECT_ROOT))
+                st.caption(f"今日 LLM：{calls} 次 · {tokens_in:,} → {tokens_out:,} tokens")
+            except Exception:
+                st.caption("暫時無法讀取 LLM 統計")
+        st.caption(f"{DASHBOARD_UI_BUILD} · 本次更新可從上方查看")
 
     pick = st.session_state.page
-
-    st.sidebar.markdown("---")
-    runner = get_runner(PROJECT_ROOT)
-    if runner.is_running():
-        st.sidebar.markdown(_badge("Bot 執行中", "green"), unsafe_allow_html=True)
-    else:
-        st.sidebar.markdown(_badge("Bot 待機", "gray"), unsafe_allow_html=True)
-
-    try:
-        env_values_for_sb = cached_env_values()
-        if env_values_for_sb.get("GEMINI_API_KEY"):
-            st.sidebar.markdown(
-                _badge("🤖 LLM 已啟用 (會收費)", "purple"),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.sidebar.markdown(_badge("LLM 未啟用", "gray"), unsafe_allow_html=True)
-        try:
-            reg = get_registry(PROJECT_ROOT / "prompts")
-            st.sidebar.caption(f"Prompt 載入: {len(reg.list_ids())} 個")
-        except Exception:
-            pass
-        try:
-            n_calls, tokens_in, tokens_out = cached_llm_today_stats(str(PROJECT_ROOT))
-            if n_calls:
-                st.sidebar.caption(
-                    f"今日 LLM 呼叫: {n_calls}+ 筆 "
-                    f"({tokens_in:,}→{tokens_out:,} tokens)"
-                )
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    st.sidebar.caption(f".env: `{env_path()}`")
-    st.sidebar.caption(f"專案: `{PROJECT_ROOT}`")
-    st.sidebar.caption(f"UI build: `{DASHBOARD_UI_BUILD}`")
-    try:
-        from bot.dashboard import common as _dash_common
-
-        st.sidebar.caption(f"模組: `{Path(_dash_common.__file__).name}`")
-    except Exception:
-        pass
-
     write_dashboard_heartbeat(pick)
-    _debug_log_session(
-        "H11",
-        "nav.py:main_app",
-        "dashboard page render",
-        {"page": pick},
-    )
-    st.caption(
-        f"🔧 儀表板版本 **`{DASHBOARD_UI_BUILD}`** · 專案 `{PROJECT_ROOT}` · "
-        f"目前頁面：**{pick}**"
-    )
+    _debug_log_session("H11", "nav.py:main_app", "dashboard page render", {"page": pick})
+    if pick != "功能總覽":
+        st.caption("STOCK LAB / " + pick)
     PAGES[pick]()
 
 
 if __name__ == "__main__":
     main_app()
-

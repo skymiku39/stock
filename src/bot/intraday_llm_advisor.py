@@ -110,8 +110,8 @@ class IntradayLlmAdvisor:
         return max(60, minutes * 60)
 
     def _run_cycle(self, reason: str) -> None:
-        if not self.settings.gemini_api_key:
-            self.logger.warning("略過盤中 LLM 顧問：未設定 GEMINI_API_KEY")
+        if not self.settings.llm_enabled:
+            self.logger.warning("略過盤中 LLM 顧問：尚未設定可用的 LLM 提供者")
             return
 
         with self._lock:
@@ -188,6 +188,8 @@ class IntradayLlmAdvisor:
         client = GeminiClient(
             api_key=self.settings.gemini_api_key,
             model=self.settings.gemini_model,
+            settings=self.settings,
+            root=self.project_root,
         )
         registry = get_registry(self.project_root / "prompts")
         registry.reload()

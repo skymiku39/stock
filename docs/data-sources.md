@@ -1,7 +1,7 @@
 # 資料源清單與健康度驗證
 
 本文件列出系統使用的所有外部資料源、用途、是否需要憑證、以及失敗時的 fallback。
-可用 `uv run stock-validate` 一鍵做「只讀」健康度檢查 (見最後一節)。
+可用 `uv run stock-validate` 一鍵做健康度檢查 (見最後一節；**省略 `--root` 才是對正式 `data/` 的安全預設**)。
 
 > 三層驗證概念：**link** 連結有填且格式正確 → **http** 能抓到有效內容 → **parse** 解析後可被流程使用。
 
@@ -23,11 +23,25 @@
 | 三大法人籌碼 | TWSE OpenAPI (法人/借券/融資) | 籌碼面 | 否 | 本地 cache |
 | 集保股權分散 | TDCC OpenData | 大戶 vs 散戶 | 否 | 本地 cache |
 | **法說會行事曆** | `mopsov.twse.com.tw/mops/web/ajax_t100sb02_1` | 法說會日曆 | 否 | 舊主機 `mops.twse.com.tw` 會被安全性阻擋；可用 `MOPS_HOST` 覆寫主機 |
+| **法說簡報原文** | MOPS 行事曆 `presentation_url` → `data/mops_downloads/` | `research_ticker` 的 `presentation_block` | 否 | 先讀本地 TXT/HTML/PDF；不足時自動下載近 2 場並抽字；失敗則該段為「(無)」 |
+| **量化證據** | 本地 fundamentals / chips / etf_holdings | `research_ticker` 的 `quant_block` | 否 | 基本面先讀 cache，空才補抓；籌碼用傳入或近 5 日；ETF 共識只讀本地持股 |
 | **重大訊息** | `openapi.twse.com.tw/v1/opendata/t187ap04_L` (每日全市場) | 個股重大訊息 | 否 | fallback 走 `mopsov` 個股歷史 `ajax_t05st02`；遇安全性阻擋會明確標記失敗 |
 | 新聞 | 鉅亨網 cnyes | 題材/情緒 | 否 | 空清單 |
 | 網路搜尋 | DuckDuckGo HTML | 法說/題材研究 | 否 | 空清單 (DDG 偶回 202 限流) |
 | 美股/指數/VIX/ADR | yfinance | 跨市場連動 | 否 | TWSE 收盤 fallback；未安裝則「無資料」 |
 | **台指期正逆價差** | `openapi.taifex.com.tw/v1/DailyMarketReportFut` | 期貨領先指標 (正逆價差) | 否 | 抓不到則 macro note 標記、不影響其他分析 |
+
+### Macro 時間與來源判定
+
+macro 快照的 `asof_date` 是快照／抓取日期，不等於每一筆行情的觀測日期。
+指數、ADR、台股現貨與 USDTWD 會各自保存 `source_date`；ADR 溢價若跨市場
+日期未對齊，結果仍可供參考，但會在 `notes` 標示日期差異。台股現貨若退回
+TWSE `STOCK_DAY_AVG_ALL` 且回應未提供可可靠確認的觀測日，系統會保留空白，
+不以抓取時間冒充市場日期。
+
+重大訊息 OpenAPI 的「有效回應但沒有該股票」與「HTTP／JSON 失敗」也會分開
+記錄：前者是 `openapi_valid=true` 且 `openapi_count=0`，後者保留
+`openapi_valid=false` 與 `openapi_error`，不會把來源故障當成沒有重大訊息。
 
 > **產業分類 (持股分析「未分類」修復)**：上述公司基本資料的「產業別」原始格式是**數字代碼**
 > (例如 `24`=半導體業)，由 `bot/company_info.py` 的 `INDUSTRY_CODE_MAP` 轉成中文後寫入
@@ -46,17 +60,28 @@
 
 | 來源 | URL 樣式 | 適用 | 失敗 fallback |
 |------|---------|------|--------------|
-| etfinfo.tw | `etfinfo.tw/etf/{symbol}/holdings` | 多數已掛牌主動式 ETF (22 檔) | 改 MoneyDJ |
-| MoneyDJ | `moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw` | etfinfo 未收錄者 (00402A/00404A/00405A/00406A/00407A/00998A)、海外型 | 來源頁顯示「查無資料」→ 標記 `no_data_yet` (略過 LLM，待後續自動補齊) |
+| etfinfo.tw | `etfinfo.tw/etf/{symbol}/holdings` | 目前 27 檔主動式 ETF；Nuxt payload／完整表先做 deterministic parse | 頁面契約改版時保留 raw，才允許受控 LLM fallback |
+| MoneyDJ ETF | `moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={symbol}.tw` | 使用者覆寫來源時的 fallback；前十大摘要不可當完整持股 | 標記 `source_incomplete_top_n`，保留 raw 且禁止 LLM 假補全 |
 
-> **已知限制（新掛牌）**：2026/5 下旬募集、6 月初才掛牌的 5 檔
-> (00402A、00404A、00405A、00406A、00407A) 連發行商與第三方 (etfinfo / MoneyDJ) **都尚未公開每日成分股**
-> (MoneyDJ 頁面顯示「查無資料」)。URL 雖回 HTTP 200，但持股表為空。
-> - 程式會將其標記為 **`no_data_yet`**（與真正解析失敗 `no_holdings_parsed` 區分），且**不浪費 LLM 呼叫**。
-> - **背景排程器 (`stock-scheduler`) 會定期重抓**，一旦來源公開持股即自動產生 CSV，**無需人工介入**。
-> - 26/27 檔（含已修復的 00998A）可正常解析；屬資料可得性限制，非程式錯誤。
->
-> 持股解析依賴 Gemini (`extract_etf_holdings` prompt)，需 `GEMINI_API_KEY`。
+## 共同基金持股（納入共識追蹤）
+
+| 來源 | URL 樣式 | 適用 | 解析方式 |
+|------|---------|------|----------|
+| MoneyDJ FundDJ | `moneydj.com/funddj/yp/yp013000.djhtm?a=<fund_id>` | **ALI006 安聯台灣科技基金**（`fund_id=acdd04`） | `fund_holdings_parser` 確定性解析 HTML table（免 LLM）；公司名 → 代號走 `company_info.lookup_symbol_by_name` |
+
+> 共同基金不是 ETF，但持股對共識加碼／跟單候選仍有參考價值，故以虛擬代號
+> `ALI006` 掛進 `DEFAULT_ACTIVE_ETFS`，快照同樣寫入 `data/etf_holdings/ALI006/`。
+> Shioaji 查不到契約時會自動略過報價，不影響持股共識計算。
+
+> **目前狀態（2026-09-19）**：27 檔 ETF 都已能由 etfinfo.tw 的完整 SSR payload
+> 產生可重播的 canonical CSV；其中 00404A／00406A 的選擇權／衍生品列保留於 raw，
+> 但明確排除於股票持股模型。若未來來源退化成只有前十大，程式會標記
+> **`source_incomplete_top_n`**，不把摘要誤當完整快照，也不會交給 LLM 假補全。
+> `stock-scheduler` 仍會定期重抓；只有 parser 契約失敗且來源不是已知 top-N 時，才進入
+> 受控的 `extract_etf_holdings` fallback，因此目前正常 batch 不需要 `GEMINI_API_KEY`。
+> 主動式 ETF 清單也會在完整研究管線啟動時以 `sync_etf_meta_to_db()` 物化到
+> `etf_meta`；這些列是 `config://`、`quality_status=unknown` 的設定 metadata，
+> 不會被當成外部市場證據，已有 exact 外部資料則不覆蓋。
 
 ## 需憑證 / 即時的資料源
 
@@ -69,18 +94,32 @@
 ## 一鍵健康度驗證
 
 ```bash
-uv run stock-validate                  # 全部公開資料源 (read-only，不碰正式 data/)
+# 安全預設：省略 --root → 暫存資料根（結束後清理），不碰正式 data/
+uv run stock-validate
 uv run stock-validate --json out.json  # 另存 JSON 摘要
 uv run stock-validate --md out.md      # 另存 Markdown 摘要
 uv run stock-validate --shioaji        # 額外嘗試 Shioaji 登入/contract/snapshot (需憑證)
 uv run stock-validate --mis-seconds 30 # MIS 即時 tick 連續輪詢 30 秒
 uv run stock-validate --cloud          # 對 Google Sheets 做 live ping
+
+# 明確 --root：該路徑會傳給收集器，可能寫入 cache / raw / provenance
+# （僅在你有意對該樹落地資料時使用；不要誤當成「只讀」）
+uv run stock-validate --root C:\path\to\project
 ```
 
-特性：
-- **只讀**：所有抓取導向暫存資料夾，不覆蓋正式 `data/`、不下單、不寫雲端。
+### `--root` 語意（與實作對齊）
+
+| 呼叫方式 | 資料 root | 副作用 |
+|----------|-----------|--------|
+| **省略 `--root`** | `tempfile` 暫存目錄，檢查結束後刪除 | 不寫正式 `data/`；設定（`.env` 等）仍讀 **目前工作目錄** |
+| **`--root PATH`** | 明確傳入的 `PATH` | 收集器可寫入該 root 下的 **cache / raw / provenance**；設定也讀該 root |
+
+安全／近似只讀驗證請**省略 `--root`**（或指向用完即丟的目錄）。對正式專案樹加 `--root` 不是 read-only。
+
+其他特性：
+- **不下單**；雲端 live ping 僅在加 `--cloud` 時打到遠端。
 - **不洩漏金鑰**：僅顯示憑證「是否存在 (present=true/false)」，絕不印出金鑰內容。
 - **三層輸出**：每項回報 `layer / ok / rows / sample_date / error / note`。
-- **誠實標記**：MOPS 安全性阻擋、Shioaji 模擬 0 筆、ETF 新掛牌無持股等，皆以
-  `error` / `note` 明確標記，不會被當成「資料可用」。
+- **誠實標記**：MOPS 安全性阻擋、Shioaji 模擬 0 筆、ETF 新掛牌無持股、MIS 盤後殘留列等，皆以
+  `error` / `note` 明確標記，不會被當成「即時資料可用」。
 - 結束碼：有「真正失敗 (非警告)」回傳非 0，方便接 CI。

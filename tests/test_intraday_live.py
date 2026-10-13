@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from bot.intraday_live import (
     assess_tracking_status,
     build_live_tracking_rows,
@@ -129,3 +131,91 @@ def test_assess_tracking_status_flags_non_today_quotes() -> None:
 
     assert result["status"] == "非今日資料"
     assert result["correctness"] == "無法檢討"
+
+
+def test_build_live_tracking_rows_does_not_expose_stale_quote_as_live(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeTwseSource:
+        def __init__(self, symbols, logger=None):
+            self.symbols = symbols
+
+        def get_quotes(self):
+            return {
+                "2330": {
+                    "price": 99.0,
+                    "pct_chg": -1.0,
+                    "volume": 100,
+                    "quote_date": "1999-01-01",
+                    "quote_time": "13:30:00",
+                    "source": "twse_mis",
+                    "price_basis": "last_trade",
+                }
+            }
+
+    monkeypatch.setattr("bot.market_source.TwsePublicMarketSource", FakeTwseSource)
+    tracking = build_live_tracking_rows(
+        {
+            "rankings": [{"ticker": "2330", "name": "台積電"}],
+        },
+        root=tmp_path,
+        max_tickers=1,
+        refresh_quotes=True,
+        refresh_technicals=False,
+        include_news=False,
+    )
+
+    row = tracking["rows"][0]
+    assert row["quote_date"] == "1999-01-01"
+    assert row["quote_price"] is None
+    assert row["quote_pct_change"] is None
+    assert row["has_current_data"] is False
+    assert row["status"] == "非今日資料"
+
+
+def test_technical_refresh_does_not_promote_daily_candle_to_live_quote(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeTwseSource:
+        def __init__(self, symbols, logger=None):
+            self.symbols = symbols
+
+        def get_quotes(self):
+            return {}
+
+    snap = SimpleNamespace(
+        has_data=True,
+        last_date="2026-09-15",
+        last_close=101.0,
+        pct_change_1d=1.0,
+        volume_last=1000.0,
+        vol_ma20=500.0,
+        technical_score=64.0,
+        candle_pattern="",
+        candle_bias="",
+        signals=[],
+    )
+    monkeypatch.setattr("bot.market_source.TwsePublicMarketSource", FakeTwseSource)
+    monkeypatch.setattr(
+        "bot.technicals.build_technical_snapshot",
+        lambda *_args, **_kwargs: (snap, None),
+    )
+
+    tracking = build_live_tracking_rows(
+        {"rankings": [{"ticker": "2330", "name": "台積電"}]},
+        root=tmp_path,
+        max_tickers=1,
+        refresh_quotes=True,
+        refresh_technicals=True,
+        include_news=False,
+    )
+
+    row = tracking["rows"][0]
+    assert row["has_current_data"] is False
+    assert row["current_close"] is None
+    assert row["current_pct_change"] is None
+    assert row["current_volume_ratio"] is None
+    assert row["technical_volume_ratio"] == 2.0
+    assert row["technical_last_date"] == "2026-09-15"

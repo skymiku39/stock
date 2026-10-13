@@ -197,7 +197,17 @@ def build_live_tracking_rows(
     if refresh_quotes and tickers:
         try:
             from bot.market_source import TwsePublicMarketSource
-            quote_map = TwsePublicMarketSource(tickers, logger=log).get_quotes()
+            try:
+                quote_source = TwsePublicMarketSource(
+                    tickers, logger=log, root=root_path,
+                )
+            except TypeError as exc:
+                # Keep compatibility with injected test/legacy source
+                # implementations that predate the optional provenance root.
+                if "root" not in str(exc):
+                    raise
+                quote_source = TwsePublicMarketSource(tickers, logger=log)
+            quote_map = quote_source.get_quotes()
         except Exception:
             log.debug("TWSE MIS quote refresh failed", exc_info=True)
 
@@ -216,6 +226,7 @@ def build_live_tracking_rows(
             news_items = []
 
     rows: List[Dict[str, Any]] = []
+    today_iso = now_tw().date().isoformat()
     for mention in mentions:
         ticker = mention["ticker"]
         live: Dict[str, Any] = dict(mention)
@@ -225,6 +236,7 @@ def build_live_tracking_rows(
             "current_close": None,
             "current_pct_change": None,
             "current_volume_ratio": None,
+            "technical_volume_ratio": None,
             "current_technical_score": None,
             "score_delta": None,
             "quote_price": None,
@@ -246,15 +258,11 @@ def build_live_tracking_rows(
 
         quote = quote_map.get(ticker) or {}
         if quote:
+            quote_date = str(quote.get("quote_date") or "")
+            quote_is_today = quote_date == today_iso
             live.update({
-                "has_current_data": quote.get("price") is not None,
-                "current_last_date": quote.get("quote_date", ""),
-                "current_close": quote.get("price"),
-                "current_pct_change": quote.get("pct_chg"),
-                "quote_price": quote.get("price"),
-                "quote_pct_change": quote.get("pct_chg"),
-                "quote_volume": quote.get("volume"),
-                "quote_date": quote.get("quote_date", ""),
+                # Keep provenance visible even when the quote is rejected below.
+                "quote_date": quote_date,
                 "quote_time": quote.get("quote_time", ""),
                 "quote_source": quote.get("source", ""),
                 "quote_price_basis": quote.get("price_basis", ""),
@@ -262,6 +270,16 @@ def build_live_tracking_rows(
                 "quote_best_ask": quote.get("best_ask"),
                 "quote_fetched_at": quote.get("fetched_at", ""),
             })
+            if quote_is_today and quote.get("price") is not None:
+                live.update({
+                    "has_current_data": True,
+                    "current_last_date": quote_date,
+                    "current_close": quote.get("price"),
+                    "current_pct_change": quote.get("pct_chg"),
+                    "quote_price": quote.get("price"),
+                    "quote_pct_change": quote.get("pct_chg"),
+                    "quote_volume": quote.get("volume"),
+                })
 
         if refresh_technicals:
             try:
@@ -274,20 +292,36 @@ def build_live_tracking_rows(
                     logger=log,
                 )
                 if getattr(snap, "has_data", False):
-                    vol_ratio = 0.0
-                    volume_for_ratio = live.get("quote_volume") or snap.volume_last
-                    if snap.vol_ma20 and snap.vol_ma20 > 0 and volume_for_ratio:
-                        vol_ratio = round(float(volume_for_ratio) / float(snap.vol_ma20), 2)
+                    has_live_quote = bool(live.get("has_current_data"))
+                    technical_volume_ratio = None
+                    if snap.vol_ma20 and snap.vol_ma20 > 0 and snap.volume_last is not None:
+                        technical_volume_ratio = round(
+                            float(snap.volume_last) / float(snap.vol_ma20), 2
+                        )
+                    live_volume_ratio = None
+                    if (
+                        has_live_quote
+                        and snap.vol_ma20
+                        and snap.vol_ma20 > 0
+                        and live.get("quote_volume") is not None
+                    ):
+                        live_volume_ratio = round(
+                            float(live["quote_volume"]) / float(snap.vol_ma20), 2
+                        )
                     live.update({
-                        "has_current_data": bool(live.get("has_current_data") or True),
-                        "current_last_date": live.get("current_last_date") or snap.last_date,
-                        "current_close": live.get("current_close") or snap.last_close,
+                        # A daily K-line snapshot is useful for the manual
+                        # review, but it must not masquerade as today's live quote.
+                        "has_current_data": bool(live.get("has_current_data")),
+                        "current_last_date": live.get("current_last_date") if has_live_quote else "",
+                        "current_close": (
+                            live.get("current_close") if has_live_quote else None
+                        ),
                         "current_pct_change": (
                             live.get("current_pct_change")
-                            if live.get("current_pct_change") is not None
-                            else snap.pct_change_1d
+                            if has_live_quote and live.get("current_pct_change") is not None
+                            else None
                         ),
-                        "current_volume_ratio": vol_ratio,
+                        "current_volume_ratio": live_volume_ratio,
                         "current_technical_score": snap.technical_score,
                         "score_delta": round(
                             snap.technical_score - _as_float(live.get("initial_technical_score"), 50.0),
@@ -297,6 +331,8 @@ def build_live_tracking_rows(
                         "candle_bias": snap.candle_bias,
                         "signals": snap.signals[:5],
                         "technical_source": "refreshed" if refresh_technicals else "cache",
+                        "technical_last_date": snap.last_date,
+                        "technical_volume_ratio": technical_volume_ratio,
                     })
             except Exception:
                 log.debug("[%s] technical refresh failed", ticker, exc_info=True)

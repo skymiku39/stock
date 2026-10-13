@@ -14,15 +14,19 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import time
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable, List, Literal, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from bot.cloud_file_cache import mirror_file_to_cloud
+from bot.source_registry import SourceRegistry
 from bot.stock_db import IntradayBar, StockDB, default_db_path
-from bot.utils import get_logger, mk_folder
+from bot.utils import get_logger, mk_folder, now_tw
 
 IntervalKind = Literal["1m", "tick"]
 TW_TZ = "Asia/Taipei"
@@ -144,10 +148,86 @@ def save_bars_csv(bars: Sequence[IntradayBar], path: Path) -> None:
             "volume": b.volume,
             "amount": b.amount,
             "source": b.source,
+            "source_url": b.source_url,
+            "source_date": b.source_date,
+            "retrieved_at": b.retrieved_at,
+            "quality_status": b.quality_status,
+            "source_record_id": b.source_record_id,
         }
         for b in bars
     ]
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def _capture_intraday_chunk(
+    *,
+    root: Optional[Path],
+    symbol: str,
+    start: dt.date,
+    end: dt.date,
+    interval: IntervalKind,
+    bars: Sequence[IntradayBar],
+    db: StockDB,
+    logger: logging.Logger,
+) -> tuple[str, str, str]:
+    """保存 Shioaji 轉換後的分 K/Tick 封套，並明確標成 cache-only。
+
+    Shioaji SDK 已把回應轉成 model，這裡沒有宣稱取得 SDK 底層 HTTP bytes；
+    封套的用途是跨機器重播、hash 驗證與 canonical row 的 exact identity，
+    provenance 則仍標示為 ``cache_only``。
+    """
+    if root is None or not bars:
+        return "", "", ""
+    retrieved_at = now_tw().isoformat(timespec="seconds")
+    source_url = f"shioaji://{interval}/{symbol}"
+    payload = {
+        "schema_version": 1,
+        "adapter": "shioaji",
+        "symbol": symbol,
+        "interval": interval,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "retrieved_at": retrieved_at,
+        "rows": [
+            {
+                "symbol": bar.symbol,
+                "ts": bar.ts,
+                "interval": bar.interval,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+                "amount": bar.amount,
+            }
+            for bar in bars
+        ],
+    }
+    try:
+        document = SourceRegistry(root, db=db).capture_document(
+            f"shioaji_{interval}",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+            source_url=source_url,
+            source_ref=f"{symbol}:{interval}:{start.isoformat()}:{end.isoformat()}",
+            title=f"Shioaji {interval} {symbol} {start.isoformat()}~{end.isoformat()}",
+            kind="normalized_response",
+            suffix="json",
+            mime_type="application/json",
+            as_of=start.isoformat(),
+            retrieved_at=retrieved_at,
+            quality_status="partial",
+            metadata={
+                "adapter": "shioaji",
+                "provenance_status": "cache_only",
+                "normalized": True,
+                "interval": interval,
+                "row_count": len(bars),
+            },
+        )
+        return document.document_id, source_url, retrieved_at
+    except Exception as exc:  # pragma: no cover - filesystem/runtime boundary
+        logger.warning("%s %s raw 封套保存失敗：%s", symbol, interval, exc)
+        return "", source_url, retrieved_at
 
 
 def fetch_intraday_chunk(
@@ -177,7 +257,7 @@ def fetch_intraday_chunk(
     return bars
 
 
-def fetch_and_store_intraday(
+def _fetch_and_store_intraday_open_db(
     broker: Any,
     symbol: str,
     start: dt.date,
@@ -244,15 +324,54 @@ def fetch_and_store_intraday(
             continue
 
         if bars:
+            source_document_id, source_url, retrieved_at = _capture_intraday_chunk(
+                root=root,
+                symbol=symbol,
+                start=chunk_start,
+                end=chunk_end,
+                interval=interval,
+                bars=bars,
+                db=database,
+                logger=log,
+            )
+            source_date = f"{chunk_start.isoformat()}:{chunk_end.isoformat()}"
+            for bar in bars:
+                bar.source_url = source_url
+                bar.source_date = source_date
+                bar.retrieved_at = retrieved_at
+                bar.quality_status = "partial"
+                bar.source_record_id = source_document_id
             total_written += database.bulk_upsert_intraday_bars(bars)
             if save_csv and chunk_days == 1:
-                save_bars_csv(bars, _cache_path(symbol, interval, chunk_start, root))
+                csv_path = _cache_path(symbol, interval, chunk_start, root)
+                save_bars_csv(bars, csv_path)
+                mirror_file_to_cloud(csv_path, root=root)
 
         i += chunk_days
         if request_delay_sec > 0:
             time.sleep(request_delay_sec)
 
     return total_written, skipped_days
+
+
+@wraps(_fetch_and_store_intraday_open_db)
+def fetch_and_store_intraday(*args: Any, **kwargs: Any) -> Tuple[int, int]:
+    """抓取並保存盤中資料，明確管理函式自有的 SQLite 連線。
+
+    呼叫端若傳入 ``db``，連線 ownership 仍歸呼叫端；未傳入時由本函式
+    建立並在成功、提前 return 或例外後關閉，避免 CLI／排程重複執行時
+    累積 SQLite/WAL 資源。
+    """
+    if kwargs.get("db") is not None:
+        return _fetch_and_store_intraday_open_db(*args, **kwargs)
+
+    root = kwargs.get("root")
+    database = StockDB.open(path=default_db_path(root))
+    kwargs["db"] = database
+    try:
+        return _fetch_and_store_intraday_open_db(*args, **kwargs)
+    finally:
+        database.close()
 
 
 def bars_to_dataframe(bars: Sequence[IntradayBar]) -> pd.DataFrame:
@@ -269,6 +388,12 @@ def bars_to_dataframe(bars: Sequence[IntradayBar]) -> pd.DataFrame:
             "close": b.close,
             "volume": b.volume,
             "amount": b.amount,
+            "source": b.source,
+            "source_url": b.source_url,
+            "source_date": b.source_date,
+            "retrieved_at": b.retrieved_at,
+            "quality_status": b.quality_status,
+            "source_record_id": b.source_record_id,
         }
         for b in bars
     ])

@@ -63,3 +63,6 @@ class SmileScreenOnDataReadyHandler:
             )
         except Exception:
             self._logger.exception("事件鏈微笑曲線選股失敗")
+        finally:
+            if "db" in locals():
+                db.close()

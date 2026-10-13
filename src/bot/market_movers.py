@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -19,6 +20,7 @@ from typing import Any, Dict, List, Literal, Optional
 import requests
 
 from bot.market_meta import is_etf, load_market_map
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, now_tw
 
 MIS_INDEX_URL = "https://mis.twse.com.tw/stock/index.jsp"
@@ -50,6 +52,8 @@ class MarketMoversResult:
     quoted: int = 0
     batch_count: int = 0
     duration_sec: float = 0.0
+    source_date: str = ""
+    stale_count: int = 0
     rows: List[MoverRow] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
@@ -99,6 +103,27 @@ def _first_book_price(value: Any) -> Optional[float]:
     return _parse_float(text.split("_", 1)[0])
 
 
+def _parse_mis_date(value: Any) -> str:
+    raw = str(value or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    return ""
+
+
+def _parse_mis_response(response: Any) -> List[dict]:
+    """Validate one MIS response before any row is allowed downstream."""
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("MIS payload 不是 JSON object")
+    items = payload.get("msgArray")
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise ValueError("MIS msgArray 不是 list")
+    return [item for item in items if isinstance(item, dict)]
+
+
 def _resolve_price(item: Dict[str, Any]) -> tuple[Optional[float], str]:
     z_str = item.get("z", "-")
     pz_str = item.get("pz", "-")
@@ -117,6 +142,22 @@ def _resolve_price(item: Dict[str, Any]) -> tuple[Optional[float], str]:
     if best_ask is not None:
         return best_ask, "best_ask"
     return None, ""
+
+
+def filter_current_mis_rows(
+    rows: Dict[str, MoverRow],
+    asof_date: dt.date,
+) -> tuple[Dict[str, MoverRow], int]:
+    """Keep only rows explicitly stamped with the requested Taiwan date."""
+    expected = asof_date.isoformat()
+    current: Dict[str, MoverRow] = {}
+    stale_count = 0
+    for ticker, row in rows.items():
+        if row.quote_date != expected:
+            stale_count += 1
+            continue
+        current[ticker] = row
+    return current, stale_count
 
 
 def _ex_ch_for_batch(
@@ -142,10 +183,7 @@ def _parse_mis_items(items: List[dict]) -> Dict[str, MoverRow]:
         pct_chg: Optional[float] = None
         if price is not None and prev_close > 0:
             pct_chg = round(100 * (price - prev_close) / prev_close, 2)
-        raw_date = str(item.get("d") or "")
-        quote_date = ""
-        if len(raw_date) == 8 and raw_date.isdigit():
-            quote_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        quote_date = _parse_mis_date(item.get("d"))
         out[code] = MoverRow(
             ticker=code,
             name=str(item.get("n") or ""),
@@ -196,8 +234,10 @@ def fetch_market_movers(
     """掃描全市場 MIS 報價並回傳漲跌幅排行。"""
     log = logger or get_logger("market-movers")
     t0 = time.time()
+    fetched_at = now_tw()
     result = MarketMoversResult(
-        asof=now_tw().isoformat(timespec="seconds"),
+        asof=fetched_at.isoformat(timespec="seconds"),
+        source_date=fetched_at.date().isoformat(),
         direction=direction,
         limit=max(1, limit),
     )
@@ -232,8 +272,29 @@ def fetch_market_movers(
                 params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
                 timeout=20,
             )
-            data = resp.json()
-            merged.update(_parse_mis_items(data.get("msgArray") or []))
+            if root is not None and getattr(resp, "content", b""):
+                try:
+                    status_code = getattr(resp, "status_code", 200)
+                    status_ok = 200 <= int(status_code) < 300
+                    SourceRegistry(Path(root)).capture_document(
+                        "twse_mis_market_movers",
+                        resp.content,
+                        source_url=MIS_API_URL,
+                        source_ref=f"{fetched_at.date().isoformat()}:batch-{idx + 1}",
+                        title=f"TWSE MIS 全市場排行批次 {idx + 1}",
+                        kind="http_response",
+                        suffix="json",
+                        mime_type=str(
+                            getattr(resp, "headers", {}).get("Content-Type", "")
+                            or "application/json"
+                        ),
+                        as_of=fetched_at.date().isoformat(),
+                        quality_status="ok" if status_ok else "invalid",
+                        metadata={"batch_index": idx, "batch_size": len(batch)},
+                    )
+                except Exception:
+                    log.debug("TWSE MIS market movers raw 保存失敗", exc_info=True)
+            merged.update(_parse_mis_items(_parse_mis_response(resp)))
         except Exception as exc:  # noqa: BLE001
             msg = f"批次 {idx + 1}/{len(batches)} 失敗: {exc}"
             log.warning(msg)
@@ -241,6 +302,11 @@ def fetch_market_movers(
         if idx + 1 < len(batches) and batch_pause_sec > 0:
             time.sleep(batch_pause_sec)
 
+    merged, result.stale_count = filter_current_mis_rows(merged, fetched_at.date())
+    if result.stale_count:
+        result.errors.append(
+            f"已忽略 {result.stale_count} 筆非 {result.source_date} 的 MIS 報價"
+        )
     quoted = [r for r in merged.values() if r.pct_chg is not None]
     result.quoted = len(quoted)
 
@@ -269,5 +335,6 @@ __all__ = [
     "MarketMoversResult",
     "MoverRow",
     "fetch_market_movers",
+    "filter_current_mis_rows",
     "list_scan_tickers",
 ]

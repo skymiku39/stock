@@ -1,7 +1,7 @@
 [project]
 name = "stock-bot"
 version = "0.1.0"
-description = "台股當沖自動交易機器人 (Shioaji)"
+description = "台股研究與分析平台 (Shioaji；當沖實單已封存)"
 readme = "README.md"
 authors = [
     { name = "skymiku39", email = "52848246+skymiku39@users.noreply.github.com" }
@@ -13,9 +13,10 @@ dependencies = [
     "python-dotenv",
     "pandas",
     "requests",
-    "streamlit>=1.32",
+    "streamlit>=1.41",
     "altair>=5.0",
     "google-genai>=1.0",
+    "websockets>=16.0",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "pypdf>=4.0",
@@ -43,6 +44,7 @@ stock-fundamentals-refresh = "bot.fundamentals_refresh:main"
 stock-intraday = "bot.intraday_cli:main"
 stock-nextday = "bot.next_day_watch_cli:main"
 stock-preflight = "bot.preflight_cli:main"
+stock-system-preflight = "bot.system_preflight_cli:main"
 stock-validate = "bot.validate_sources:main"
 stock-oddlot-test = "bot.oddlot_test:main"
 stock-scheduler = "bot.scheduler:main"
@@ -58,6 +60,16 @@ stock-smile-screen = "bot.smile_curve_screener_cli:main"
 stock-smile-audit = "bot.smile_curve_audit_cli:main"
 stock-watch-snapshot = "bot.watch_snapshot:main"
 stock-watch-data-fetch = "bot.watch_data_fetch:main"
+stock-db-backup = "bot.db_backup_cli:main"
+stock-data-audit = "bot.source_audit_cli:main"
+stock-provenance-backfill = "bot.provenance_backfill_cli:main"
+stock-evidence-link-repair = "bot.evidence_link_repair_cli:main"
+stock-research-quarantine = "bot.research_quarantine_cli:main"
+stock-calibrate = "bot.scoring_calibration:main"
+stock-memory = "bot.memory_cli:main"
+stock-ask = "bot.ask_cli:main"
+stock-sync-conflicts = "bot.sync_conflict_cli:main"
+stock-test = "bot.test_cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -69,3 +81,7 @@ packages = ["src/bot"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: tests that need real data, network, or external services",
+    "slow: slow-running tests excluded from the unit profile",
+]

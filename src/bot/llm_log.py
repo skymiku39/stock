@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import threading
@@ -41,6 +42,13 @@ class LlmCallRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def analysis_record_id(record: LlmCallRecord) -> str:
+    """回傳與 ``llm_analysis_history.id`` 相同的穩定識別。"""
+    metadata = record.metadata or {}
+    ticker = str(metadata.get("ticker") or metadata.get("symbol") or "")
+    return f"{record.ts}_{record.prompt_id}_{ticker or 'NA'}"
+
+
 class LlmCallLogger:
     """以日為單位切檔的 JSONL writer。"""
 
@@ -48,8 +56,23 @@ class LlmCallLogger:
         self,
         log_dir: Optional[Path] = None,
         logger: Optional[logging.Logger] = None,
+        root: Optional[Path] = None,
     ):
-        self.log_dir = log_dir or (Path.cwd() / "log" / "llm_calls")
+        # JSONL 測試／匯入目錄不一定屬於本專案；若沒有明確 root，不能
+        # 猜測並把 audit record 寫入 cwd 的正式 stock.db。只有以下兩種
+        # 情況允許 mirror：呼叫端明確指定 root，或 log_dir 明確是
+        # <project-root>/log/llm_calls。
+        if root is not None:
+            self.root: Optional[Path] = Path(root)
+        elif log_dir is None:
+            self.root = Path.cwd()
+        else:
+            candidate = Path(log_dir).expanduser().resolve()
+            if candidate.name == "llm_calls" and candidate.parent.name == "log":
+                self.root = candidate.parent.parent
+            else:
+                self.root = None
+        self.log_dir = Path(log_dir) if log_dir is not None else self.root / "log" / "llm_calls"
         self.logger = logger or get_logger("llm-log")
         mk_folder(str(self.log_dir))
         self._lock = threading.Lock()
@@ -97,11 +120,15 @@ class LlmCallLogger:
             self.logger.exception("LLM call log 寫入失敗")
 
         # Best-effort: 同步寫入 stock_db.llm_analysis_history 供 Google Sheet 同步。
-        # 失敗時不影響呼叫流程 (JSONL 已落地)。
-        try:
-            _mirror_to_stock_db(rec, logger=self.logger)
-        except Exception:
-            self.logger.debug("LLM analysis mirror 失敗", exc_info=True)
+        # 自訂的孤立 log_dir 沒有資料庫邊界時，只落 JSONL，避免測試／匯入
+        # 意外污染正式資料庫。失敗時也不影響呼叫流程 (JSONL 已落地)。
+        if self.root is not None:
+            try:
+                _mirror_to_stock_db(rec, logger=self.logger, root=self.root)
+            except Exception:
+                self.logger.debug("LLM analysis mirror 失敗", exc_info=True)
+        else:
+            self.logger.debug("自訂 LLM log_dir 未指定 project root，略過 DB mirror")
         return rec
 
     # ------------------------------------------------------------------
@@ -165,14 +192,25 @@ class LlmCallLogger:
 # ----------------------------------------------------------------------
 
 
-def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
+def _mirror_to_stock_db(
+    rec: LlmCallRecord,
+    *,
+    logger: logging.Logger,
+    root: Optional[Path] = None,
+) -> None:
     """把單筆 LLM 呼叫鏡像到 stock_db.llm_analysis_history。
 
     解析 output 嘗試抽出 sentiment / sentiment_score / summary / drivers / risks。
     失敗時欄位留空。
     """
     try:
-        from bot.stock_db import LlmAnalysisRow, get_db
+        from bot.stock_db import (
+            LlmAnalysisRow,
+            LlmOutputRow,
+            LlmRunEvidenceRow,
+            LlmRunRow,
+            get_db,
+        )
     except Exception:
         return  # stock_db 模組無法載入時 silently skip
 
@@ -185,6 +223,7 @@ def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
     summary = ""
     drivers = ""
     risks = ""
+    parsed: Any = {}
     try:
         if rec.output:
             cleaned = rec.output.strip()
@@ -192,7 +231,7 @@ def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
                 cleaned = cleaned.strip("`")
                 if cleaned.lower().startswith("json"):
                     cleaned = cleaned[4:].strip()
-            parsed: Any = None
+            parsed = None
             try:
                 parsed = json.loads(cleaned)
             except Exception:
@@ -227,7 +266,7 @@ def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
         logger.debug("LLM output 解析失敗 (mirror)", exc_info=True)
 
     row = LlmAnalysisRow(
-        id=f"{rec.ts}_{rec.prompt_id}_{ticker or 'NA'}",
+        id=analysis_record_id(rec),
         ts=rec.ts,
         ticker=ticker,
         prompt_id=rec.prompt_id,
@@ -246,9 +285,103 @@ def _mirror_to_stock_db(rec: LlmCallRecord, *, logger: logging.Logger) -> None:
         success=1 if rec.success else 0,
         error=str(rec.error or "")[:1000],
         source=str(md.get("task") or md.get("source") or "llm_call"),
+        evidence_json=json.dumps(
+            list(dict.fromkeys(
+                str(value) for value in (md.get("evidence_ids") or [])
+                if str(value).strip()
+            )),
+            ensure_ascii=False,
+        ),
+        source_record_id=str(
+            md.get("source_record_id") or md.get("trace_id") or ""
+        ),
     )
-    db = get_db()
+    metadata_root = md.get("project_root")
+    mirror_root = root
+    if mirror_root is None and metadata_root:
+        mirror_root = Path(str(metadata_root))
+    db = get_db(root=mirror_root)
     db.upsert_llm_analysis(row)
+    _persist_research_llm_run(
+        db,
+        rec=rec,
+        parsed=parsed if isinstance(parsed, dict) else {},
+        evidence_ids=row.evidence_json,
+        run_id=str(md.get("run_id") or "llm:" + hashlib.sha256(
+            "|".join((rec.ts, rec.prompt_id, str(md.get("task") or ""), rec.input)).encode("utf-8")
+        ).hexdigest()[:24]),
+    )
+    # 完整 prompt/output 另外落到短期記憶；失敗呼叫仍保存，但搜尋層會排除
+    # failed/invalid，避免錯誤輸出污染長期研究上下文。
+    try:
+        from bot.memory_store import MemoryStore
+
+        MemoryStore(db).record_llm_call(rec, source_record_id=row.id)
+    except Exception:
+        logger.debug("LLM short memory mirror 失敗", exc_info=True)
+
+
+def _persist_research_llm_run(
+    db: Any,
+    *,
+    rec: LlmCallRecord,
+    parsed: Dict[str, Any],
+    evidence_ids: str,
+    run_id: str,
+) -> None:
+    """Best-effort mirror into the relational research layer.
+
+    The legacy JSONL and ``llm_analysis_history`` remain intact.  A missing
+    evidence registration is recorded as an unlinked run rather than guessed
+    or silently attached by URL/title.
+    """
+    from bot.stock_db import LlmOutputRow, LlmRunEvidenceRow, LlmRunRow
+
+    md = rec.metadata or {}
+    status = "ok" if rec.success else "failed"
+    finished = rec.ts
+    db.upsert_llm_run(LlmRunRow(
+        run_id=run_id,
+        task_type=str(md.get("task") or rec.prompt_id),
+        model=rec.model,
+        prompt_id=rec.prompt_id,
+        prompt_version=rec.prompt_version,
+        started_at=rec.ts,
+        finished_at=finished,
+        status=status,
+        input_hash=hashlib.sha256((rec.input or "").encode("utf-8")).hexdigest(),
+        output_hash=hashlib.sha256((rec.output or "").encode("utf-8")).hexdigest(),
+        error=str(rec.error or "")[:2000],
+        trace_id=str(md.get("trace_id") or ""),
+        metadata_json=json.dumps(md, ensure_ascii=False, default=str),
+    ))
+    try:
+        ids = json.loads(evidence_ids or "[]")
+    except Exception:
+        ids = []
+    for ordinal, evidence_id in enumerate(ids if isinstance(ids, list) else []):
+        try:
+            db.link_llm_run_evidence(LlmRunEvidenceRow(
+                run_id=run_id, evidence_id=str(evidence_id), ordinal=ordinal,
+            ))
+        except Exception:
+            # Keep the run auditable; unresolved evidence is handled by audit.
+            continue
+    structured = json.dumps(parsed, ensure_ascii=False, default=str)
+    try:
+        output_confidence = float(parsed.get("confidence") or 0.0) if parsed else 0.0
+    except (TypeError, ValueError):
+        output_confidence = 0.0
+    db.upsert_llm_output(LlmOutputRow(
+        output_id=f"{run_id}:output",
+        run_id=run_id,
+        output_format="json" if parsed else "text",
+        structured_json=structured,
+        markdown=str(parsed.get("answer") or parsed.get("summary") or rec.output or "")[:20_000],
+        confidence=output_confidence,
+        limitation=str(parsed.get("uncertainty") or parsed.get("limitation") or "")[:4000],
+        is_publishable=1 if rec.success and parsed else 0,
+    ))
 
 
 # ----------------------------------------------------------------------
@@ -259,12 +392,26 @@ _logger_instance: Optional[LlmCallLogger] = None
 _lock = threading.Lock()
 
 
-def get_call_logger(log_dir: Optional[Path] = None) -> LlmCallLogger:
+def get_call_logger(
+    log_dir: Optional[Path] = None,
+    *,
+    root: Optional[Path] = None,
+) -> LlmCallLogger:
     global _logger_instance
+    requested_dir = Path(log_dir) if log_dir is not None else (
+        (Path(root) if root is not None else Path.cwd()) / "log" / "llm_calls"
+    )
     with _lock:
-        if _logger_instance is None:
-            _logger_instance = LlmCallLogger(log_dir=log_dir)
+        same_dir = (
+            _logger_instance is not None
+            and Path(_logger_instance.log_dir).resolve() == requested_dir.resolve()
+        )
+        if not same_dir:
+            _logger_instance = LlmCallLogger(
+                log_dir=requested_dir,
+                root=root,
+            )
     return _logger_instance
 
 
-__all__ = ["LlmCallLogger", "LlmCallRecord", "get_call_logger"]
+__all__ = ["LlmCallLogger", "LlmCallRecord", "analysis_record_id", "get_call_logger"]

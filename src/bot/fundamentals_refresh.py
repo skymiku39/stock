@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.cloud_file_cache import read_json_cache, write_json_cache
 from bot.config import Settings
 from bot.fundamentals_fetcher import (
@@ -284,6 +285,7 @@ def _known_symbols(settings: Settings, root: Path, explicit: List[str]) -> List[
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-fundamentals-refresh",
         description="Run a small batch from the local fundamental refresh queue.",
@@ -295,11 +297,37 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--force", action="store_true", help="Enqueue symbols even when local cache is fresh")
     parser.add_argument("--enqueue-only", action="store_true", help="Only update the queue")
     parser.add_argument("--dry-run", action="store_true", help="Print work without refreshing")
+    parser.add_argument(
+        "--materialize-all",
+        action="store_true",
+        help="只使用已登錄的 exact raw archive，將月營收／估值／季報／股利全市場資料寫入 canonical/research/evidence",
+    )
+    parser.add_argument(
+        "--materialize-limit",
+        type=int,
+        default=0,
+        help="--materialize-all 每個資料域最多處理幾筆；0 表示全部",
+    )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    root = Path.cwd()
-    settings = Settings()
-    log = get_logger("fundamentals-refresh")
+    root = args.root.resolve() if args.root else Path.cwd()
+    settings = Settings(_env_file=str(root / ".env"))  # type: ignore[call-arg]
+    log = get_logger("fundamentals-refresh", log_dir=root / "log")
+    if args.materialize_all:
+        from bot.fundamentals_research_batch import materialize_all_fundamentals
+
+        result = materialize_all_fundamentals(
+            root,
+            limit_per_domain=max(0, int(args.materialize_limit)),
+            logger=log,
+        )
+        log.info("full-market fundamental materialize result: %s", result)
+        return 0 if int(result.get("failed", 0)) == 0 else 1
+
     symbols = _known_symbols(settings, root, args.symbols)
     added = seed_refresh_queue(
         symbols,

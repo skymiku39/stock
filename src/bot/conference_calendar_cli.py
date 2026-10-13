@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.conference_calendar import (
     update_calendar,
     upcoming_conferences,
@@ -32,6 +33,7 @@ from bot.utils import get_logger
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-calendar-update",
         description="自動抓 MOPS 法說會行事曆與全球科技事件 (寫到 data/calendar/)",
@@ -52,10 +54,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--no-global", action="store_true",
         help="只更新 MOPS 法說會，略過全球科技事件",
     )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("calendar")
-    root = Path.cwd()
+    root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("calendar", log_dir=root / "log")
     months = tuple(args.months)
 
     if not args.global_only:

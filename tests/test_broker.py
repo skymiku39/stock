@@ -136,3 +136,44 @@ def test_lookup_stock_contract_falls_back_to_market_namespace() -> None:
     FakeApi.Contracts = Contracts()
 
     assert broker_module._lookup_stock_contract(FakeApi(), "2330") is contract
+
+
+def test_fetch_ticks_uses_current_single_day_sdk_signature() -> None:
+    calls = []
+
+    class FakeApi:
+        def ticks(self, contract, *, date, timeout):
+            calls.append((contract, date, timeout))
+            return {"ts": [1], "close": [10], "volume": [2]}
+
+    broker = SjBroker(_settings())
+    contract = object()
+    broker.api = FakeApi()  # type: ignore[assignment]
+    broker._contracts["2330"] = contract
+
+    result = broker.fetch_ticks("2330", "2026-09-16", "2026-09-16", timeout_ms=1234)
+
+    assert result == {"ts": [1], "close": [10], "volume": [2]}
+    assert calls == [(contract, "2026-09-16", 1234)]
+
+
+def test_fetch_ticks_merges_multiple_days_for_current_sdk() -> None:
+    class FakeApi:
+        def ticks(self, contract, *, date, timeout):
+            return {
+                "ts": [int(date[-2:])],
+                "close": [10],
+                "volume": [2],
+                "exchange": "TSE",
+            }
+
+    broker = SjBroker(_settings())
+    broker.api = FakeApi()  # type: ignore[assignment]
+    broker._contracts["2330"] = object()
+
+    result = broker.fetch_ticks("2330", "2026-09-16", "2026-09-17")
+
+    assert result["ts"] == [16, 17]
+    assert result["close"] == [10, 10]
+    assert result["volume"] == [2, 2]
+    assert result["exchange"] == "TSE"

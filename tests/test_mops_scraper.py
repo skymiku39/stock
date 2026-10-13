@@ -170,6 +170,20 @@ def test_parse_conference_html_prefers_http_webcast():
     assert entries[0].presentation_url == "http://webcast.example.com/live"
 
 
+def test_parse_conference_html_prefers_exact_pdf_over_generic_company_page():
+    html = """
+    <table><tr>
+      <td>2488</td><td>公司</td><td>115/08/03</td><td>10:00</td>
+      <td><a href="http://www.example.com/C_2_Press_01.html">簡報列表</a></td>
+      <td><a href="#" onclick='document.fm_fileDownload.fileName.value="248820260803M001.pdf";'>PDF</a></td>
+    </tr></table>
+    """
+    entries = _parse_conference_html(html, 115, 8, logging.getLogger("test"))
+    assert len(entries) == 1
+    assert entries[0].presentation_url.startswith(MOPS_CALENDAR_FILE_PREFIX)
+    assert "248820260803M001.pdf" in entries[0].presentation_url
+
+
 def test_is_meaningful_presentation_url_rejects_bare_host():
     assert not is_meaningful_presentation_url("https://mopsov.twse.com.tw")
     assert is_meaningful_presentation_url(

@@ -1,8 +1,34 @@
 # 系統架構技術文件
 
+> **資料重設計基線**：請先參考 [DATA_ARCHITECTURE_REDESIGN.md](DATA_ARCHITECTURE_REDESIGN.md)。
+> **品質、分類與校準實作進度**：請參考 [DATA_QUALITY_IMPLEMENTATION.md](DATA_QUALITY_IMPLEMENTATION.md)。
+> **短期／長期記憶規格**：請參考 [MEMORY_STORAGE.md](MEMORY_STORAGE.md)。
+> **系統能力盤點（工具／分析／流程／缺口）**：請開啟 [reports/system_capability_report.html](reports/system_capability_report.html)（可用 `uv run python scripts/generate_capability_report.py` 重產）。
+> 本文件描述目前實作；新文件描述保留相容性的目標資料邊界與遷移順序。
+
 ## 概述
 
 Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表分析的台股策略機器人，核心採用 **Market Source / Broker / Strategy** 分層架構，讓行情來源、下單執行與策略邏輯彼此解耦。
+
+## 研究功能的設計框架
+
+研究功能沿用 Python、Streamlit、Pydantic 與 SQLite，採模組化單體逐步分層。
+新增功能的依賴方向為「Dashboard／CLI → 應用操作 → 領域規則與資料存取介面 → SQLite／外部來源」。
+畫面負責輸入、呈現與錯誤回饋；交易、版本衝突和來源驗證放在可獨立測試的模組。
+
+Watchlist 已建立第一個完整邊界：`watchlist.py` 管理應用操作與 JSON 衍生快照，
+`watchlist_repository.py` 管理 SQLite 交易、版本檢查和刪除標記；`StockDB` 保留既有 DAO 相容入口。
+從 migration 6 起，`schema_migrations.py` 管理不可變的增量升級。
+Sheets 是同步介面；SQLite 是本機持久狀態，JSON 是可重建快照。
+跨機合併與升級限制見 [cloud_sync_setup.md](cloud_sync_setup.md#watchlist-保存與刪除規則)。
+
+回答流程保留 `SourceRegistry → canonical／evidence → QueryPlan／EvidencePack → answer_verifier`。
+驗證範圍是來源可追溯、引文支持與回答覆蓋；不將詞彙相似度視為語意正確。
+排程則分開保存程序心跳與各任務結果，詳見 [operations.md](operations.md)。
+
+目前 `dashboard/pages.py` 與 `stock_db.py` 仍包含大量既有職責。後續可依研究問答、來源管理、
+持股清單等功能逐一抽出應用模組，再拆畫面與 DAO；每次保留相容入口並跑相應契約測試。
+多使用者權限、跨機強一致同步與正式部署仍需獨立設計及實機驗證。
 
 ## 執行模式
 
@@ -118,10 +144,10 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 |------|------------|
 | `types.py` | 不可變領域事件（資料、交易、管線） |
 | `protocols.py` | `EventPublisher` / `EventSubscriber` 介面 (ISP, DIP) |
-| `bus.py` | `InMemoryEventBus` — 僅負責路由 |
+| `bus.py` | `InMemoryEventBus` — 僅負責路由；單一 handler 例外不中斷其餘訂閱者 |
 | `handlers.py` | 橫切 handler（`LoggingEventHandler`, `JsonlEventRecorder`） |
 | `trading_handlers.py` | 交易側效應（通知 / 紀錄 / 風控） |
-| `pipeline_helpers.py` | 管線步驟/完成事件發布輔助 |
+| `pipeline_helpers.py` | 管線步驟/完成事件發布輔助（`PipelineProgress` 依序發 `PipelineStepCompleted`） |
 | `wiring.py` | `wire_trading_handlers`, `wire_application_handlers` |
 
 #### 依賴反轉介面 (`src/bot/protocols/`)
@@ -151,8 +177,10 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 
 - `NotificationHandler` → Telegram 推播
 - `TradeRecordingHandler` → CSV 成交紀錄
-- `RiskPostTradeHandler` → 成交後資金/部位狀態
 - `LoggingEventHandler` / `JsonlEventRecorder` → 稽核日誌
+
+成交後資金／部位狀態由 `BaseStrategy` 同步更新 `RiskGuard`（非事件 handler）。
+`RiskPostTradeHandler` 與 `wire_trading_handlers(..., risk=)` 簽名保留供未來擴充，目前未接線。
 
 **事件鏈 (可選)**：`.env` 設 `EVENT_CHAIN_SMILE_SCREEN=true` 時，`QuantDataFetchCompleted` 自動觸發微笑曲線選股（`events/chain_handlers.py`）。
 
@@ -181,7 +209,7 @@ Stock Bot 是一支支援自動交易、看盤訊號與公開延遲資料報表�
 | 類型 | 類別 | 進場特色 |
 |------|------|----------|
 | `configurable`（預設） | `ConfigurableStrategy` | env 漲幅區間 + LLM 進場閘門 + 回落買回 |
-| `etf_follow` | `EtfFollowStrategy` | ETF 共識訊號 + 漲幅區間 |
+| `etf_follow` | `EtfFollowStrategy` | ETF 共識訊號 + 漲幅區間（預設不經 LLM 進場閘；見 `ETF_FOLLOW_LLM_GATE`） |
 
 **出場規則（BaseStrategy 共用，皆以淨利 % 判斷）**：
 - 使用者目標賣出：若 `SELL_PROFIT_TARGETS` 有該檔門檻，須達標才允許自動賣出

@@ -13,17 +13,21 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
+from bot.source_registry import SourceRegistry
+from bot.stock_db import SourceDocumentRow
 from bot.utils import get_logger, mk_folder
 
 try:
@@ -81,6 +85,13 @@ class PresentationText:
     text: str
     pages: int = 0
     extra: dict = field(default_factory=dict)
+    source_document_id: str = ""
+    research_status: str = "skipped"
+    research_document_id: str = ""
+    evidence_id: str = ""
+    claim_id: str = ""
+    research_run_id: str = ""
+    research_error: str = ""
 
 
 # ----------------------------------------------------------------------
@@ -119,6 +130,43 @@ def _is_security_block(html: str) -> bool:
     return "FOR SECURITY REASONS" in head or "CAN NOT BE ACCESSED" in head
 
 
+def _capture_mops_response(
+    source: str,
+    content: bytes | bytearray | str,
+    *,
+    root: Optional[Path],
+    source_url: str,
+    source_ref: str,
+    title: str,
+    suffix: str,
+    mime_type: str,
+    as_of: str = "",
+    quality_status: str = "ok",
+    metadata: Optional[dict[str, Any]] = None,
+    logger: logging.Logger,
+) -> Optional[SourceDocumentRow]:
+    """保存 MOPS 原始回應；保存失敗不阻斷既有解析流程。"""
+    if not content:
+        return None
+    try:
+        return SourceRegistry(root or Path.cwd()).capture_document(
+            source,
+            content,
+            source_url=source_url,
+            source_ref=source_ref,
+            title=title,
+            kind="http_response",
+            suffix=suffix,
+            mime_type=mime_type,
+            as_of=as_of,
+            quality_status=quality_status,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.debug("MOPS 原始回應保存失敗: %s %s", source, source_ref, exc_info=True)
+        return None
+
+
 # ----------------------------------------------------------------------
 # 法說會行事曆
 # ----------------------------------------------------------------------
@@ -136,6 +184,8 @@ def fetch_conference_schedule(
     month: int,
     logger: Optional[logging.Logger] = None,
     session: Optional[requests.Session] = None,
+    *,
+    root: Optional[Path] = None,
 ) -> List[ConferenceEntry]:
     """抓 MOPS 法說會行事曆 (民國年 + 月)。
 
@@ -157,7 +207,21 @@ def fetch_conference_schedule(
     try:
         resp = sess.post(MOPS_CONF_URL, data=payload, timeout=15)
         resp.encoding = "utf-8"
-        if _is_security_block(resp.text):
+        blocked = _is_security_block(resp.text)
+        _capture_mops_response(
+            "mops_conference_schedule",
+            getattr(resp, "content", b"") or resp.text,
+            root=root,
+            source_url=MOPS_CONF_URL,
+            source_ref=f"{year_roc}:{month:02d}",
+            title=f"MOPS 法說會行事曆 {year_roc}/{month:02d}",
+            suffix="html",
+            mime_type="text/html; charset=utf-8",
+            quality_status="invalid" if blocked else "ok",
+            metadata={"year_roc": year_roc, "month": month},
+            logger=log,
+        )
+        if blocked:
             log.warning(
                 "MOPS 法說會行事曆被安全性阻擋 (%s)；可設定 MOPS_HOST 覆寫主機",
                 MOPS_CONF_URL,
@@ -222,6 +286,34 @@ def _best_pdf_from_row_html(row_html: str) -> str:
     return candidates[0]
 
 
+def _presentation_date_hint(value: str) -> str:
+    """從簡報檔名接受明確的西元年月日，不以模糊文字猜日期。"""
+    match = re.search(
+        r"(20\d{2})[-_/]?(\d{2})[-_/]?(\d{2})",
+        str(value or ""),
+    )
+    if not match:
+        return ""
+    try:
+        return dt.date(
+            int(match.group(1)), int(match.group(2)), int(match.group(3)),
+        ).isoformat()
+    except ValueError:
+        return ""
+
+
+def _is_live_presentation_url(url: str) -> bool:
+    """辨識直播連結；直播仍優先於同一列的下載檔案。"""
+    value = str(url or "").strip().lower()
+    return any(token in value for token in ("webcast", "live", "stream"))
+
+
+def _is_pdf_presentation_url(url: str) -> bool:
+    """只用 URL 明確的 PDF 標記，不把一般公司首頁當成簡報。"""
+    value = str(url or "").strip().lower()
+    return value.startswith(MOPS_CALENDAR_FILE_PREFIX) or ".pdf" in value
+
+
 def _extract_url_from_onclick(text: str) -> str:
     """從 onclick / openWindow / window.open 字串抽出 URL。"""
     if not text:
@@ -248,40 +340,58 @@ def _url_from_tr_element(tr: Any) -> str:
     """從 <tr> 元素抽出簡報/詳情 URL (HTTP 直播 > PDF > href > onclick)。"""
     if not (_HAS_BS4 and tr is not None):
         return ""
-    for a in tr.find_all("a", href=True):
-        raw_href = str(a.get("href", "")).strip()
-        if raw_href.lower().startswith("http") and raw_href not in ("#", ""):
+    hrefs = [
+        str(a.get("href", "")).strip()
+        for a in tr.find_all("a", href=True)
+        if str(a.get("href", "")).strip() not in ("", "#")
+    ]
+    for raw_href in hrefs:
+        if _is_live_presentation_url(raw_href):
             return raw_href
     pdf = _best_pdf_from_row_html(str(tr))
     if pdf:
         return _calendar_presentation_ref(pdf)
-    for a in tr.find_all("a", href=True):
-        raw_href = str(a.get("href", "")).strip()
-        if raw_href and raw_href not in ("#", "") and not raw_href.lower().startswith("javascript:"):
-            return absolute_url(MOPS_HOST, raw_href)
+    for raw_href in hrefs:
+        if _is_pdf_presentation_url(raw_href):
+            return raw_href
     onclick = str(tr.get("onclick", "") or "")
     if not onclick:
         for a in tr.find_all("a"):
             onclick = str(a.get("onclick", "") or "")
             if onclick:
                 break
-    return _extract_url_from_onclick(onclick)
+    onclick_url = _extract_url_from_onclick(onclick)
+    if onclick_url and _is_pdf_presentation_url(onclick_url):
+        return onclick_url
+    for raw_href in hrefs:
+        if not raw_href.lower().startswith("javascript:"):
+            return absolute_url(MOPS_HOST, raw_href)
+    return onclick_url
 
 
 def _href_from_tr_html(tr_html: str) -> str:
     """從 <tr> 原始 HTML 抽出簡報 URL (regex fallback)。"""
-    m = re.search(r"""href=["'](https?://[^"']+)["']""", tr_html, re.I)
-    if m:
-        return m.group(1).strip()
+    hrefs = [
+        str(value).strip()
+        for value in re.findall(r"""href=["']([^"']+)["']""", tr_html, re.I)
+        if str(value).strip() not in ("", "#")
+    ]
+    for href in hrefs:
+        if _is_live_presentation_url(href):
+            return href
     pdf = _best_pdf_from_row_html(tr_html)
     if pdf:
         return _calendar_presentation_ref(pdf)
-    m = re.search(r"""href=["']([^"'#][^"']*)["']""", tr_html, re.I)
-    if m:
-        href = m.group(1).strip()
-        if href and not href.lower().startswith("javascript:"):
-            return absolute_url(MOPS_HOST, href)
-    return _extract_url_from_onclick(tr_html)
+    for href in hrefs:
+        if _is_pdf_presentation_url(href):
+            return href if href.lower().startswith("http") else absolute_url(MOPS_HOST, href)
+    onclick_url = _extract_url_from_onclick(tr_html)
+    if onclick_url and _is_pdf_presentation_url(onclick_url):
+        return onclick_url
+    for href in hrefs:
+        if not href.lower().startswith("javascript:"):
+            return href if href.lower().startswith("http") else absolute_url(MOPS_HOST, href)
+    return onclick_url
 
 
 def _html_to_plain_text(html: str, *, max_chars: int = 20000) -> str:
@@ -388,6 +498,24 @@ MOPS_MATERIAL_URL = f"{MOPS_HOST}/mops/web/ajax_t05st02"
 URL_MATERIAL_OPENAPI = "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"
 
 
+def _bounded_request_timeout(
+    timeout: float,
+    deadline: Optional[float] = None,
+) -> float:
+    """Return a safe per-request timeout, respecting an optional deadline."""
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        value = 15.0
+    value = max(0.25, min(value, 60.0))
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("MOPS request deadline exceeded")
+        value = min(value, max(0.25, remaining))
+    return value
+
+
 def _material_key(item: MaterialInfo) -> Tuple[str, str]:
     return (item.date.isoformat(), (item.subject or "").strip())
 
@@ -434,6 +562,9 @@ def _fetch_material_mops(
     log: logging.Logger,
     *,
     stats: Optional[Dict[str, Any]] = None,
+    root: Optional[Path] = None,
+    timeout: float = 15.0,
+    deadline: Optional[float] = None,
 ) -> List[MaterialInfo]:
     payload = {
         "encodeURIComponent": "1",
@@ -445,9 +576,27 @@ def _fetch_material_mops(
         "year": str(year_roc),
     }
     try:
-        resp = sess.post(MOPS_MATERIAL_URL, data=payload, timeout=15)
+        resp = sess.post(
+            MOPS_MATERIAL_URL,
+            data=payload,
+            timeout=_bounded_request_timeout(timeout, deadline),
+        )
         resp.encoding = "utf-8"
-        if _is_security_block(resp.text):
+        blocked = _is_security_block(resp.text)
+        _capture_mops_response(
+            "mops_material_history",
+            getattr(resp, "content", b"") or resp.text,
+            root=root,
+            source_url=MOPS_MATERIAL_URL,
+            source_ref=f"{ticker}:{year_roc}",
+            title=f"MOPS 重大訊息 {ticker} {year_roc}",
+            suffix="html",
+            mime_type="text/html; charset=utf-8",
+            quality_status="invalid" if blocked else "ok",
+            metadata={"ticker": ticker, "year_roc": year_roc},
+            logger=log,
+        )
+        if blocked:
             log.warning("MOPS 重大訊息被安全性阻擋: %s (可設 MOPS_HOST 覆寫)", ticker)
             if stats is not None:
                 stats["mops_blocked"] = True
@@ -468,6 +617,9 @@ def fetch_material_info(
     *,
     merge_sources: bool = True,
     stats: Optional[Dict[str, Any]] = None,
+    root: Optional[Path] = None,
+    timeout: float = 15.0,
+    deadline: Optional[float] = None,
 ) -> List[MaterialInfo]:
     """個股重大訊息查詢。
 
@@ -482,23 +634,44 @@ def fetch_material_info(
     if year_roc is None:
         year_roc = dt.date.today().year - 1911
 
-    openapi_items = _fetch_material_openapi(ticker, sess, log)
     if stats is not None:
         stats.update({
-            "openapi_count": len(openapi_items),
+            "openapi_count": 0,
             "mops_count": 0,
             "merged_count": 0,
             "with_detail_url": 0,
             "mops_blocked": False,
             "mops_error": False,
+            "openapi_http_status": None,
+            "openapi_valid": False,
+            "openapi_row_count": 0,
+            "openapi_error": "",
         })
+    openapi_items = _fetch_material_openapi(
+        ticker,
+        sess,
+        log,
+        stats=stats,
+        root=root,
+        timeout=timeout,
+        deadline=deadline,
+    )
+    if stats is not None:
+        stats["openapi_count"] = len(openapi_items)
     if not merge_sources:
         if openapi_items:
             if stats is not None:
                 stats["merged_count"] = len(openapi_items)
             return openapi_items
         mops_items = _fetch_material_mops(
-            ticker, year_roc, sess, log, stats=stats,
+            ticker,
+            year_roc,
+            sess,
+            log,
+            stats=stats,
+            root=root,
+            timeout=timeout,
+            deadline=deadline,
         )
         if stats is not None:
             stats["mops_count"] = len(mops_items)
@@ -506,11 +679,25 @@ def fetch_material_info(
         return mops_items
 
     mops_items = _fetch_material_mops(
-        ticker, year_roc, sess, log, stats=stats,
+        ticker,
+        year_roc,
+        sess,
+        log,
+        stats=stats,
+        root=root,
+        timeout=timeout,
+        deadline=deadline,
     )
     if not mops_items and year_roc > 100:
         prev_items = _fetch_material_mops(
-            ticker, year_roc - 1, sess, log, stats=stats,
+            ticker,
+            year_roc - 1,
+            sess,
+            log,
+            stats=stats,
+            root=root,
+            timeout=timeout,
+            deadline=deadline,
         )
         if prev_items:
             log.info("重大訊息 %s 民國 %d 年無資料，改抓 %d 年 -> %d 筆",
@@ -540,19 +727,57 @@ def _fetch_material_openapi(
     ticker: str,
     sess: requests.Session,
     log: logging.Logger,
+    *,
+    stats: Optional[Dict[str, Any]] = None,
+    root: Optional[Path] = None,
+    timeout: float = 20.0,
+    deadline: Optional[float] = None,
 ) -> List[MaterialInfo]:
     """從 TWSE OpenAPI t187ap04_L 取該 ticker 的當日重大訊息。"""
     try:
-        resp = sess.get(URL_MATERIAL_OPENAPI, timeout=20)
+        resp = sess.get(
+            URL_MATERIAL_OPENAPI,
+            timeout=_bounded_request_timeout(timeout, deadline),
+        )
+        if stats is not None:
+            stats.update({
+                "openapi_http_status": int(resp.status_code),
+                "openapi_valid": False,
+                "openapi_error": "",
+            })
+        _capture_mops_response(
+            "twse_material_openapi",
+            getattr(resp, "content", b"") or getattr(resp, "text", ""),
+            root=root,
+            source_url=URL_MATERIAL_OPENAPI,
+            source_ref=ticker,
+            title=f"TWSE 每日重大訊息 {ticker}",
+            suffix="json",
+            mime_type="application/json",
+            quality_status="ok" if resp.status_code == 200 else "invalid",
+            metadata={"ticker": ticker, "http_status": resp.status_code},
+            logger=log,
+        )
         if resp.status_code != 200:
             log.warning("重大訊息 OpenAPI HTTP %d", resp.status_code)
+            if stats is not None:
+                stats["openapi_error"] = f"HTTP {resp.status_code}"
             return []
         data = resp.json()
-    except Exception:
+    except Exception as exc:
         log.debug("重大訊息 OpenAPI 抓取/解析失敗", exc_info=True)
+        if stats is not None:
+            stats["openapi_error"] = f"{type(exc).__name__}: {exc}"
         return []
+    if not isinstance(data, list):
+        if stats is not None:
+            stats["openapi_error"] = "payload is not a list"
+        return []
+    if stats is not None:
+        stats["openapi_valid"] = True
+        stats["openapi_row_count"] = len(data)
     out: List[MaterialInfo] = []
-    for row in data if isinstance(data, list) else []:
+    for row in data:
         code = str(row.get("公司代號") or "").strip()
         if code != ticker:
             continue
@@ -639,28 +864,145 @@ def _parse_material_html(
     return result
 
 
+@dataclass
+class MaterialDetailResult:
+    """MOPS 重大訊息詳情抓取結果；可選擇帶 research 垂直切片。"""
+
+    text: str = ""
+    source_document_id: str = ""
+    research_document_id: str = ""
+    evidence_id: str = ""
+    claim_id: str = ""
+    run_id: str = ""
+    slice: Optional[Dict[str, Any]] = None
+    # skipped=未執行；ok/reused=切片成功；failed=切片失敗（仍可能有 raw text）
+    research_status: str = "skipped"
+    research_error: str = ""
+
+
+def ingest_material_detail(
+    detail_url: str,
+    *,
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+    max_chars: int = 20000,
+    root: Optional[Path] = None,
+    ticker: str = "",
+    materialize_research: bool = True,
+    timeout: float = 20.0,
+) -> MaterialDetailResult:
+    """抓取 MOPS 詳情並（可選）完成官方垂直切片。
+
+    垂直切片僅在 ``root`` 可寫且 raw ``source_document`` 成功登錄後執行；
+    不會依 URL／標題猜測 ``source_document_id``。切片失敗時
+    ``research_status=failed`` 並保留 ``research_error``，不靜默吞掉。
+    """
+    if not detail_url:
+        return MaterialDetailResult(research_status="skipped", research_error="缺少 detail_url")
+    log = logger or get_logger("mops")
+    sess = session or _new_session()
+    try:
+        resp = sess.get(
+            detail_url,
+            timeout=_bounded_request_timeout(timeout),
+        )
+        resp.encoding = "utf-8"
+        blocked = _is_security_block(resp.text)
+        source_doc = _capture_mops_response(
+            "mops_material_detail",
+            getattr(resp, "content", b"") or resp.text,
+            root=root,
+            source_url=detail_url,
+            source_ref=detail_url,
+            title="MOPS 重大訊息詳情",
+            suffix="html",
+            mime_type="text/html; charset=utf-8",
+            quality_status="invalid" if blocked else "ok",
+            metadata={"ticker": ticker} if ticker else None,
+            logger=log,
+        )
+        if blocked:
+            log.warning("MOPS 詳情被安全性阻擋: %s", detail_url)
+            return MaterialDetailResult(
+                source_document_id=source_doc.document_id if source_doc else "",
+                research_status="skipped",
+                research_error="MOPS 詳情被安全性阻擋",
+            )
+        text = _html_to_plain_text(resp.text, max_chars=max_chars)
+        result = MaterialDetailResult(
+            text=text,
+            source_document_id=source_doc.document_id if source_doc else "",
+            research_status="skipped",
+        )
+        if not materialize_research:
+            result.research_error = "materialize_research=False"
+            return result
+        if root is None:
+            result.research_error = "缺少 root，無法寫入 research slice"
+            return result
+        if source_doc is None:
+            result.research_status = "failed"
+            result.research_error = "raw source_document 登錄失敗"
+            return result
+        if not text.strip():
+            result.research_status = "failed"
+            result.research_error = "詳情正文為空，無法建立 research slice"
+            return result
+        if (source_doc.quality_status or "ok") not in {"ok", "partial"}:
+            result.research_status = "failed"
+            result.research_error = (
+                f"source_document quality_status={source_doc.quality_status} 不可切片"
+            )
+            return result
+        from bot.mops_research import materialize_mops_detail_slice
+
+        slice_row = materialize_mops_detail_slice(
+            root=Path(root),
+            source_document_id=source_doc.document_id,
+            canonical_text=text,
+            detail_url=detail_url,
+            ticker=ticker,
+            title=source_doc.title or "MOPS 重大訊息詳情",
+        )
+        result.research_status = slice_row.status
+        result.research_error = slice_row.error
+        result.slice = slice_row.to_dict()
+        if slice_row.status in {"ok", "reused"}:
+            result.research_document_id = slice_row.research_document_id
+            result.evidence_id = slice_row.evidence_id
+            result.claim_id = slice_row.claim_id
+            result.run_id = slice_row.run_id
+        else:
+            log.warning(
+                "MOPS research 垂直切片失敗: %s (%s)",
+                detail_url, slice_row.error or slice_row.status,
+            )
+        return result
+    except Exception as exc:
+        log.exception("MOPS 詳情抓取失敗: %s", detail_url)
+        return MaterialDetailResult(
+            research_status="failed",
+            research_error=f"{type(exc).__name__}: {exc}",
+        )
+
+
 def fetch_material_detail(
     detail_url: str,
     *,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
     max_chars: int = 20000,
+    root: Optional[Path] = None,
 ) -> str:
     """抓取 MOPS 重大訊息詳情頁並抽成純文字。"""
-    if not detail_url:
-        return ""
-    log = logger or get_logger("mops")
-    sess = session or _new_session()
-    try:
-        resp = sess.get(detail_url, timeout=20)
-        resp.encoding = "utf-8"
-        if _is_security_block(resp.text):
-            log.warning("MOPS 詳情被安全性阻擋: %s", detail_url)
-            return ""
-        return _html_to_plain_text(resp.text, max_chars=max_chars)
-    except Exception:
-        log.exception("MOPS 詳情抓取失敗: %s", detail_url)
-        return ""
+    return ingest_material_detail(
+        detail_url,
+        session=session,
+        logger=logger,
+        max_chars=max_chars,
+        root=root,
+        materialize_research=True,
+    ).text
 
 
 # ----------------------------------------------------------------------
@@ -673,6 +1015,8 @@ def download_file(
     dest: Path,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    *,
+    root: Optional[Path] = None,
 ) -> Optional[Path]:
     """串流下載檔案。"""
     log = logger or get_logger("mops")
@@ -684,10 +1028,37 @@ def download_file(
         mk_folder(str(dest.parent))
         with sess.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
+            raw_chunks: List[bytes] = []
             with dest.open("wb") as f:
                 for chunk in r.iter_content(8192):
                     if chunk:
                         f.write(chunk)
+                        raw_chunks.append(chunk)
+            payload = b"".join(raw_chunks)
+            content_type = str(
+                getattr(r, "headers", {}).get("Content-Type", "") or ""
+            )
+            is_pdf = payload.startswith(b"%PDF-")
+            is_html = "html" in content_type.lower() or payload.lstrip().lower().startswith(
+                (b"<html", b"<!doctype")
+            ) or payload.startswith((b"\xff\xfe<", b"\xfe\xff\x00<"))
+            _capture_mops_response(
+                "mops_presentation",
+                payload,
+                root=root,
+                source_url=url,
+                source_ref=url,
+                title=dest.name,
+                suffix=(
+                    "pdf" if is_pdf else "html" if is_html else
+                    "txt" if "text/" in content_type.lower() and dest.suffix.lower() == ".pdf"
+                    else dest.suffix.lstrip(".") or "bin"
+                ),
+                mime_type=content_type,
+                as_of=_presentation_date_hint(dest.name),
+                metadata={"destination": str(dest)},
+                logger=log,
+            )
         log.info("下載完成: %s -> %s", url, dest)
         mirror_file_to_cloud(dest)
         return dest
@@ -702,6 +1073,7 @@ def download_calendar_file(
     *,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> Optional[Path]:
     """下載 MOPS 行事曆 PDF（POST ``fm_fileDownload``）。"""
     log = logger or get_logger("mops")
@@ -723,6 +1095,19 @@ def download_calendar_file(
         if not resp.content or len(resp.content) < 100:
             log.warning("MOPS 行事曆 PDF 下載過小: %s", filename)
             return None
+        _capture_mops_response(
+            "mops_calendar_pdf",
+            resp.content,
+            root=root,
+            source_url=url,
+            source_ref=filename,
+            title=filename,
+            suffix="pdf",
+            mime_type="application/pdf",
+            as_of=_presentation_date_hint(filename),
+            metadata={"filename": filename},
+            logger=log,
+        )
         dest.write_bytes(resp.content)
         mirror_file_to_cloud(dest)
         log.info("MOPS 行事曆 PDF 下載完成: %s -> %s", filename, dest)
@@ -732,12 +1117,88 @@ def download_calendar_file(
         return None
 
 
+def _materialize_presentation_research(
+    presentation: PresentationText,
+    path: Path,
+    *,
+    root: Optional[Path],
+    source_ref: str = "",
+    logger: Optional[logging.Logger] = None,
+) -> PresentationText:
+    """由下載檔案的 exact bytes 找到 manifest，再建立 PDF research slice。
+
+    這裡只用 SHA-256 與既有 source registry 精確比對；找不到 manifest 時
+    不依 URL、檔名或文字猜測來源，而是保留抽取結果並標成 skipped。
+    """
+    log = logger or get_logger("mops")
+    if root is None:
+        presentation.research_status = "skipped"
+        presentation.research_error = "缺少 root，無法寫入 research slice"
+        return presentation
+    try:
+        payload = path.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        with SourceRegistry(Path(root)) as registry:
+            candidates = [
+                document
+                for document in registry.db.list_source_documents(limit=5000)
+                if document.source in {"mops_presentation", "mops_calendar_pdf"}
+                and document.content_hash == digest
+            ]
+            if source_ref:
+                preferred = [
+                    document for document in candidates
+                    if document.source_ref == source_ref
+                    or document.url == source_ref
+                    or document.title == path.name
+                ]
+                candidates = preferred or candidates
+            source = candidates[0] if candidates else None
+        if source is None:
+            presentation.research_status = "skipped"
+            presentation.research_error = "raw source_document 不存在，未猜測來源"
+            return presentation
+
+        from bot.mops_presentation_research import materialize_mops_presentation_slice
+
+        sliced = materialize_mops_presentation_slice(
+            root=Path(root),
+            source_document_id=source.document_id,
+            canonical_text=presentation.text,
+            ticker=presentation.ticker,
+            title=source.title or path.name,
+            pages=presentation.pages,
+            extraction_method="pypdf" if path.suffix.lower() == ".pdf" else "text",
+            conference_date=_presentation_date_hint(path.name) or str(source.as_of or ""),
+            calendar_conference_date=_presentation_date_hint(path.name),
+        )
+        presentation.source_document_id = source.document_id
+        presentation.research_status = sliced.status
+        presentation.research_document_id = sliced.research_document_id
+        presentation.evidence_id = sliced.evidence_id
+        presentation.claim_id = sliced.claim_id
+        presentation.research_run_id = sliced.run_id
+        presentation.research_error = sliced.error
+        if sliced.status not in {"ok", "reused"}:
+            log.warning(
+                "MOPS 法說簡報 research slice %s: %s",
+                sliced.status, sliced.error,
+            )
+        return presentation
+    except Exception as exc:  # noqa: BLE001
+        presentation.research_status = "failed"
+        presentation.research_error = f"{type(exc).__name__}: {exc}"
+        log.exception("MOPS 法說簡報 research slice 失敗")
+        return presentation
+
+
 def download_presentation(
     url: str,
     dest: Path,
     *,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> Optional[PresentationText]:
     """下載法說會簡報 (PDF/文字) 並盡量抽出純文字。"""
     if url.startswith(MOPS_CALENDAR_FILE_PREFIX):
@@ -745,14 +1206,51 @@ def download_presentation(
         if not dest.suffix:
             dest = dest.with_suffix(".pdf")
         path = download_calendar_file(
-            filename, dest, session=session, logger=logger,
+            filename, dest, session=session, logger=logger, root=root,
         )
     else:
-        path = download_file(url, dest, session=session, logger=logger)
+        path = download_file(url, dest, session=session, logger=logger, root=root)
     if path is None:
         return None
     if path.suffix.lower() == ".pdf":
-        return extract_pdf_text(path)
+        try:
+            is_pdf_payload = path.read_bytes().startswith(b"%PDF-")
+        except OSError:
+            is_pdf_payload = False
+        presentation = extract_pdf_text(path)
+        if presentation is None and not is_pdf_payload:
+            # MOPS occasionally links to an HTML investor-relations page while
+            # the calendar filename/destination still ends in .pdf.  Inspect
+            # the bytes, but keep the result out of the verified presentation
+            # chain; the raw HTML is a different document type.
+            fallback_text = _read_presentation_text_fallback(path)
+            if not fallback_text:
+                return None
+            presentation = PresentationText(
+                ticker=path.stem.split("_")[0],
+                source=str(path),
+                text=fallback_text,
+                extra={"content_fallback": "html_or_text"},
+            )
+            # Keep the exact manifest linkage when available.  The research
+            # slice will reject the HTML source as a failed presentation, so
+            # callers can distinguish "not a PDF" from "manifest missing".
+            return _materialize_presentation_research(
+                presentation,
+                path,
+                root=root,
+                source_ref=(url if not url.startswith(MOPS_CALENDAR_FILE_PREFIX) else url[len(MOPS_CALENDAR_FILE_PREFIX):]),
+                logger=logger,
+            )
+        if presentation is None:
+            return None
+        return _materialize_presentation_research(
+            presentation,
+            path,
+            root=root,
+            source_ref=(url if not url.startswith(MOPS_CALENDAR_FILE_PREFIX) else url[len(MOPS_CALENDAR_FILE_PREFIX):]),
+            logger=logger,
+        )
     try:
         text = path.read_text(encoding="utf-8", errors="ignore").strip()
     except Exception:
@@ -760,11 +1258,48 @@ def download_presentation(
     if not text:
         return None
     ticker = path.stem.split("_")[0]
-    return PresentationText(
+    presentation = PresentationText(
         ticker=ticker,
         source=str(path),
         text=text,
     )
+    return _materialize_presentation_research(
+        presentation,
+        path,
+        root=root,
+        source_ref=url,
+        logger=logger,
+    )
+
+
+def _read_presentation_text_fallback(path: Path, *, max_chars: int = 200_000) -> str:
+    """讀取被錯誤命名為 .pdf 的 HTML／文字簡報頁。
+
+    `%PDF` 開頭的內容不在這裡假裝成文字；它應由真正的 PDF extractor
+    處理。非 PDF 內容則依 BOM 解碼，HTML 再套用既有 MOPS plain-text parser。
+    """
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return ""
+    if payload.startswith(b"%PDF"):
+        return ""
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encoding = "utf-16"
+    else:
+        encoding = "utf-8"
+    try:
+        text = payload.decode(encoding, errors="replace").strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    printable = sum(1 for char in text if char.isprintable() or char.isspace())
+    if printable / max(1, len(text)) < 0.65:
+        return ""
+    if "<html" in text.lower() or "<body" in text.lower() or "<table" in text.lower():
+        return _html_to_plain_text(text, max_chars=max_chars)
+    return text[:max_chars]
 
 
 def extract_pdf_text(path: Path, max_pages: int = 100) -> Optional[PresentationText]:
@@ -811,6 +1346,7 @@ def absolute_url(base: str, rel: str) -> str:
 
 __all__ = [
     "ConferenceEntry",
+    "MaterialDetailResult",
     "MaterialInfo",
     "PresentationText",
     "MOPS_CALENDAR_FILE_PREFIX",
@@ -823,4 +1359,5 @@ __all__ = [
     "fetch_conference_schedule",
     "fetch_material_detail",
     "fetch_material_info",
+    "ingest_material_detail",
 ]

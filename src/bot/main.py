@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import os
+import argparse
 import signal
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 from bot.archive_status import day_trading_trade_blocked, trade_block_message
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.app_bootstrap import bootstrap_event_bus
 from bot.events import BotShutdownRequested
@@ -65,13 +68,34 @@ def _release_instance_lock() -> None:
         pass
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None) -> None:
+    configure_console()
+    parser = argparse.ArgumentParser(
+        prog="stock-bot",
+        description="啟動 Stock Bot（watch/report/trade 模式由專案 .env 決定）",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.cwd(),
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
+    args = parser.parse_args(argv)
+    project_root = args.root.resolve()
+    if not project_root.is_dir():
+        parser.error(f"專案根目錄不存在：{project_root}")
+    # Legacy strategy/recorder components still resolve a few output paths via
+    # Path.cwd().  Establish the explicit root before importing/starting them,
+    # so one process cannot split its SQLite, events and CSV outputs across
+    # the caller's current directory and the requested project directory.
+    os.chdir(project_root)
+
     logger = get_logger("main")
     logger.info("=== Stock Bot 啟動 ===")
 
-    event_bus = bootstrap_event_bus()
+    event_bus = bootstrap_event_bus(project_root=project_root)
 
-    settings = Settings()
+    settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
     if day_trading_trade_blocked(settings):
         logger.error(trade_block_message(settings))
         sys.exit(1)
@@ -89,7 +113,7 @@ def main() -> None:
 
         merge_watch_symbols_into_settings(
             settings,
-            Path.cwd(),
+            project_root,
             reason="main",
             refresh_live_quotes=False,
             logger=logger,
@@ -127,6 +151,7 @@ def main() -> None:
         market_source = TwsePublicMarketSource(
             symbols=settings.symbols,
             poll_seconds=settings.report_poll_seconds,
+            root=project_root,
         )
         logger.info(
             "report 模式 — 使用 TWSE 公開延遲資料 (輪詢 %ds)",
@@ -145,6 +170,7 @@ def main() -> None:
             min_consensus_new=settings.etf_min_consensus_new,
             min_consensus_add=settings.etf_min_consensus_add,
             max_pct_chg_on_entry=settings.etf_max_pct_chg_on_entry,
+            project_root=project_root,
         )
         logger.info(
             "策略: EtfFollowStrategy (new>=%d, add>=%d, max_pct=%.1f)",
@@ -160,6 +186,7 @@ def main() -> None:
             settings=settings,
             market_source=market_source,
             publisher=event_bus,
+            project_root=project_root,
         )
         logger.info(
             "策略: ConfigurableStrategy (min_pct=%.1f, odd_lot=%s, "

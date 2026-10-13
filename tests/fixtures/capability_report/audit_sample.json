@@ -1,0 +1,31 @@
+{
+  "command": "stock-data-audit",
+  "generated_at": "2026-09-22T00:00:00+00:00",
+  "root": "C:\\fixture\\stock",
+  "database": {
+    "source_runs_without_documents": 2,
+    "llm_analysis_legacy_unresolved": 5
+  },
+  "gaps": [
+    {
+      "code": "source_runs_without_raw_manifest",
+      "severity": "warning",
+      "message": "有 2 筆 source_runs 尚未關聯 source_documents；歷史來源尚未全面 raw-first。",
+      "details": {
+        "unresolved_source_runs": [
+          {"run_id": "fixture-run-a"},
+          {"run_id": "fixture-run-b"}
+        ],
+        "policy": "exact_only"
+      }
+    }
+  ],
+  "known_limits": [
+    {
+      "code": "legacy_llm_without_provable_evidence",
+      "severity": "info",
+      "message": "有 5 筆舊 LLM 分析已明確標記 legacy_unresolved；保留原文但不冒充有證據鏈。"
+    }
+  ],
+  "gap_count": 1
+}

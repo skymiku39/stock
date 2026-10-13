@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+from pathlib import Path
 
 from bot.config import Settings
 
@@ -47,7 +49,7 @@ def test_scheduler_research_extra_args_parsed() -> None:
 
     sch = Scheduler(_settings(scheduler_research_args="--no-brief --days 3"), dry_run=True)
     research = next(j for j in sch.jobs if j.name == "research")
-    assert research.extra_args == ["--no-brief", "--days", "3"]
+    assert research.extra_args == ["--no-brief", "--days", "3", "--auto-research-limit", "12"]
 
 
 def test_scheduler_fundamentals_extra_args_parsed() -> None:
@@ -67,6 +69,31 @@ def test_scheduler_history_fetch_extra_args_parsed() -> None:
     )
     history = next(j for j in sch.jobs if j.name == "history_fetch")
     assert history.extra_args == ["--once", "--batch-size", "1", "--delay", "3"]
+
+
+def test_scheduler_status_retries_windows_replace_lock(monkeypatch, tmp_path) -> None:
+    from bot.scheduler import Scheduler
+
+    sch = Scheduler(_settings(), project_root=tmp_path, dry_run=True)
+    original_replace = Path.replace
+    failures = 0
+
+    def flaky_replace(self: Path, target: Path):
+        nonlocal failures
+        if self.name.endswith(".tmp") and failures < 2:
+            failures += 1
+            raise PermissionError("simulated Windows file lock")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    sch._write_status("running", run_once=True)
+
+    assert failures == 2
+    status = json.loads(
+        (tmp_path / "data" / "scheduler_status.json").read_text(encoding="utf-8")
+    )
+    assert status["state"] == "running"
+    assert status["run_once"] is True
 
 
 def test_scheduler_adds_daytrade_llm_jobs_when_enabled() -> None:
@@ -93,6 +120,31 @@ def test_scheduler_nextday_update_targets_today() -> None:
     now = dt.datetime(2026, 6, 4, 2, 30)
 
     assert sch._job_extra_args(job, now)[-2:] == ["--target-date", "2026-06-04"]
+
+
+def test_scheduler_once_respects_daily_job_window(monkeypatch, tmp_path) -> None:
+    from bot.scheduler import Scheduler
+
+    sch = Scheduler(
+        _settings(
+            scheduler_macro_interval_min=0,
+            scheduler_fundamentals_interval_min=0,
+            scheduler_research_interval_min=0,
+            scheduler_company_interval_min=0,
+            scheduler_history_fetch_interval_min=0,
+            scheduler_intraday_enabled=True,
+            scheduler_intraday_time=dt.time(9, 0),
+            scheduler_intraday_end_time=dt.time(10, 0),
+        ),
+        project_root=tmp_path,
+        dry_run=True,
+    )
+    calls = []
+    monkeypatch.setattr("bot.scheduler.now_tw", lambda: dt.datetime(2026, 9, 16, 20, 0))
+    monkeypatch.setattr(sch, "_run_job", lambda job, now=None: calls.append(job.name))
+
+    assert sch.run(once=True) == 0
+    assert calls == []
 
 
 def test_data_window_only_weekday_in_hours() -> None:

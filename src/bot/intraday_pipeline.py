@@ -28,6 +28,7 @@ from bot.cloud_file_cache import (
     restore_file_from_cloud,
     restore_tree_from_cloud,
 )
+from bot.classification import normalize_theme_payload, normalize_ticker
 from bot.config import Settings
 from bot.llm_analyzer import GeminiClient, gemini_call
 from bot.market_macro import (
@@ -39,12 +40,15 @@ from bot.market_macro import (
 from bot.news_fetcher import fetch_today_news, news_to_compact_text
 from bot.scoring import compute_scorecard
 from bot.pipeline_shared import (
+    build_report_evidence,
     consensus_tickers_today as _consensus_tickers_today,
     intraday_report_to_dict as _report_to_json,
     macro_summary_text as _macro_summary_text,
     parse_json_blob as _parse_json,
+    prepare_report_payload_for_storage,
+    persist_report_evidence,
 )
-from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -64,10 +68,13 @@ class CandidateRow:
     theme_heat: int = 0
     role: str = ""
     today_close: Optional[float] = None
-    today_pct_change: float = 0.0
-    volume: float = 0.0
-    volume_ratio: float = 0.0
-    technical_score: float = 50.0
+    today_pct_change: Optional[float] = None
+    volume: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    technical_score: Optional[float] = None
+    data_asof: str = ""
+    data_quality: str = "unavailable"
+    data_quality_note: str = ""
     day_trade_score: float = 0.0
     action: str = "HOLD"
     us_market_score: float = 50.0
@@ -85,6 +92,7 @@ class IntradayReport:
     themes: List[Dict[str, Any]] = field(default_factory=list)
     rankings: List[CandidateRow] = field(default_factory=list)
     macro_summary: Dict[str, Any] = field(default_factory=dict)
+    evidence: List[Dict[str, Any]] = field(default_factory=list)
     brief_md: str = ""
     brief_prompt_id: str = ""
     brief_prompt_version: str = ""
@@ -104,6 +112,7 @@ def _build_candidate_pool(
     consensus_tickers: List[str],
     watchlist_tickers: List[str],
     macro: Dict[str, Any],
+    known_tickers: Optional[set[str]] = None,
 ) -> Dict[str, CandidateRow]:
     """合併 4 個來源產出唯一候選股清單。"""
     pool: Dict[str, CandidateRow] = {}
@@ -113,8 +122,10 @@ def _build_candidate_pool(
         theme_name = th.get("theme", "")
         heat = int(th.get("heat", 0) or 0)
         for ct in th.get("candidate_tickers", []) or []:
-            t = str(ct.get("ticker", "")).strip()
-            if not t or not t.isdigit():
+            t = normalize_ticker(ct.get("ticker"))
+            if known_tickers and t not in known_tickers:
+                continue
+            if not t:
                 continue
             if t not in pool:
                 pool[t] = CandidateRow(ticker=t)
@@ -135,8 +146,8 @@ def _build_candidate_pool(
     )[:5]
     for us_sym, _pct in hot_us:
         for entry in (supply_chain.get("us_stocks", {}).get(us_sym, {}).get("tw_supply_chain") or []):
-            t = str(entry.get("tw_ticker", "")).strip()
-            if not t or not t.isdigit():
+            t = normalize_ticker(entry.get("tw_ticker"))
+            if not t or (known_tickers and t not in known_tickers):
                 continue
             if t not in pool:
                 pool[t] = CandidateRow(ticker=t, name=str(entry.get("name", "")))
@@ -145,7 +156,8 @@ def _build_candidate_pool(
 
     # 3) ETF 共識
     for t in consensus_tickers:
-        if not t or not str(t).isdigit():
+        t = normalize_ticker(t)
+        if not t or (known_tickers and t not in known_tickers):
             continue
         if t not in pool:
             pool[t] = CandidateRow(ticker=t)
@@ -154,7 +166,8 @@ def _build_candidate_pool(
 
     # 4) Watchlist
     for t in watchlist_tickers:
-        if not t or not str(t).isdigit():
+        t = normalize_ticker(t)
+        if not t or (known_tickers and t not in known_tickers):
             continue
         if t not in pool:
             pool[t] = CandidateRow(ticker=t)
@@ -257,19 +270,44 @@ def _score_candidate(
         refresh=refresh_technicals,
         log=log,
     )
-    price = 0.0
-    pct_change = 0.0
-    volume = 0.0
-    if technical_dict:
-        price = float(technical_dict.get("last_close", 0.0) or 0.0)
-        pct_change = float(technical_dict.get("pct_change_1d", 0.0) or 0.0)
-        volume = float(technical_dict.get("volume_last", 0.0) or 0.0)
-        vol_ma20 = float(technical_dict.get("vol_ma20", 0.0) or 0.0)
-        row.today_close = price or None
-        row.today_pct_change = pct_change
-        row.volume = volume
-        row.volume_ratio = round(volume / vol_ma20, 2) if vol_ma20 > 0 else 0.0
-        row.technical_score = float(technical_dict.get("technical_score", 50.0) or 50.0)
+    if not technical_dict:
+        row.action = "NO_DATA"
+        row.data_quality = "unavailable"
+        row.data_quality_note = "缺少可接受的技術資料，未納入當沖排序"
+        return row
+
+    raw_price = technical_dict.get("last_close")
+    if raw_price is None or float(raw_price or 0) <= 0:
+        row.action = "NO_DATA"
+        row.data_quality = "unavailable"
+        row.data_quality_note = "技術資料缺少有效收盤價，未納入當沖排序"
+        return row
+
+    price = float(raw_price)
+    raw_pct = technical_dict.get("pct_change_1d")
+    raw_volume = technical_dict.get("volume_last")
+    raw_vol_ma20 = technical_dict.get("vol_ma20")
+    pct_change = float(raw_pct) if raw_pct is not None else 0.0
+    volume = float(raw_volume) if raw_volume is not None else 0.0
+    vol_ma20 = float(raw_vol_ma20) if raw_vol_ma20 else 0.0
+    row.today_close = price
+    row.today_pct_change = float(raw_pct) if raw_pct is not None else None
+    row.volume = float(raw_volume) if raw_volume is not None else None
+    row.volume_ratio = round(volume / vol_ma20, 2) if vol_ma20 > 0 else None
+    raw_technical_score = technical_dict.get("technical_score")
+    row.technical_score = (
+        float(raw_technical_score) if raw_technical_score is not None else None
+    )
+    row.data_asof = str(technical_dict.get("last_date") or "")
+    missing = []
+    if raw_pct is None:
+        missing.append("漲跌幅")
+    if raw_volume is None:
+        missing.append("成交量")
+    if raw_vol_ma20 is None:
+        missing.append("20日均量")
+    row.data_quality = "partial" if missing else "ok"
+    row.data_quality_note = f"缺少：{'、'.join(missing)}" if missing else ""
 
     # 美股關聯
     related = related_us_stocks_for_tw(row.ticker, supply_chain, project_root)
@@ -321,6 +359,7 @@ def run_intraday(
     report = IntradayReport(asof=today.isoformat())
 
     t0 = time.time()
+    progress = PipelineProgress(publisher, "intraday", total_steps=6)
 
     # ---- 1. 抓新聞 ----
     log.info("[1/6] 抓今日台股新聞 (cnyes)...")
@@ -336,6 +375,10 @@ def run_intraday(
         report.errors.append(f"news: {e}")
         items = []
         news_text = ""
+    progress.complete(
+        "news",
+        success=not any(e.startswith("news:") for e in report.errors),
+    )
 
     # ---- 2. 抓 macro ----
     log.info("[2/6] 抓 macro (yfinance)...")
@@ -354,12 +397,23 @@ def run_intraday(
 
     macro_text = _macro_summary_text(macro)
     log.info("macro: %s", macro_text)
+    report.evidence = persist_report_evidence(
+        root,
+        build_report_evidence(news_items=items, macro=macro),
+        logger=log,
+    )
+    progress.complete(
+        "macro",
+        success=not any(e.startswith("macro:") for e in report.errors),
+    )
 
     # ---- 3. LLM 主題雷達 ----
     client = GeminiClient(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
         logger=log,
+        settings=settings,
+        root=root,
     )
     themes: List[Dict[str, Any]] = []
     if client.enabled and news_text:
@@ -376,24 +430,47 @@ def run_intraday(
             if raw:
                 obj = _parse_json(raw)
                 if obj:
-                    report.market_tone = str(obj.get("market_tone") or "neutral")
-                    report.overall_brief = str(obj.get("overall_brief") or "")
-                    themes = obj.get("themes") or []
+                    normalized, quality_warnings = normalize_theme_payload(obj)
+                    report.market_tone = normalized["market_tone"]
+                    report.overall_brief = normalized["overall_brief"]
+                    themes = normalized["themes"]
                     report.themes = themes
+                    for warning in quality_warnings:
+                        log.warning("theme_radar 品質警告: %s", warning)
                     log.info("LLM 萃取 %d 個題材 (tone=%s)", len(themes), report.market_tone)
         except Exception as e:
             log.exception("theme_radar 失敗")
             report.errors.append(f"theme_radar: {e}")
     else:
         log.info("[3/6] (略) LLM 未啟用或無新聞")
+    progress.complete(
+        "theme_radar",
+        success=not any(e.startswith("theme_radar:") for e in report.errors),
+        message="" if (client.enabled and news_text) else "skipped",
+    )
 
     # ---- 4. 合併候選股 ----
     log.info("[4/6] 合併候選股 ...")
     supply_chain = load_supply_chain(root)
     consensus_tickers = _consensus_tickers_today(root)
     watchlist_tickers = _watchlist_tickers(root)
+    known_tickers: set[str] = set()
+    try:
+        from bot.stock_db import StockDB
+        universe_db = StockDB.open(root=root)
+        try:
+            known_tickers = {
+                normalize_ticker(row.symbol)
+                for row in universe_db.list_stock_info()
+                if normalize_ticker(row.symbol)
+            }
+        finally:
+            universe_db.close()
+    except Exception:
+        log.debug("讀取 canonical ticker universe 失敗，保留格式正確代號", exc_info=True)
     pool = _build_candidate_pool(
         themes, supply_chain, consensus_tickers, watchlist_tickers, macro,
+        known_tickers=known_tickers or None,
     )
     log.info(
         "候選池 %d (題材%d / 供應鏈%d / ETF%d / WL%d)",
@@ -403,6 +480,7 @@ def run_intraday(
         sum(1 for r in pool.values() if "etf" in r.sources),
         sum(1 for r in pool.values() if "watchlist" in r.sources),
     )
+    progress.complete("candidates", success=True, message=f"{len(pool)} pool")
 
     # ---- 5. 評分排序 ----
     log.info("[5/6] 對 %d 檔候選股計算當沖分 ...", len(pool))
@@ -415,14 +493,21 @@ def run_intraday(
             refresh_technicals=force_refresh_technicals,
             log=log,
         )
+    rankable = [
+        row for row in pool.values()
+        if row.data_quality in {"ok", "partial"} and row.today_close is not None
+    ]
+    if len(rankable) < len(pool):
+        log.warning("%d 檔候選因缺少有效技術資料未納入當沖排序", len(pool) - len(rankable))
     rankings = sorted(
-        pool.values(),
+        rankable,
         key=lambda r: (-r.day_trade_score, -r.theme_heat),
     )[:candidate_limit]
     report.rankings = rankings
+    progress.complete("scoring", success=True, message=f"{len(rankings)} ranked")
 
     # ---- 6. LLM 戰情簡報 ----
-    if client.enabled and themes:
+    if client.enabled and themes and rankings:
         log.info("[6/6] LLM 撰寫戰情簡報 ...")
         try:
             top_for_brief = [asdict(r) for r in rankings[:15]]
@@ -444,6 +529,11 @@ def run_intraday(
             report.errors.append(f"brief: {e}")
     else:
         log.info("[6/6] (略) 略過戰情簡報")
+    progress.complete(
+        "brief",
+        success=not any(e.startswith("brief:") for e in report.errors),
+        message="" if (client.enabled and themes) else "skipped",
+    )
 
     report.duration_sec = round(time.time() - t0, 2)
 
@@ -501,6 +591,7 @@ def _watchlist_tickers(root: Path) -> List[str]:
 
 def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     root_path = root or Path.cwd()
+    db = None
     try:
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
@@ -511,6 +602,9 @@ def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]
             return data
     except Exception:
         get_logger("intraday").debug("load latest intraday from DB failed", exc_info=True)
+    finally:
+        if db is not None:
+            db.close()
 
     base = root_path / "data" / "intraday"
     restore_tree_from_cloud(base, root=root)
@@ -523,8 +617,9 @@ def load_latest_intraday(root: Optional[Path] = None) -> Optional[Dict[str, Any]
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
-                _persist_report_json_to_db(data, root=root_path, log=get_logger("intraday"))
-                return data
+                return _persist_report_json_to_db(
+                    data, root=root_path, log=get_logger("intraday"),
+                )
             except Exception:
                 continue
     return None
@@ -543,6 +638,7 @@ def load_intraday_by_date(
     else:
         date_iso = str(report_date)
 
+    db = None
     try:
         from bot.stock_db import StockDB
         db = StockDB.open(root=root_path)
@@ -553,6 +649,9 @@ def load_intraday_by_date(
             return data
     except Exception:
         get_logger("intraday").debug("load intraday from DB failed", exc_info=True)
+    finally:
+        if db is not None:
+            db.close()
 
     p = root_path / "data" / "intraday" / date_iso / "report.json"
     restore_file_from_cloud(p, root=root_path)
@@ -560,8 +659,9 @@ def load_intraday_by_date(
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        _persist_report_json_to_db(data, root=root_path, log=get_logger("intraday"))
-        return data
+        return _persist_report_json_to_db(
+            data, root=root_path, log=get_logger("intraday"),
+        )
     except Exception:
         get_logger("intraday").debug("load intraday file failed: %s", p, exc_info=True)
         return None
@@ -587,10 +687,14 @@ def _persist_report_json_to_db(
     *,
     root: Path,
     log: logging.Logger,
-) -> None:
+) -> Dict[str, Any]:
     report_date = str(data.get("asof") or "").strip()
     if not report_date:
-        return
+        return dict(data)
+    db = None
+    payload, normalized_evidence, quality_status = prepare_report_payload_for_storage(
+        root, data, logger=log,
+    )
     try:
         from bot.stock_db import LlmDailyReportRow, StockDB
         db = StockDB.open(root=root)
@@ -605,11 +709,17 @@ def _persist_report_json_to_db(
                 prompt_id=str(data.get("brief_prompt_id") or ""),
                 prompt_version=str(data.get("brief_prompt_version") or ""),
                 brief_md=str(data.get("brief_md") or ""),
-                payload_json=json.dumps(data, ensure_ascii=False),
+                payload_json=json.dumps(payload, ensure_ascii=False),
+                evidence_json=json.dumps(normalized_evidence, ensure_ascii=False),
+                quality_status=quality_status,
             )
         )
     except Exception:
         log.exception("intraday DB 持久化失敗")
+    finally:
+        if db is not None:
+            db.close()
+    return payload
 
 
 __all__ = [

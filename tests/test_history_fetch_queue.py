@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -79,3 +81,50 @@ class TestHistoryFetchQueue:
             for d in range(1, 11)
         ])
         assert _month_covered(db, "9999", 2026, 1, kind="daily")
+
+    def test_yfinance_fallback_is_archived_as_cache_only_normalized_source(
+        self, root: Path, db: StockDB, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from bot.history_fetch_queue import run_one_daily
+        from bot.ask import AskEngine
+
+        rows = [{
+            "date": "2026-09-18",
+            "open": 100.0,
+            "high": 105.0,
+            "low": 99.0,
+            "close": 103.0,
+            "volume": 12.5,
+        }]
+        monkeypatch.setattr("bot.history_fetch_queue.twse_is_available", lambda *args, **kwargs: False)
+        monkeypatch.setattr("bot.history_fetch_queue._resolve_market", lambda *args, **kwargs: "twse")
+        monkeypatch.setattr(
+            "bot.history_fetch_queue.fetch_monthly_kline_yfinance",
+            lambda *args, **kwargs: rows,
+        )
+        result = run_one_daily(
+            WorkItem("2330", 2026, 9),
+            root=root,
+            db=db,
+            logger=logging.getLogger("test-history"),
+        )
+
+        assert result.ok is True
+        bars = db.get_price_history("2330", limit=1, ascending=False)
+        assert bars[0].source == "yfinance"
+        assert bars[0].quality_status == "partial"
+        assert bars[0].source_record_id.startswith("source-doc:yfinance_stock_day:")
+        source = db.get_source_document(bars[0].source_record_id)
+        assert source is not None
+        payload = json.loads((root / source.content_path).read_text(encoding="utf-8"))
+        assert payload["adapter"] == "yfinance"
+        assert payload["rows"] == rows
+        assert json.loads(source.metadata_json)["provenance_status"] == "cache_only"
+
+        result = AskEngine(root=root, db=db).ask("2330 最近股價？")
+        price_items = [
+            item for item in result.evidence.items
+            if item["kind"] == "ticker_snapshot" and "日 K" in item["title"]
+        ]
+        assert price_items
+        assert price_items[0]["provenance_status"] == "cache_only"

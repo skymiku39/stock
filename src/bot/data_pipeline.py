@@ -16,6 +16,7 @@ import dataclasses
 import datetime as dt
 import json
 import logging
+import os
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -28,6 +29,7 @@ from bot.active_etf import (
     list_holdings_dates,
     load_active_etfs,
     load_holdings,
+    sync_etf_meta_to_db,
 )
 from bot.chips_fetcher import ChipSummary, build_chip_summary, summary_to_chips_context, summary_to_dict
 from bot.etf_consensus import (
@@ -49,7 +51,7 @@ from bot.llm_analyzer import (
     logic_check,
 )
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
-from bot.events.pipeline_helpers import publish_pipeline_completed
+from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -73,6 +75,7 @@ class PipelineConfig:
     project_root: Path
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    llm_settings: Optional[Any] = None
     focus_tickers: List[str] = field(default_factory=list)
     chip_lookback_days: int = 5
     fetch_etf_holdings: bool = True
@@ -81,6 +84,7 @@ class PipelineConfig:
     update_calendar: bool = True
     auto_focus_upcoming_days: int = 14
     auto_research_focus: bool = True
+    auto_research_limit: Optional[int] = None
     run_llm_analysis: bool = True
     generate_brief: bool = True
     generate_us_brief: bool = True
@@ -100,8 +104,10 @@ class PipelineRun:
 
     calendar_summary: Dict[str, Any] = field(default_factory=dict)
     auto_research_summary: List[Dict[str, Any]] = field(default_factory=list)
+    auto_research_batch: Dict[str, Any] = field(default_factory=dict)
 
     etf_fetch_summary: Dict[str, Any] = field(default_factory=dict)
+    etf_meta_summary: Dict[str, Any] = field(default_factory=dict)
     consensus_top: List[Dict[str, Any]] = field(default_factory=list)
     new_build_signals: List[Dict[str, Any]] = field(default_factory=list)
     add_signals: List[Dict[str, Any]] = field(default_factory=list)
@@ -117,7 +123,75 @@ class PipelineRun:
     us_brief_prompt_version: str = ""
     macro_summary: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
     output_dir: str = ""
+
+
+def _select_auto_research_batch(
+    focus_tickers: List[str],
+    completed_tickers: set[str],
+    *,
+    limit: Optional[int],
+    root: Path,
+    logger: logging.Logger,
+) -> tuple[List[str], int, int, Optional[Path]]:
+    """Select stale research targets, rotating across the full focus list."""
+    candidates = [t for t in focus_tickers if t not in completed_tickers]
+    if limit is None or limit <= 0:
+        return candidates, 0, 0, None
+
+    cursor_path = root / "data" / "auto_research_cursor.json"
+    last_ticker = ""
+    try:
+        cursor_data = json.loads(cursor_path.read_text(encoding="utf-8"))
+        last_ticker = str(cursor_data.get("last_ticker") or "")
+    except (OSError, ValueError, TypeError):
+        pass
+
+    start = 0
+    if last_ticker in focus_tickers:
+        start = (focus_tickers.index(last_ticker) + 1) % max(1, len(focus_tickers))
+    rotated = focus_tickers[start:] + focus_tickers[:start]
+
+    from bot.auto_llm import DEFAULT_AGE_HOURS, load_cached_auto_analysis
+
+    stale: List[str] = []
+    fresh_count = 0
+    for ticker in rotated:
+        if ticker in completed_tickers:
+            continue
+        try:
+            cached = load_cached_auto_analysis(
+                ticker, root, max_age_hours=DEFAULT_AGE_HOURS,
+            )
+        except Exception:
+            logger.debug("[%s] 研究快取檢查失敗，列入待研究", ticker, exc_info=True)
+            cached = None
+        if cached is None:
+            stale.append(ticker)
+        else:
+            fresh_count += 1
+
+    selected = stale[:limit]
+    return selected, fresh_count, max(0, len(stale) - len(selected)), cursor_path
+
+
+def _save_auto_research_cursor(path: Path, ticker: str, run_id: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    payload = {
+        "last_ticker": ticker,
+        "run_id": run_id,
+        "updated_at": now_tw().isoformat(timespec="seconds"),
+    }
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ----------------------------------------------------------------------
@@ -162,10 +236,23 @@ def run_full_pipeline(
         api_key=config.gemini_api_key,
         model=config.gemini_model,
         logger=log,
+        settings=config.llm_settings,
+        root=config.project_root,
     )
 
     t0 = time.time()
     today = started.date()
+    progress = PipelineProgress(publisher, "data_research", total_steps=6)
+
+    # active_etfs.json／內建清單是設定層；先物化到 canonical etf_meta，讓
+    # Dashboard、cloud sync 與研究管線共享同一份 metadata。這些列刻意標成
+    # unknown/config-only，不會被 Evidence 層當成外部市場證據。
+    try:
+        run.etf_meta_summary = sync_etf_meta_to_db(config.project_root)
+        log.info("ETF metadata 同步完成: %s", run.etf_meta_summary)
+    except Exception as e:
+        log.exception("ETF metadata 同步失敗")
+        run.warnings.append(f"etf_meta_sync: {e}")
 
     # ---- 0. 法說會行事曆自動更新 (含上月 / 本月 / 下月 / +2 月) ----
     upcoming_calendar_tickers: List[str] = []
@@ -231,6 +318,11 @@ def run_full_pipeline(
             run.errors.append(f"calendar: {e}")
     else:
         log.info("[0/6] (略) 行事曆自動更新已關閉")
+    progress.complete(
+        "calendar",
+        success=not any(e.startswith("calendar:") for e in run.errors),
+        message="" if config.update_calendar else "skipped",
+    )
 
     # ---- 1. ETF 持股自動抓取 ----
     if config.fetch_etf_holdings:
@@ -242,10 +334,44 @@ def run_full_pipeline(
                 root=config.project_root,
                 logger=log,
             )
+            etf_warnings: List[str] = []
+            etf_errors: List[str] = []
+            for result in results:
+                if not result.success:
+                    reason = result.error or result.research_error or "unknown"
+                    message = f"{result.etf.symbol}: {reason}"
+                    # 沒有設定 LLM 時，依契約允許保留 raw、暫不建立 canonical；
+                    # 這是可預期的 partial，不應偽裝成全成功，也不應阻斷其他來源。
+                    if result.error in {
+                        "no_data_yet", "llm_disabled", "source_incomplete_top_n",
+                    }:
+                        etf_warnings.append(f"ETF {message}")
+                    else:
+                        etf_errors.append(f"ETF {message}")
+                elif result.research_status == "failed":
+                    # canonical 已保存但 research/evidence 鏈斷裂，不能算完整成功。
+                    etf_errors.append(
+                        f"ETF {result.etf.symbol}: research {result.research_error or 'failed'}"
+                    )
+                elif result.research_status not in {"", "ok", "reused", "skipped"}:
+                    etf_warnings.append(
+                        f"ETF {result.etf.symbol}: research {result.research_status}"
+                    )
             run.etf_fetch_summary = {
                 "total": len(results),
                 "success": sum(1 for r in results if r.success),
                 "failed": sum(1 for r in results if not r.success),
+                "research_success": sum(
+                    1 for r in results if r.success and r.research_status in {"ok", "reused"}
+                ),
+                "research_failed": sum(1 for r in results if r.research_status == "failed"),
+                "status": (
+                    "failed" if etf_errors and not any(r.success for r in results)
+                    else "partial" if etf_errors or etf_warnings
+                    else "ok"
+                ),
+                "warnings": etf_warnings,
+                "errors": etf_errors,
                 "details": [
                     {
                         "symbol": r.etf.symbol,
@@ -253,15 +379,31 @@ def run_full_pipeline(
                         "success": r.success,
                         "holdings_count": r.holdings_count,
                         "error": r.error,
+                        "research_status": r.research_status,
+                        "research_document_id": r.research_document_id,
+                        "research_evidence_id": r.research_evidence_id,
+                        "research_error": r.research_error,
                         "saved_path": str(r.saved_path) if r.saved_path else "",
                     } for r in results
                 ],
             }
+            run.warnings.extend(etf_warnings)
+            run.errors.extend(etf_errors)
         except Exception as e:
             log.exception("ETF 抓取階段例外")
             run.errors.append(f"etf_fetch: {e}")
     else:
         log.info("[1/6] (略) ETF 抓取已關閉")
+    progress.complete(
+        "etf_holdings",
+        success=not any(
+            e.startswith(("etf_fetch:", "ETF ")) for e in run.errors
+        ),
+        message=(
+            run.etf_fetch_summary.get("status", "")
+            if config.fetch_etf_holdings else "skipped"
+        ),
+    )
 
     # ---- 2. 共識計算 ----
     log.info("[2/6] 計算 ETF 共識與變動 …")
@@ -321,9 +463,16 @@ def run_full_pipeline(
         len(focus_list), config.auto_focus_upcoming_days,
         len(upcoming_calendar_tickers), focus_list[:10],
     )
+    progress.complete(
+        "consensus_focus",
+        success=True,
+        message=f"{len(focus_list)} tickers",
+    )
 
     # ---- 4. 籌碼面 ----
     chip_map: Dict[str, ChipSummary] = {}
+    chip_no_data: List[str] = []
+    chip_partial: List[str] = []
     if config.fetch_chips and focus_list:
         log.info("[4/6] 自動抓籌碼面 (近 %d 日) …", config.chip_lookback_days)
         for t in focus_list:
@@ -336,11 +485,35 @@ def run_full_pipeline(
                 )
                 chip_map[t] = summary
                 run.chip_summaries.append(summary_to_dict(summary))
+                observed_rows = len(summary.rows)
+                if observed_rows == 0:
+                    chip_no_data.append(t)
+                elif observed_rows < max(1, int(summary.days or config.chip_lookback_days)):
+                    chip_partial.append(t)
             except Exception as e:
                 log.exception("[%s] 籌碼面抓取失敗", t)
                 run.errors.append(f"chips_{t}: {e}")
     else:
         log.info("[4/6] (略) 籌碼面抓取已關閉")
+    if chip_no_data:
+        sample = ", ".join(chip_no_data[:12])
+        suffix = "…" if len(chip_no_data) > 12 else ""
+        run.warnings.append(
+            f"chips: {len(chip_no_data)} 個焦點標的沒有可用交易日資料"
+            f"（{sample}{suffix}）；不等於籌碼為 0"
+        )
+    if chip_partial:
+        sample = ", ".join(chip_partial[:12])
+        suffix = "…" if len(chip_partial) > 12 else ""
+        run.warnings.append(
+            f"chips: {len(chip_partial)} 個焦點標的只有部分回顧日資料"
+            f"（{sample}{suffix}）；分析需保留期間限制"
+        )
+    progress.complete(
+        "chips",
+        success=not any(e.startswith("chips_") for e in run.errors),
+        message="" if (config.fetch_chips and focus_list) else "skipped",
+    )
 
     # ---- 5. 法說會 LLM 分析 + 言行反查 ----
     analyses: List[PresentationAnalysis] = []
@@ -382,9 +555,36 @@ def run_full_pipeline(
             from bot.auto_llm import auto_analyze_ticker
 
             already_done = {pi.ticker for pi in config.presentation_inputs}
-            for t in focus_list:
-                if t in already_done:
-                    continue
+            selected, fresh_count, deferred_count, cursor_path = (
+                _select_auto_research_batch(
+                    focus_list,
+                    already_done,
+                    limit=config.auto_research_limit,
+                    root=config.project_root,
+                    logger=log,
+                )
+            )
+            run.auto_research_batch = {
+                "limit": config.auto_research_limit,
+                "focus_count": len(focus_list),
+                "fresh_cache_count": fresh_count,
+                "selected_tickers": selected,
+                "deferred_count": deferred_count,
+                "no_result_tickers": [],
+            }
+            if deferred_count:
+                run.warnings.append(
+                    "auto_research: "
+                    f"{deferred_count} 個缺少或過期快取的焦點標的延後至後續排程輪次"
+                )
+            log.info(
+                "[5a/6] 本輪研究 %d 檔；有效快取略過 %d 檔；延後 %d 檔%s",
+                len(selected), fresh_count, deferred_count,
+                f" (limit={config.auto_research_limit})"
+                if config.auto_research_limit and config.auto_research_limit > 0
+                else "",
+            )
+            for t in selected:
                 try:
                     chip_ctx = (
                         summary_to_chips_context(chip_map[t])
@@ -409,8 +609,24 @@ def run_full_pipeline(
                             "logic_verdict": (res.get("logic_check") or {}).get("verdict"),
                             "source": res.get("source"),
                         })
-                except Exception:
+                    else:
+                        run.auto_research_batch["no_result_tickers"].append(t)
+                        warning = (
+                            f"auto_research_{t}: 本輪未產出可保存的分析結果；"
+                            "將在輪替游標下次經過時重試"
+                        )
+                        run.warnings.append(warning)
+                        log.warning("%s", warning)
+                except Exception as e:
                     log.exception("[%s] 自動研究例外 (繼續)", t)
+                    run.errors.append(f"auto_research_{t}: {e}")
+                finally:
+                    if cursor_path is not None:
+                        try:
+                            _save_auto_research_cursor(cursor_path, t, run_id)
+                        except Exception as e:
+                            log.exception("自動研究輪替游標寫入失敗")
+                            run.errors.append(f"auto_research_cursor: {e}")
         except Exception as e:
             log.exception("自動研究批次失敗")
             run.errors.append(f"auto_research: {e}")
@@ -432,6 +648,47 @@ def run_full_pipeline(
                 root=config.project_root, force_refresh=True, logger=log,
             )
             macro_snap_dict = macro_to_dict(macro_snap)
+            macro_notes = [
+                str(note).strip()
+                for note in (macro_snap.notes or [])
+                if str(note).strip()
+            ]
+            macro_warnings: List[str] = []
+            for note in macro_notes:
+                message = f"macro: {note}"
+                if message not in macro_warnings:
+                    macro_warnings.append(message)
+
+            source_date_status = str(
+                macro_snap.source_date_status or "unknown"
+            ).strip().lower()
+            if source_date_status not in {"", "aligned"}:
+                message = f"macro: source_date_status={source_date_status}"
+                if message not in macro_warnings:
+                    macro_warnings.append(message)
+
+            futures = macro_snap.futures_basis
+            futures_summary: Optional[Dict[str, Any]] = None
+            if futures is not None:
+                futures_summary = {
+                    "asof_date": str(futures.asof_date or ""),
+                    "quality_status": str(futures.quality_status or "unknown"),
+                    "cached": bool(futures.cached),
+                    "source_document_id": str(futures.source_document_id or ""),
+                    "note": str(futures.note or ""),
+                }
+                if str(futures.quality_status or "ok").strip().lower() != "ok":
+                    message = (
+                        "macro: futures_basis quality_status="
+                        f"{futures.quality_status or 'unknown'}"
+                    )
+                    if message not in macro_warnings:
+                        macro_warnings.append(message)
+                if futures.cached:
+                    message = "macro: futures_basis 使用 exact raw cache，非即時資料"
+                    if message not in macro_warnings:
+                        macro_warnings.append(message)
+
             run.macro_summary = {
                 "asof_date": macro_snap.asof_date,
                 "usdtwd": macro_snap.usdtwd,
@@ -439,7 +696,13 @@ def run_full_pipeline(
                 "stocks_count": len(macro_snap.stocks),
                 "adr_premiums_count": len(macro_snap.adr_premiums),
                 "top_movers": _top_movers(macro_snap_dict),
+                "source_date_status": source_date_status,
+                "source_dates": dict(macro_snap.source_dates or {}),
+                "notes": macro_notes,
+                "futures_basis": futures_summary,
+                "status": "partial" if macro_warnings else "ok",
             }
+            run.warnings.extend(macro_warnings)
         except Exception as e:
             log.exception("macro 抓取失敗")
             run.errors.append(f"macro: {e}")
@@ -482,6 +745,14 @@ def run_full_pipeline(
             log.exception("us_market_brief 失敗")
             run.errors.append(f"us_brief: {e}")
 
+    progress.complete(
+        "research",
+        success=not any(
+            e.startswith(("llm_", "auto_research", "macro:", "us_brief:"))
+            for e in run.errors
+        ),
+    )
+
     # ---- 6. 每日簡報 ----
     if config.generate_brief and client.enabled:
         log.info("[6/6] 產出每日簡報 …")
@@ -513,6 +784,11 @@ def run_full_pipeline(
             run.errors.append(f"daily_brief: {e}")
     else:
         log.info("[6/6] (略) 每日簡報未啟用或 LLM 未啟用")
+    progress.complete(
+        "daily_brief",
+        success=not any(e.startswith("daily_brief:") for e in run.errors),
+        message="" if (config.generate_brief and client.enabled) else "skipped",
+    )
 
     # ---- 收尾 ----
     ended = now_tw()
@@ -521,8 +797,8 @@ def run_full_pipeline(
     _persist_run(run, output_dir, log)
     _append_manifest(run, config.project_root, log)
     log.info(
-        "Pipeline 完成 (%s, %.1fs, 焦點 %d, 錯誤 %d)",
-        run_id, run.duration_sec, len(run.focus_tickers), len(run.errors),
+        "Pipeline 完成 (%s, %.1fs, 焦點 %d, 錯誤 %d, 警告 %d)",
+        run_id, run.duration_sec, len(run.focus_tickers), len(run.errors), len(run.warnings),
     )
     publish_pipeline_completed(
         publisher,
@@ -532,7 +808,11 @@ def run_full_pipeline(
         success=len(run.errors) == 0,
         error_count=len(run.errors),
         duration_sec=run.duration_sec,
-        extra={"focus_tickers": len(run.focus_tickers)},
+        extra={
+            "focus_tickers": len(run.focus_tickers),
+            "warnings_count": len(run.warnings),
+            "status": "failed" if run.errors else "partial" if run.warnings else "ok",
+        },
     )
     return run
 
@@ -575,6 +855,8 @@ def _append_manifest(run: PipelineRun, root: Path, log: logging.Logger) -> None:
                 "duration_sec": run.duration_sec,
                 "focus_tickers_count": len(run.focus_tickers),
                 "errors": len(run.errors),
+                "warnings": len(run.warnings),
+                "status": "failed" if run.errors else "partial" if run.warnings else "ok",
                 "etf_success": run.etf_fetch_summary.get("success", 0),
                 "etf_failed": run.etf_fetch_summary.get("failed", 0),
                 "output_dir": run.output_dir,

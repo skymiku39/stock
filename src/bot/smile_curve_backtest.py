@@ -104,20 +104,25 @@ class SmileCurveBacktester:
         end: Optional[str] = None,
         db: Optional[StockDB] = None,
     ) -> SmileBacktestSummary:
+        owns_db = db is None
         database = db or StockDB.open(path=default_db_path(root or Path.cwd()))
-        results = [
-            self.run_symbol(database, sym, start=start, end=end)
-            for sym in symbols
-        ]
-        tiers = getattr(self.settings, "smile_buy_tiers", "")
-        note = (
-            f"[微笑曲線] tiers={tiers} | base_lot={self.settings.smile_base_lot} | "
-            f"tax={self.settings.smile_regular_tax_rate:.4f} | "
-            f"fund_cap={self.settings.effective_fund_cap():.0f}"
-        )
-        return SmileBacktestSummary(
-            results=results,
-            settings_note=note,
-            start=start or "",
-            end=end or "",
-        )
+        try:
+            results = [
+                self.run_symbol(database, sym, start=start, end=end)
+                for sym in symbols
+            ]
+            tiers = getattr(self.settings, "smile_buy_tiers", "")
+            note = (
+                f"[微笑曲線] tiers={tiers} | base_lot={self.settings.smile_base_lot} | "
+                f"tax={self.settings.smile_regular_tax_rate:.4f} | "
+                f"fund_cap={self.settings.effective_fund_cap():.0f}"
+            )
+            return SmileBacktestSummary(
+                results=results,
+                settings_note=note,
+                start=start or "",
+                end=end or "",
+            )
+        finally:
+            if owns_db:
+                database.close()

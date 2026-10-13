@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, read_json_cache, write_json_cache
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, now_tw
 
 
@@ -410,6 +411,29 @@ def _load_api_rows(
 
     try:
         resp = session.get(url, timeout=20)
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                SourceRegistry(Path(root)).capture_document(
+                    f"market_calendar_{cache_name.rsplit('.', 1)[0]}",
+                    resp.content,
+                    source_url=url,
+                    source_ref=cache_name,
+                    title=f"市場日曆 API {cache_name}",
+                    kind="http_response",
+                    suffix="json",
+                    mime_type=str(
+                        getattr(resp, "headers", {}).get("Content-Type", "")
+                        or "application/json"
+                    ),
+                    as_of=now_tw().date().isoformat(),
+                    quality_status=(
+                        "ok" if 200 <= int(getattr(resp, "status_code", 200)) < 300
+                        else "invalid"
+                    ),
+                    metadata={"cache_name": cache_name},
+                )
+            except Exception:
+                logger.debug("市場日曆 raw 保存失敗: %s", cache_name, exc_info=True)
         resp.raise_for_status()
         resp.encoding = "utf-8"
         data = resp.json()

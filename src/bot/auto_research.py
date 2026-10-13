@@ -19,13 +19,14 @@ from typing import List, Optional
 
 from bot.app_bootstrap import get_or_create_bus
 from bot.auto_llm import run_llm_research_batch
+from bot.cli_encoding import configure_console
 from bot.config import Settings
 from bot.data_pipeline import (
     PipelineConfig,
     PresentationInput,
     run_full_pipeline,
 )
-from bot.utils import get_logger
+from bot.utils import get_logger, log_root
 
 
 def _read_pdf_text(path: Path) -> Optional[str]:
@@ -58,6 +59,7 @@ def _read_text_or_pdf(path: Path) -> Optional[str]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(
         prog="stock-auto-research",
         description="自動化股票研究管線 (ETF + 籌碼 + 法說 + LLM 每日簡報)",
@@ -73,6 +75,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--no-auto-research", action="store_true",
         help="不對焦點個股自動跑 LLM 研究 (預設啟用)",
+    )
+    parser.add_argument(
+        "--auto-research-limit", type=int, default=None,
+        help="完整管線模式最多研究幾檔缺少/過期快取的個股；未指定或 <=0 表示不設上限",
     )
     parser.add_argument(
         "--upcoming-days", type=int, default=14,
@@ -110,10 +116,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--refresh", action="store_true",
         help="--llm-only：略過快取強制重跑",
     )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
-    logger = get_logger("auto-research")
-    project_root = Path.cwd()
+    project_root = args.root.resolve() if args.root else Path.cwd()
+    logger = get_logger("auto-research", log_dir=project_root / "log")
 
     if args.llm_only:
         tickers = [
@@ -122,18 +132,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             for t in str(raw).split(",")
             if t.strip()
         ]
-        return run_llm_research_batch(
-            tickers=tickers,
-            root=project_root,
-            upcoming=args.upcoming,
-            upcoming_days=args.upcoming_days,
-            no_calendar=args.no_calendar,
-            refresh=args.refresh,
-            chip_days=args.days,
-            logger=logger,
-        )
+        with log_root(project_root):
+            return run_llm_research_batch(
+                tickers=tickers,
+                root=project_root,
+                upcoming=args.upcoming,
+                upcoming_days=args.upcoming_days,
+                no_calendar=args.no_calendar,
+                refresh=args.refresh,
+                chip_days=args.days,
+                logger=logger,
+            )
 
-    settings = Settings()
+    settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
 
     presentations: List[PresentationInput] = []
     for spec in args.pdf:
@@ -142,6 +153,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
         ticker, path_str = spec.split("=", 1)
         p = Path(path_str)
+        if not p.is_absolute():
+            p = project_root / p
         text = _read_text_or_pdf(p)
         if text is None or len(text) < 50:
             logger.warning("讀不到 %s 的內容", p)
@@ -156,6 +169,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         project_root=project_root,
         gemini_api_key=settings.gemini_api_key,
         gemini_model=settings.gemini_model,
+        llm_settings=settings,
         focus_tickers=[
             t.strip()
             for raw in args.focus
@@ -167,18 +181,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         fetch_chips=not args.no_chips,
         update_calendar=not args.no_calendar,
         auto_focus_upcoming_days=args.upcoming_days,
-        auto_research_focus=(not args.no_auto_research) and bool(settings.gemini_api_key),
-        run_llm_analysis=(not args.no_llm) and bool(settings.gemini_api_key),
-        generate_brief=(not args.no_brief) and bool(settings.gemini_api_key),
+        auto_research_focus=(not args.no_auto_research) and settings.llm_enabled,
+        auto_research_limit=args.auto_research_limit,
+        run_llm_analysis=(not args.no_llm) and settings.llm_enabled,
+        generate_brief=(not args.no_brief) and settings.llm_enabled,
         min_consensus_for_focus=args.min_consensus,
         presentation_inputs=presentations,
     )
 
     logger.info("=== 自動化研究啟動 ===")
-    run = run_full_pipeline(config, logger=logger, publisher=get_or_create_bus())
+    with log_root(project_root):
+        run = run_full_pipeline(
+            config,
+            logger=logger,
+            publisher=get_or_create_bus(project_root=project_root),
+        )
     logger.info(
-        "=== 完成: run_id=%s, 焦點 %d, 錯誤 %d, 輸出 %s ===",
-        run.run_id, len(run.focus_tickers), len(run.errors), run.output_dir,
+        "=== 完成: run_id=%s, 狀態 %s, 焦點 %d, 錯誤 %d, 警告 %d, 輸出 %s ===",
+        run.run_id,
+        "failed" if run.errors else "partial" if run.warnings else "ok",
+        len(run.focus_tickers), len(run.errors), len(run.warnings), run.output_dir,
     )
     return 0 if not run.errors else 2
 

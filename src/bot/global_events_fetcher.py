@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 from bot.market_macro import load_supply_chain
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, now_tw
 
 APPLE_NEWSROOM_RSS = "https://www.apple.com/newsroom/rss-feed.rss"
@@ -83,6 +84,39 @@ MEGA_TECH_ORGANIZERS = frozenset({
 DEFAULT_MIN_SUPPLY_WEIGHT = 0.5
 NEWS_LOOKBACK_HOURS = 48
 MAX_MERGED_NOTE_CHARS = 280
+
+
+def _capture_global_response(
+    source: str,
+    content: bytes | bytearray | str,
+    *,
+    root: Optional[Path],
+    source_url: str,
+    source_ref: str,
+    title: str,
+    suffix: str,
+    mime_type: str,
+    logger: logging.Logger,
+) -> None:
+    """保存官方全球事件來源的原始回應；不讓 provenance 失敗中斷解析。"""
+    if not content:
+        return
+    try:
+        SourceRegistry(root or Path.cwd()).capture_document(
+            source,
+            content,
+            source_url=source_url,
+            source_ref=source_ref,
+            title=title,
+            kind="http_response",
+            suffix=suffix,
+            mime_type=mime_type,
+            metadata={"retrieval": "global_events"},
+        )
+    except Exception:
+        logger.debug(
+            "全球事件原始回應保存失敗: %s %s", source, source_ref, exc_info=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -295,6 +329,17 @@ def fetch_apple_newsroom_events(
     try:
         resp = sess.get(APPLE_NEWSROOM_RSS, timeout=20)
         resp.raise_for_status()
+        _capture_global_response(
+            "apple_newsroom_rss",
+            resp.content,
+            root=root,
+            source_url=APPLE_NEWSROOM_RSS,
+            source_ref=f"lookback:{lookback_hours}h",
+            title="Apple Newsroom RSS",
+            suffix="xml",
+            mime_type="application/rss+xml",
+            logger=log,
+        )
         root_el = ET.fromstring(resp.content)
     except Exception as exc:  # noqa: BLE001
         log.warning("Apple Newsroom RSS 抓取失敗: %s", exc)
@@ -386,6 +431,17 @@ def fetch_corporate_official_pages(
         try:
             resp = sess.get(url, timeout=20)
             resp.raise_for_status()
+            _capture_global_response(
+                "corporate_official_page",
+                resp.content,
+                root=root,
+                source_url=url,
+                source_ref=url,
+                title=base_title,
+                suffix="html",
+                mime_type="text/html; charset=utf-8",
+                logger=log,
+            )
             text = html.unescape(resp.text)
         except Exception as exc:  # noqa: BLE001
             log.debug("官方頁抓取失敗 %s: %s", url, exc)
@@ -476,7 +532,9 @@ def fetch_news_keyword_events(
 
     for query in _news_queries_for_year(year):
         try:
-            results = search_news(query, max_results=6, session=sess, logger=log)
+            results = search_news(
+                query, max_results=6, session=sess, logger=log, root=root,
+            )
         except Exception:
             log.debug("新聞搜尋失敗 q=%r", query, exc_info=True)
             continue

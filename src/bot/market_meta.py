@@ -22,6 +22,7 @@ from typing import Dict, Optional
 import requests
 
 from bot.cloud_file_cache import restore_file_from_cloud, write_json_cache
+from bot.data_quality import persist_source_result, response_to_rows
 from bot.utils import get_logger, mk_folder, now_tw
 
 # 市場別常數
@@ -32,8 +33,13 @@ UNKNOWN = "unknown"
 URL_TWSE_CODES = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL"
 URL_TPEX_CODES = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
 
-# 程序內快取，避免同一次執行重複讀檔/打網路
-_MARKET_MAP: Optional[Dict[str, str]] = None
+# 程序內快取，避免同一次執行重複讀檔/打網路。根目錄是資料隔離邊界，
+# 不能讓測試、CLI 或同一個長駐程序中的兩個專案互相重用名冊。
+_MARKET_MAP_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _root_key(root: Optional[Path]) -> str:
+    return str((root or Path.cwd()).resolve())
 
 
 def _map_path(root: Optional[Path]) -> Path:
@@ -57,6 +63,7 @@ def _build_market_map(
     *,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> Dict[str, str]:
     """從 TWSE / TPEx 全市場清單建立 {代號: 市場別}。"""
     log = logger or get_logger("market-meta")
@@ -65,21 +72,41 @@ def _build_market_map(
     # 上市
     try:
         r = sess.get(URL_TWSE_CODES, timeout=20)
-        if r.status_code == 200:
-            for row in r.json() or []:
+        result = response_to_rows(
+            r,
+            source="market_meta_twse",
+            url=URL_TWSE_CODES,
+            min_rows=1,
+        )
+        # 即使解析結果不可用，也保留這次 HTTP response，方便區分「來源失敗」
+        # 與「沒有上市代號」。
+        persist_source_result(result, root=root)
+        if result.usable:
+            for row in result.rows:
                 code = str(row.get("Code") or "").strip()
                 if code:
                     out[code] = TWSE
+        else:
+            log.warning("讀取上市代號清單品質=%s: %s", result.status, result.error)
     except Exception:
         log.exception("讀取上市代號清單失敗")
     # 上櫃 (不覆蓋已存在的上市；理論上代號不重疊)
     try:
         r = sess.get(URL_TPEX_CODES, timeout=30)
-        if r.status_code == 200:
-            for row in r.json() or []:
+        result = response_to_rows(
+            r,
+            source="market_meta_tpex",
+            url=URL_TPEX_CODES,
+            min_rows=1,
+        )
+        persist_source_result(result, root=root)
+        if result.usable:
+            for row in result.rows:
                 code = str(row.get("SecuritiesCompanyCode") or "").strip()
                 if code and code not in out:
                     out[code] = TPEX
+        else:
+            log.warning("讀取上櫃代號清單品質=%s: %s", result.status, result.error)
     except Exception:
         log.exception("讀取上櫃代號清單失敗")
     return out
@@ -90,32 +117,42 @@ def load_market_map(
     root: Optional[Path] = None,
     session: Optional[requests.Session] = None,
     force_refresh: bool = False,
+    cache_only: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, str]:
     """載入 (或建立) 市場別對照表，每日快取一次。"""
-    global _MARKET_MAP
-    if _MARKET_MAP is not None and not force_refresh:
-        return _MARKET_MAP
+    key = _root_key(root)
+    cached_map = _MARKET_MAP_CACHE.get(key)
+    if cached_map is not None and not force_refresh:
+        return cached_map
 
     path = _map_path(root)
+    if cache_only:
+        # Rendering a saved report must not start an external lookup or cloud restore.
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            return {str(k): str(v) for k, v in (cached.get("map") or {}).items()}
+        except (OSError, ValueError, AttributeError):
+            return {}
     restore_file_from_cloud(path, root=root)
     today = now_tw().date().isoformat()
     if not force_refresh and path.exists():
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
             if cached.get("date") == today and cached.get("map"):
-                _MARKET_MAP = {str(k): str(v) for k, v in cached["map"].items()}
-                return _MARKET_MAP
+                cached_map = {str(k): str(v) for k, v in cached["map"].items()}
+                _MARKET_MAP_CACHE[key] = cached_map
+                return cached_map
         except Exception:
             pass
 
-    mp = _build_market_map(session=session, logger=logger)
+    mp = _build_market_map(session=session, logger=logger, root=root)
     if mp:
         try:
             write_json_cache(path, {"date": today, "map": mp}, root=root)
         except Exception:
             pass
-        _MARKET_MAP = mp
+        _MARKET_MAP_CACHE[key] = mp
         return mp
 
     # 建表失敗：盡量用舊快取，否則回空
@@ -123,12 +160,13 @@ def load_market_map(
     if path.exists():
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
-            _MARKET_MAP = {str(k): str(v) for k, v in (cached.get("map") or {}).items()}
-            return _MARKET_MAP
+            cached_map = {str(k): str(v) for k, v in (cached.get("map") or {}).items()}
+            _MARKET_MAP_CACHE[key] = cached_map
+            return cached_map
         except Exception:
             pass
-    _MARKET_MAP = {}
-    return _MARKET_MAP
+    _MARKET_MAP_CACHE[key] = {}
+    return _MARKET_MAP_CACHE[key]
 
 
 def detect_market(
@@ -136,13 +174,14 @@ def detect_market(
     *,
     root: Optional[Path] = None,
     session: Optional[requests.Session] = None,
+    cache_only: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> str:
     """回傳個股市場別：'twse'(上市) / 'tpex'(上櫃) / 'unknown'。"""
     ticker = str(ticker).strip()
     if not ticker:
         return UNKNOWN
-    mp = load_market_map(root=root, session=session, logger=logger)
+    mp = load_market_map(root=root, session=session, logger=logger, cache_only=cache_only)
     return mp.get(ticker, UNKNOWN)
 
 

@@ -1,9 +1,12 @@
-"""validate_sources -- 資料源「只讀」健康度 smoke test。
+"""validate_sources -- 資料源健康度 smoke test（``stock-validate``）。
 
 定位
 ====
-不改動正式 ``data/``、不下單、不寫雲端：所有抓取都導向暫存資料夾，
-逐一檢查每個外部資料源並輸出 JSON / Markdown 摘要。
+逐一檢查每個外部資料源並輸出 JSON / Markdown 摘要。資料 root 語意：
+
+* 省略 ``--root``：使用暫存 data root，結束後自動清理；不碰正式 ``data/``。
+* 明確 ``--root PATH``：將 ``PATH`` 傳給收集器，可能寫入 cache / raw / provenance。
+* 設定來源：省略 ``--root`` 時讀 CWD；明確 ``--root PATH`` 時讀 ``PATH``。
 
 三層驗證
 ========
@@ -13,17 +16,18 @@
 
 安全
 ====
-* 只顯示憑證「是否存在」(present=true/false)，**絕不印出金鑰內容**。
-* Shioaji / MIS / 雲端 live ping 預設關閉，需以旗標明確開啟。
+* 不下單；只顯示憑證「是否存在」(present=true/false)，**絕不印出金鑰內容**。
+* Shioaji / MIS / 雲端 live ping 預設關閉，需以旗標明確開啟；雲端僅在要求時 ping。
 
 用法
 ====
 ```bash
-uv run stock-validate                       # 預設全部公開資料源 (read-only)
+uv run stock-validate                       # 預設全部公開資料源 (暫存 root)
 uv run stock-validate --json out.json       # 另存 JSON
 uv run stock-validate --md out.md           # 另存 Markdown
 uv run stock-validate --shioaji             # 額外嘗試 Shioaji 登入/快照 (需憑證)
 uv run stock-validate --mis-seconds 30      # MIS 即時 tick 連續輪詢秒數
+uv run stock-validate --cloud               # 對雲端做 live ping
 ```
 """
 
@@ -33,14 +37,21 @@ import argparse
 import datetime as dt
 import json
 import re
+import shutil
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
+
+from bot.cli_encoding import configure_console
+
+from bot.source_audit import DatasetAudit, audit_rows
+from bot.utils import log_root, now_tw
 
 
 # ----------------------------------------------------------------------
@@ -58,6 +69,8 @@ class CheckResult:
     error: str = ""
     note: str = ""
     needs_credentials: bool = False
+    quality_status: str = "unknown"
+    findings: List[Dict[str, Any]] = field(default_factory=list)
     details: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -70,8 +83,36 @@ class CheckResult:
             "error": self.error,
             "note": self.note,
             "needs_credentials": self.needs_credentials,
+            "quality_status": self.quality_status,
+            "findings": self.findings,
             "details": self.details,
         }
+
+
+def _row_dicts(rows: Any) -> List[Dict[str, Any]]:
+    """把 dataclass / dict 混合結果轉成來源稽核可讀的 dict。"""
+    out: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            out.append(dict(row))
+        elif hasattr(row, "__dataclass_fields__"):
+            out.append(asdict(row))
+        elif hasattr(row, "__dict__"):
+            out.append(dict(vars(row)))
+    return out
+
+
+def _apply_audit(result: CheckResult, audit: DatasetAudit) -> None:
+    """將語意品質與 smoke test 結果分開保存，避免 HTTP 200 被誤當成可靠。"""
+    result.quality_status = audit.quality_status
+    result.findings = [finding.to_dict() for finding in audit.findings]
+    result.details["quality"] = audit.to_dict()
+    if audit.quality_status == "invalid":
+        result.ok = False
+        if not result.error:
+            result.error = "語意品質稽核失敗"
+    elif audit.quality_status == "partial" and not result.note:
+        result.note = "資料可解析但有品質警告，請查看 findings"
 
 
 def _session() -> requests.Session:
@@ -95,8 +136,108 @@ def check_monthly_revenue(root: Path) -> CheckResult:
         rows = fetch_monthly_revenue_all(root=root, use_cache=False)
         r.rows = len(rows)
         r.ok = r.rows > 0
-        if not r.ok:
+        _apply_audit(r, audit_rows(
+            _row_dicts(rows),
+            source="monthly_revenue",
+            required_fields=(
+                ("公司代號", "公司代碼", "證券代號", "stock_code"),
+                ("資料年月", "年月", "datatime"),
+            ),
+            key_fields=(
+                ("公司代號", "公司代碼", "證券代號", "stock_code"),
+                ("資料年月", "年月", "datatime"),
+            ),
+        ))
+        if not r.ok and not r.error:
             r.error = "回傳 0 筆"
+    except Exception as e:  # noqa: BLE001
+        r.error = f"{type(e).__name__}: {e}"
+    return r
+
+
+def check_company_info(root: Optional[Path] = None) -> CheckResult:
+    """驗證上市與上櫃公司名冊的 HTTP、欄位與市場覆蓋。"""
+    from bot.company_info import _build_company_map
+
+    r = CheckResult(name="公司名冊 (TWSE + TPEx)", layer="parse")
+    try:
+        company_map = _build_company_map(root=root)
+        rows = _row_dicts(company_map.values())
+        r.rows = len(rows)
+        market_counts: Dict[str, int] = {}
+        for row in rows:
+            market = str(row.get("market") or "unknown")
+            market_counts[market] = market_counts.get(market, 0) + 1
+        r.details["market_counts"] = market_counts
+        r.ok = bool(rows) and all(market_counts.get(market, 0) > 0 for market in ("TWSE", "TPEX"))
+        _apply_audit(r, audit_rows(
+            rows,
+            source="company_info",
+            required_fields=("symbol", "name", "market"),
+            key_fields=("symbol",),
+        ))
+        if not r.ok and not r.error:
+            r.error = f"公司名冊市場覆蓋不足: {market_counts}"
+    except Exception as e:  # noqa: BLE001
+        r.error = f"{type(e).__name__}: {e}"
+    return r
+
+
+def check_daily_kline(root: Optional[Path] = None) -> CheckResult:
+    """驗證 TWSE/TPEx 單月日 K 解析與 OHLCV 基本一致性。"""
+    from bot.technicals import fetch_monthly_kline
+
+    r = CheckResult(name="歷史日K (TWSE + TPEx)", layer="parse")
+    previous_month = now_tw().date().replace(day=1) - dt.timedelta(days=1)
+    samples = (
+        ("TWSE", "2330", "twse"),
+        ("TPEx", "6488", "tpex"),
+    )
+    audits: Dict[str, DatasetAudit] = {}
+    try:
+        for market_name, ticker, market in samples:
+            rows = fetch_monthly_kline(
+                ticker,
+                previous_month.year,
+                previous_month.month,
+                market=market,
+            )
+            audit = audit_rows(
+                rows,
+                source=f"daily_kline_{market}",
+                required_fields=("date", "open", "high", "low", "close", "volume"),
+                key_fields=("date",),
+                date_fields=("date",),
+                numeric_fields=("open", "high", "low", "close", "volume"),
+                numeric_ranges={"open": (0.0, None), "high": (0.0, None),
+                                "low": (0.0, None), "close": (0.0, None),
+                                "volume": (0.0, None)},
+            )
+            audits[market_name] = audit
+            r.details[market_name] = {
+                "ticker": ticker,
+                "rows": len(rows),
+                "quality": audit.to_dict(),
+            }
+
+        r.rows = sum(audit.rows for audit in audits.values())
+        r.ok = bool(audits) and all(audit.rows > 0 and audit.usable for audit in audits.values())
+        if audits:
+            if any(audit.quality_status == "invalid" for audit in audits.values()):
+                r.quality_status = "invalid"
+                r.findings = [
+                    finding.to_dict()
+                    for audit in audits.values()
+                    for finding in audit.findings
+                ]
+                r.error = "日 K 語意品質稽核失敗"
+            elif any(audit.quality_status == "partial" for audit in audits.values()):
+                r.quality_status = "partial"
+                r.note = "日 K 可解析但有品質警告，請查看 details"
+            else:
+                r.quality_status = "ok"
+        if not r.ok and not r.error:
+            r.error = "TWSE 或 TPEx 上月日 K 無資料"
     except Exception as e:  # noqa: BLE001
         r.error = f"{type(e).__name__}: {e}"
     return r
@@ -109,7 +250,44 @@ def check_valuation(root: Path) -> CheckResult:
         rows = fetch_valuation_all(root=root, use_cache=False)
         r.rows = len(rows)
         r.ok = r.rows > 0
-        if not r.ok:
+        # A single provider outlier must not make an otherwise complete
+        # market-wide dataset unusable.  Keep it visible as partial quality,
+        # while individual ticker parsing rejects the value defensively.
+        usable_rows = []
+        outliers = []
+        for index, row in enumerate(rows):
+            try:
+                raw_value = row.get("DividendYield") or row.get("殖利率(%)")
+                value = float(str(raw_value).replace(",", "").strip()) if raw_value not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                value = 0.0
+            if value < -100.0 or value > 100.0:
+                outliers.append({
+                    "row_index": index,
+                    "ticker": str(row.get("Code") or row.get("證券代號") or ""),
+                    "dividend_yield": value,
+                })
+            else:
+                usable_rows.append(row)
+        r.details["invalid_outlier_rows"] = outliers
+        _apply_audit(r, audit_rows(
+            _row_dicts(usable_rows),
+            source="valuation",
+            required_fields=(("Code", "證券代號", "SecuritiesCompanyCode"),),
+            key_fields=(("Code", "證券代號", "SecuritiesCompanyCode"),),
+            date_fields=(("Date", "資料日期", "日期"),),
+            numeric_fields=(
+                ("PEratio", "PER", "本益比"),
+                ("PBratio", "PBR", "股價淨值比"),
+                ("DividendYield", "殖利率", "YieldRatio"),
+            ),
+            numeric_ranges={"DividendYield": (-100.0, 100.0)},
+        ))
+        if outliers and r.quality_status != "invalid":
+            r.quality_status = "partial"
+            r.note = f"排除 {len(outliers)} 筆殖利率異常值；原始資料已保留供追蹤"
+            r.ok = bool(usable_rows)
+        if not r.ok and not r.error:
             r.error = "回傳 0 筆"
     except Exception as e:  # noqa: BLE001
         r.error = f"{type(e).__name__}: {e}"
@@ -146,7 +324,21 @@ def check_quarterly(root: Path) -> CheckResult:
         rows = fetch_quarterly_financials_all(root=root, use_cache=False)
         r.rows = len(rows)
         r.ok = r.rows > 0
-        if not r.ok:
+        _apply_audit(r, audit_rows(
+            _row_dicts(rows),
+            source="quarterly_financials",
+            required_fields=(
+                ("公司代號", "SecuritiesCompanyCode"),
+                ("年度", "Year"),
+                ("季別", "Season"),
+            ),
+            key_fields=(
+                ("公司代號", "SecuritiesCompanyCode"),
+                ("年度", "Year"),
+                ("季別", "Season"),
+            ),
+        ))
+        if not r.ok and not r.error:
             r.error = "回傳 0 筆"
     except Exception as e:  # noqa: BLE001
         r.error = f"{type(e).__name__}: {e}"
@@ -205,7 +397,7 @@ def check_etf_urls(root: Path) -> List[CheckResult]:
     return out
 
 
-def check_mops_conference() -> CheckResult:
+def check_mops_conference(root: Optional[Path] = None) -> CheckResult:
     from bot.mops_scraper import fetch_conference_schedule
     r = CheckResult(name="MOPS/法說會行事曆 (mopsov ajax_t100sb02_1)", layer="parse")
     today = dt.date.today()
@@ -214,7 +406,7 @@ def check_mops_conference() -> CheckResult:
         # 試本月與上月，至少一個月份 > 0
         best = 0
         for m in (today.month, max(1, today.month - 1)):
-            entries = fetch_conference_schedule(roc, m)
+            entries = fetch_conference_schedule(roc, m, root=root)
             best = max(best, len(entries))
             if entries:
                 r.sample_date = f"{roc}/{m:02d}"
@@ -244,7 +436,7 @@ def check_global_events(root: Path) -> CheckResult:
     return r
 
 
-def check_mops_material() -> CheckResult:
+def check_mops_material(root: Optional[Path] = None) -> CheckResult:
     """重大訊息：OpenAPI t187ap04_L 全市場當日筆數 + 不可為安全性阻擋。"""
     from bot.mops_scraper import URL_MATERIAL_OPENAPI
     r = CheckResult(name="MOPS/重大訊息 (OpenAPI t187ap04_L)", layer="parse")
@@ -254,6 +446,28 @@ def check_mops_material() -> CheckResult:
             r.error = f"HTTP {resp.status_code}"
             return r
         data = resp.json()
+        # Keep this smoke-test response in the same isolated root as the
+        # other collectors when one is supplied.  This is intentionally
+        # best-effort: the health check must still work if provenance capture
+        # is unavailable.
+        if root is not None and getattr(resp, "content", b""):
+            try:
+                from bot.source_registry import SourceRegistry
+
+                SourceRegistry(Path(root)).capture_document(
+                    "mops_material_openapi",
+                    resp.content,
+                    source_url=URL_MATERIAL_OPENAPI,
+                    source_ref=dt.date.today().isoformat(),
+                    title="MOPS 重大訊息 OpenAPI",
+                    kind="http_response",
+                    suffix="json",
+                    mime_type="application/json",
+                )
+            except Exception:
+                # Provenance is an enhancement to this smoke test, not a
+                # reason to turn a working public endpoint into a failure.
+                pass
         r.rows = len(data) if isinstance(data, list) else 0
         # OpenAPI「每日」資料量在盤後/假日可能為 0；視為 ok 但標註
         r.ok = isinstance(data, list)
@@ -271,8 +485,12 @@ def check_chips(root: Path) -> CheckResult:
         s = build_chip_summary("2330", days=5, root=root)
         r.rows = len(s.rows) if s and s.rows else 0
         r.ok = r.rows > 0
+        r.details["expected_days"] = 5
+        r.details["observed_days"] = r.rows
         if s and s.rows:
             r.sample_date = str(getattr(s.rows[-1], "date", "") or "")
+            if r.rows < 5:
+                r.note = f"近 5 個工作日取得 {r.rows} 日；最新日可能尚未發布或為休市日"
         if not r.ok:
             r.error = "近 5 日 0 筆 (盤後資料未更新或非交易日)"
     except Exception as e:  # noqa: BLE001
@@ -311,11 +529,11 @@ def check_news(root: Path) -> CheckResult:
     return r
 
 
-def check_web_search() -> CheckResult:
+def check_web_search(root: Optional[Path] = None) -> CheckResult:
     from bot.web_search import search_web
     r = CheckResult(name="網路搜尋 (DuckDuckGo)", layer="parse")
     try:
-        results = search_web("台積電 法說會", max_results=5)
+        results = search_web("台積電 法說會", max_results=5, root=root)
         r.rows = len(results)
         r.ok = r.rows > 0
         if not r.ok:
@@ -354,7 +572,7 @@ def check_futures_basis(root: Path) -> CheckResult:
             spot = twii.price if twii else 0.0
         except Exception:  # noqa: BLE001
             spot = 0.0
-        fb = fetch_tx_futures_basis(spot)
+        fb = fetch_tx_futures_basis(spot, root=root)
         if fb is None:
             r.error = "TAIFEX 期貨行情抓取失敗"
             return r
@@ -369,9 +587,21 @@ def check_futures_basis(root: Path) -> CheckResult:
             "basis_pct": fb.basis_pct,
             "state": fb.state,
             "open_interest": fb.open_interest,
+            "source_document_id": fb.source_document_id,
+            "cached": fb.cached,
+            "quality_status": fb.quality_status,
         }
+        if fb.cached:
+            # 能由 exact raw archive 回放代表流程可用，但不是 live 成功；
+            # 讓摘要顯示 warning 而非把 stale cache 標成 OK。
+            r.ok = False
+            r.note = (
+                f"TAIFEX live endpoint unavailable；已回放 exact raw cache ({fb.asof_date})，"
+                "結果為 partial/stale，不代表即時行情"
+            )
+            r.quality_status = "partial"
         if spot <= 0:
-            r.note = "現貨點數缺 (yfinance 未取得加權)，僅驗證期貨可抓、未算價差"
+            r.note = (r.note + "；" if r.note else "") + "現貨點數缺 (yfinance 未取得加權)，未算價差"
     except Exception as e:  # noqa: BLE001
         r.error = f"{type(e).__name__}: {e}"
     return r
@@ -382,13 +612,18 @@ def check_futures_basis(root: Path) -> CheckResult:
 # ----------------------------------------------------------------------
 
 
-def check_shioaji(attempt_login: bool) -> List[CheckResult]:
+def check_shioaji(
+    attempt_login: bool,
+    *,
+    config_root: Optional[Path] = None,
+) -> List[CheckResult]:
     """Shioaji 分段驗證：憑證存在 / 登入 / contract / snapshot。
 
     預設只回報「憑證是否存在」(不印金鑰)。加 --shioaji 才會嘗試登入。
     """
     from bot.config import Settings
-    s = Settings()
+    env_file = str((config_root or Path.cwd()).resolve() / ".env")
+    s = Settings(_env_file=env_file)
     creds = CheckResult(name="Shioaji/憑證存在性", layer="link", needs_credentials=True)
     creds.details = {
         "api_key_present": bool(s.api_key),
@@ -398,7 +633,7 @@ def check_shioaji(attempt_login: bool) -> List[CheckResult]:
     }
     creds.ok = bool(s.api_key and s.secret_key)
     if not creds.ok:
-        creds.error = "缺 API_KEY / SECRET_KEY"
+        creds.note = "缺 API_KEY / SECRET_KEY（需要券商憑證；公開資料檢查不受影響）"
     out = [creds]
 
     if not attempt_login:
@@ -411,7 +646,7 @@ def check_shioaji(attempt_login: bool) -> List[CheckResult]:
     if not creds.ok:
         out.append(CheckResult(
             name="Shioaji/登入+快照", layer="http", needs_credentials=True,
-            error="無憑證，略過登入",
+            note="無憑證，略過登入（需要券商憑證）",
         ))
         return out
 
@@ -452,44 +687,227 @@ def check_shioaji(attempt_login: bool) -> List[CheckResult]:
     return out
 
 
-def check_mis(seconds: int) -> CheckResult:
-    """TWSE MIS 即時報價：前收價 + 連續輪詢取 tick。"""
+# TWSE 常規交易時段（官網 MIS 即時資訊時段 09:00–13:30）。不以星期幾單獨斷言開市。
+_MIS_SESSION_START = dt.time(9, 0)
+_MIS_SESSION_END = dt.time(13, 30)
+# MIS 盤中為即時資訊；新鮮 tick 須相對 now 在此秒數內。
+_MIS_MAX_FRESH_AGE = dt.timedelta(seconds=60)
+
+
+def _mis_time_of_day(value: dt.datetime) -> dt.time:
+    """回傳不含 tz 的 time-of-day，供盤中窗比較。"""
+    if value.tzinfo is not None:
+        return value.timetz().replace(tzinfo=None)
+    return value.time()
+
+
+def assess_mis_quote_freshness(
+    quote_dt: Optional[dt.datetime],
+    *,
+    now: Optional[dt.datetime] = None,
+    max_age: dt.timedelta = _MIS_MAX_FRESH_AGE,
+    session_start: dt.time = _MIS_SESSION_START,
+    session_end: dt.time = _MIS_SESSION_END,
+) -> Dict[str, Any]:
+    """依來源報價日／時判斷是否像「新鮮盤中 tick」。
+
+    規則（可辯護、不依賴「今天是星期幾 ⇒ 一定開市」）：
+    1. 必須有可解析的來源 ``d``/``t`` 時間戳。
+    2. ``now`` 本身須落在常規交易時段（09:00–13:30）。
+    3. 報價日期須與台灣 ``now`` 的當日相同。
+    4. 相對 ``now`` 的年齡 ≤ ``max_age``（預設 60 秒）。
+
+    因此盤後查詢（例如 now=13:35、戳記 13:30）會因 ``now`` 已離開時段而
+    ``fresh=False``，避免把收盤殘留列當成即時 tick。
+    """
+    clock = now or now_tw()
+    if clock.tzinfo is not None and quote_dt is not None and quote_dt.tzinfo is None:
+        quote_dt = quote_dt.replace(tzinfo=clock.tzinfo)
+    elif clock.tzinfo is None and quote_dt is not None and quote_dt.tzinfo is not None:
+        clock = clock.replace(tzinfo=quote_dt.tzinfo)
+
+    now_tod = _mis_time_of_day(clock)
+    now_in_session = session_start <= now_tod <= session_end
+    payload: Dict[str, Any] = {
+        "quote_at": quote_dt.isoformat(timespec="seconds") if quote_dt else "",
+        "asof": clock.isoformat(timespec="seconds"),
+        "age_seconds": None,
+        "session_stamp": False,
+        "now_in_session": now_in_session,
+        "fresh": False,
+        "reason": "missing_quote_timestamp",
+        "max_age_seconds": int(max_age.total_seconds()),
+        "session_window": f"{session_start.strftime('%H:%M')}-{session_end.strftime('%H:%M')}",
+    }
+    if quote_dt is None:
+        return payload
+
+    age = clock - quote_dt
+    age_seconds = age.total_seconds()
+    payload["age_seconds"] = int(age_seconds)
+    stamp_tod = _mis_time_of_day(quote_dt)
+    session_stamp = session_start <= stamp_tod <= session_end
+    payload["session_stamp"] = session_stamp
+
+    if not now_in_session:
+        payload["reason"] = "outside_session_now"
+        return payload
+    if quote_dt.date() != clock.date():
+        payload["reason"] = "quote_date_mismatch"
+        return payload
+    if age_seconds < 0:
+        # 來源時鐘略快時仍允許在 max_age 內視為新鮮。
+        if abs(age_seconds) <= max_age.total_seconds() and session_stamp:
+            payload["fresh"] = True
+            payload["reason"] = "fresh_in_session"
+        else:
+            payload["reason"] = "quote_in_future"
+        return payload
+    if not session_stamp:
+        payload["reason"] = "outside_session_stamp"
+        return payload
+    if age > max_age:
+        payload["reason"] = "stale_age"
+        return payload
+    payload["fresh"] = True
+    payload["reason"] = "fresh_in_session"
+    return payload
+
+
+def _quote_datetime_from_payload(quote: Dict[str, Any]) -> Optional[dt.datetime]:
+    """Prefer raw MIS ``d``/``t``; fall back to normalized quote_date/quote_time.
+
+    Parses ``d``/``t`` locally (same ``%Y%m%d %H:%M:%S`` + Taiwan tz as market
+    source) so tests that replace ``TwsePublicMarketSource`` do not turn the
+    parser into a MagicMock.
+    """
+    raw = quote.get("raw")
+    if isinstance(raw, dict):
+        raw_date = str(raw.get("d") or "").strip()
+        raw_time = str(raw.get("t") or "").strip()
+        if len(raw_date) == 8 and raw_date.isdigit() and raw_time:
+            try:
+                parsed = dt.datetime.strptime(
+                    f"{raw_date} {raw_time}", "%Y%m%d %H:%M:%S",
+                )
+                return parsed.replace(tzinfo=now_tw().tzinfo)
+            except ValueError:
+                pass
+    quote_date = str(quote.get("quote_date") or "").strip()
+    quote_time = str(quote.get("quote_time") or "").strip()
+    if not quote_date or not quote_time:
+        return None
+    try:
+        parsed = dt.datetime.strptime(
+            f"{quote_date} {quote_time}", "%Y-%m-%d %H:%M:%S",
+        )
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=now_tw().tzinfo)
+
+
+def check_mis(
+    seconds: int,
+    *,
+    now: Optional[dt.datetime] = None,
+) -> CheckResult:
+    """TWSE MIS 即時報價：前收價 + 以來源時間戳判斷新鮮盤中 tick。
+
+    不把第一次 poll 的 volume baseline（相對 ``-1``）當成 live tick；
+    必須通過 :func:`assess_mis_quote_freshness`。
+    """
     from bot.market_source import TwsePublicMarketSource
+
     r = CheckResult(name="TWSE MIS/即時報價 (連續 poll)", layer="parse")
     symbols = ["2330", "2317"]
+    r.details["freshness_rule"] = {
+        "session_window": (
+            f"{_MIS_SESSION_START.strftime('%H:%M')}-"
+            f"{_MIS_SESSION_END.strftime('%H:%M')}"
+        ),
+        "max_age_seconds": int(_MIS_MAX_FRESH_AGE.total_seconds()),
+        "note": (
+            "now 須在常規時段；來源 d/t 須為台灣當日且年齡 ≤60 秒；"
+            "不以星期幾單獨斷言開市"
+        ),
+    }
     try:
         src = TwsePublicMarketSource(symbols, poll_seconds=2)
         prev = src.get_prev_close(symbols)
         r.details["prev_close"] = prev
         deadline = time.time() + max(2, seconds)
-        tick_total = 0
+        fresh_total = 0
         polls = 0
+        latest_quotes: List[Dict[str, Any]] = []
         while time.time() < deadline:
-            ticks = src.poll()
-            tick_total += len(ticks)
+            clock = now if now is not None else now_tw()
+            quotes = src.get_quotes()
             polls += 1
-            if tick_total > 0:
+            snapshot: List[Dict[str, Any]] = []
+            poll_fresh = 0
+            for code in symbols:
+                quote = quotes.get(code) if isinstance(quotes, dict) else None
+                if not isinstance(quote, dict):
+                    snapshot.append({
+                        "symbol": code,
+                        "fresh": False,
+                        "reason": "missing_quote",
+                        "quote_at": "",
+                        "age_seconds": None,
+                        "session_stamp": False,
+                    })
+                    continue
+                quote_dt = _quote_datetime_from_payload(quote)
+                assessment = assess_mis_quote_freshness(quote_dt, now=clock)
+                row = {
+                    "symbol": code,
+                    "price": quote.get("price"),
+                    "volume": quote.get("volume"),
+                    "quote_date": quote.get("quote_date") or "",
+                    "quote_time": quote.get("quote_time") or "",
+                    **assessment,
+                }
+                snapshot.append(row)
+                if assessment.get("fresh"):
+                    poll_fresh += 1
+            latest_quotes = snapshot
+            fresh_total = poll_fresh
+            if fresh_total > 0:
                 break
             time.sleep(2)
-        r.rows = tick_total
+        r.rows = fresh_total
         r.details["polls"] = polls
-        if tick_total > 0:
+        r.details["quotes"] = latest_quotes
+        r.details["fresh_tick_count"] = fresh_total
+        if fresh_total > 0:
             r.ok = True
-            r.note = f"{polls} 次輪詢取得 {tick_total} 筆 tick"
+            r.note = f"{polls} 次輪詢取得 {fresh_total} 筆新鮮盤中 tick"
+            r.sample_date = next(
+                (str(q.get("quote_date") or "") for q in latest_quotes if q.get("fresh")),
+                "",
+            )
         elif prev:
             r.ok = True
-            r.note = "非盤中：取得前收價但無即時 tick (盤中限制，已明確標示)"
+            r.note = (
+                "非盤中／無新鮮 tick：取得前收價但無即時新鮮報價 "
+                "(盤後殘留列不計入 live tick，已明確標示)"
+            )
         else:
-            r.error = "無前收價亦無 tick"
+            r.error = "無前收價亦無新鮮 tick"
     except Exception as e:  # noqa: BLE001
         r.error = f"{type(e).__name__}: {e}"
     return r
 
 
-def check_cloud(live: bool) -> CheckResult:
+def check_cloud(
+    live: bool,
+    *,
+    config_root: Optional[Path] = None,
+) -> CheckResult:
     """雲端 (Google Sheets/Drive)：預設只看設定存在性 (mock)，--cloud 才 live ping。"""
     from bot.config import Settings
-    s = Settings()
+    env_file = str((config_root or Path.cwd()).resolve() / ".env")
+    s = Settings(_env_file=env_file)
     r = CheckResult(name="雲端/Google Sheets-Drive", layer="link", needs_credentials=True)
     r.details = {
         "google_sheet_id_present": bool(s.google_sheet_id),
@@ -503,7 +921,7 @@ def check_cloud(live: bool) -> CheckResult:
         return r
     try:
         from bot.cloud_sync import GoogleSheetSync, load_config_from_env
-        cfg = load_config_from_env()
+        cfg = load_config_from_env(config_root)
         if not cfg.enabled:
             r.error = "雲端未設定 (GOOGLE_SHEET_ID / GOOGLE_SA_JSON_PATH)"
             return r
@@ -527,23 +945,49 @@ def run_all(
     mis_seconds: int = 0,
     cloud_live: bool = False,
 ) -> List[CheckResult]:
-    """跑全部 read-only 檢查 (寫入導向暫存 root)。"""
-    tmp = Path(tempfile.mkdtemp(prefix="validate_sources_"))
-    root = root or tmp
+    """跑全部 read-only 檢查；未指定 root 時使用並自動清理暫存 root。"""
+    config_root = (root or Path.cwd()).resolve()
+    temp_root = None
+    if root is None:
+        temp_root = Path(tempfile.mkdtemp(prefix="validate_sources_"))
+        root = temp_root
+    try:
+        return _run_all_checks(
+            root=Path(root),
+            config_root=config_root,
+            attempt_shioaji=attempt_shioaji,
+            mis_seconds=mis_seconds,
+            cloud_live=cloud_live,
+        )
+    finally:
+        if temp_root is not None:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def _run_all_checks(
+    *,
+    root: Path,
+    config_root: Path,
+    attempt_shioaji: bool,
+    mis_seconds: int,
+    cloud_live: bool,
+) -> List[CheckResult]:
     results: List[CheckResult] = []
 
     public_checks: List[Callable[[], CheckResult]] = [
+        lambda: check_company_info(root),
+        lambda: check_daily_kline(root),
         lambda: check_monthly_revenue(root),
         lambda: check_valuation(root),
         lambda: check_dividends(root),
         lambda: check_quarterly(root),
-        lambda: check_mops_conference(),
+        lambda: check_mops_conference(root),
         lambda: check_global_events(root),
-        lambda: check_mops_material(),
+        lambda: check_mops_material(root),
         lambda: check_chips(root),
         lambda: check_distribution(root),
         lambda: check_news(root),
-        lambda: check_web_search(),
+        lambda: check_web_search(root),
         lambda: check_macro(root),
         lambda: check_futures_basis(root),
     ]
@@ -554,7 +998,7 @@ def run_all(
             results.append(CheckResult(name=getattr(fn, "__name__", "unknown"), error=f"{type(e).__name__}: {e}"))
 
     results.extend(check_etf_urls(root))
-    results.extend(check_shioaji(attempt_shioaji))
+    results.extend(check_shioaji(attempt_shioaji, config_root=config_root))
     if mis_seconds and mis_seconds > 0:
         results.append(check_mis(mis_seconds))
     else:
@@ -562,7 +1006,7 @@ def run_all(
             name="TWSE MIS/即時報價 (連續 poll)", layer="parse",
             note="未啟用 (加 --mis-seconds N 才會連續輪詢)",
         ))
-    results.append(check_cloud(cloud_live))
+    results.append(check_cloud(cloud_live, config_root=config_root))
     return results
 
 
@@ -606,7 +1050,18 @@ def to_markdown(summary: Dict[str, Any]) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="資料源只讀健康度 smoke test")
+    configure_console()
+    parser = argparse.ArgumentParser(description="資料源健康度 smoke test；預設使用暫存 data root，明確指定 --root 時可能寫入選定目錄樹")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help=(
+            "專案資料／設定根目錄（未指定時資料檢查用暫存目錄；"
+            "明確指定時該 root 會傳給收集器，可能寫入 cache/raw/provenance；"
+            "設定檔仍：未指定用 CWD，有指定用該 root）"
+        ),
+    )
     parser.add_argument("--json", dest="json_path", default="", help="另存 JSON 報告路徑")
     parser.add_argument("--md", dest="md_path", default="", help="另存 Markdown 報告路徑")
     parser.add_argument("--shioaji", action="store_true", help="嘗試 Shioaji 登入+快照 (需憑證)")
@@ -614,36 +1069,42 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--cloud", action="store_true", help="對雲端做 live ping (預設只檢查設定)")
     args = parser.parse_args(argv)
 
-    # Windows 主控台多為 cp950，輸出 emoji/中文易炸 → 盡量切到 utf-8、不行就 replace
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
-        pass
+    project_root = args.root.resolve() if args.root else Path.cwd().resolve()
 
-    results = run_all(
-        attempt_shioaji=args.shioaji,
-        mis_seconds=args.mis_seconds,
-        cloud_live=args.cloud,
-    )
+    with log_root(project_root):
+        results = run_all(
+            root=args.root,
+            attempt_shioaji=args.shioaji,
+            mis_seconds=args.mis_seconds,
+            cloud_live=args.cloud,
+        )
     summary = summarize(results)
     md = to_markdown(summary)
 
     # 先寫檔 (utf-8)，再印主控台，避免主控台編碼問題影響檔案輸出
     if args.json_path:
-        Path(args.json_path).write_text(
+        json_path = Path(args.json_path)
+        if not json_path.is_absolute():
+            json_path = project_root / json_path
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",
         )
     if args.md_path:
-        Path(args.md_path).write_text(md, encoding="utf-8")
+        md_path = Path(args.md_path)
+        if not md_path.is_absolute():
+            md_path = project_root / md_path
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(md, encoding="utf-8")
 
     try:
         print(md)
     except Exception:  # noqa: BLE001
         print(md.encode("ascii", "replace").decode("ascii"))
     if args.json_path:
-        print(f"\nJSON 已寫入 {args.json_path}")
+        print(f"\nJSON 已寫入 {json_path}")
     if args.md_path:
-        print(f"Markdown 已寫入 {args.md_path}")
+        print(f"Markdown 已寫入 {md_path}")
 
     # 有「真正失敗 (非警告)」時回傳非 0，方便 CI
     return 0 if summary["fail"] == 0 else 1

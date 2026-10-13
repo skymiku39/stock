@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from bot.cli_encoding import configure_console
 from bot.app_bootstrap import get_or_create_bus
 from bot.events import SmileAuditCompleted
 from bot.events.wiring import publish_if_bus
@@ -58,6 +59,7 @@ def _print_audit(reports) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_console()
     parser = argparse.ArgumentParser(description="微笑曲線多情境完整回測審計")
     parser.add_argument("--symbols", required=True, help="逗號分隔，例 2303,2344")
     parser.add_argument("--start", help="覆寫所有情境起始日（可選）")
@@ -69,10 +71,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--trades-csv",
         help="匯出所有回合明細 CSV（含 scenario 欄）",
     )
+    parser.add_argument(
+        "--root", type=Path, default=None,
+        help="專案資料根目錄（未指定時使用目前工作目錄）",
+    )
     args = parser.parse_args(argv)
 
     logger = get_logger("smile-audit")
-    root = Path.cwd()
+    root = args.root.resolve() if args.root else Path.cwd()
     symbols = [_normalize_symbol(s) for s in args.symbols.split(",") if s.strip()]
     if not symbols:
         logger.error("請指定 --symbols")
@@ -88,86 +94,93 @@ def main(argv: Optional[List[str]] = None) -> int:
                 sc.end = end
 
     db = StockDB.open(path=default_db_path(root))
-    names: dict[str, str] = {}
-    for sym in symbols:
-        info = db.get_stock_info(sym)
-        if info and info.name:
-            short = info.name.replace("股份有限公司", "").replace("股份有限", "")
-            names[sym] = short
+    try:
+        names: dict[str, str] = {}
+        for sym in symbols:
+            info = db.get_stock_info(sym)
+            if info and info.name:
+                short = info.name.replace("股份有限公司", "").replace("股份有限", "")
+                names[sym] = short
 
-    if args.fetch:
-        earliest = min(sc.start for sc in scenarios)
-        latest = max(sc.end for sc in scenarios)
-        _ensure_daily_data(symbols, earliest, latest, root=root, db=db, logger=logger)
+        if args.fetch:
+            earliest = min(sc.start for sc in scenarios)
+            latest = max(sc.end for sc in scenarios)
+            _ensure_daily_data(symbols, earliest, latest, root=root, db=db, logger=logger)
 
-    reports = audit_symbols(db, symbols, scenarios, names=names)
-    output_path = str(args.output) if args.output else None
-    publish_if_bus(
-        get_or_create_bus(),
-        SmileAuditCompleted(
-            symbols=tuple(symbols),
-            scenario_count=len(scenarios),
-            report_path=output_path,
-        ),
-    )
+        reports = audit_symbols(db, symbols, scenarios, names=names)
+        output_path = str(args.output) if args.output else None
+        publish_if_bus(
+            get_or_create_bus(project_root=root),
+            SmileAuditCompleted(
+                symbols=tuple(symbols),
+                scenario_count=len(scenarios),
+                report_path=output_path,
+            ),
+        )
 
-    if args.json or args.output:
-        payload = {
-            "generated_at": now_tw().isoformat(timespec="seconds"),
-            "symbols": symbols,
-            "reports": [r.to_dict() for r in reports],
-            "trades": [
-                {
-                    "scenario": r.scenario.label,
-                    "symbol": t.symbol,
-                    "entry_date": t.entry_date,
-                    "exit_date": t.exit_date,
-                    "entry_price": t.entry_price,
-                    "exit_price": t.exit_price,
-                    "quantity": t.quantity,
-                    "unit": t.unit,
-                    "pnl_twd": round(t.pnl_twd, 2),
-                    "pnl_pct": round(t.pnl_pct, 4),
-                    "entry_reason": t.entry_reason,
-                }
-                for r in reports for t in r.round_trips
-            ],
-        }
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-        if args.json:
-            print(text)
-        if args.output:
-            out = Path(args.output)
+        if args.json or args.output:
+            payload = {
+                "generated_at": now_tw().isoformat(timespec="seconds"),
+                "symbols": symbols,
+                "reports": [r.to_dict() for r in reports],
+                "trades": [
+                    {
+                        "scenario": r.scenario.label,
+                        "symbol": t.symbol,
+                        "entry_date": t.entry_date,
+                        "exit_date": t.exit_date,
+                        "entry_price": t.entry_price,
+                        "exit_price": t.exit_price,
+                        "quantity": t.quantity,
+                        "unit": t.unit,
+                        "pnl_twd": round(t.pnl_twd, 2),
+                        "pnl_pct": round(t.pnl_pct, 4),
+                        "entry_reason": t.entry_reason,
+                    }
+                    for r in reports for t in r.round_trips
+                ],
+            }
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            if args.json:
+                print(text)
+            if args.output:
+                out = Path(args.output)
+                if not out.is_absolute():
+                    out = root / out
+                mk_folder(out.parent)
+                out.write_text(text, encoding="utf-8")
+                logger.info("已匯出 %s", out)
+
+        if args.trades_csv:
+            import csv
+            out = Path(args.trades_csv)
+            if not out.is_absolute():
+                out = root / out
             mk_folder(out.parent)
-            out.write_text(text, encoding="utf-8")
-            logger.info("已匯出 %s", out)
+            with out.open("w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    "scenario", "symbol", "entry_date", "exit_date",
+                    "entry_price", "exit_price", "quantity", "unit",
+                    "pnl_twd", "pnl_pct", "entry_reason", "reference",
+                ])
+                for r in reports:
+                    for t in r.round_trips:
+                        w.writerow([
+                            r.scenario.label, t.symbol, t.entry_date, t.exit_date,
+                            f"{t.entry_price:.4f}", f"{t.exit_price:.4f}",
+                            t.quantity, t.unit,
+                            f"{t.pnl_twd:.2f}", f"{t.pnl_pct:.4f}",
+                            t.entry_reason, f"{t.reference:.4f}",
+                        ])
+            logger.info("已匯出明細 %s", out)
 
-    if args.trades_csv:
-        import csv
-        out = Path(args.trades_csv)
-        mk_folder(out.parent)
-        with out.open("w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "scenario", "symbol", "entry_date", "exit_date",
-                "entry_price", "exit_price", "quantity", "unit",
-                "pnl_twd", "pnl_pct", "entry_reason", "reference",
-            ])
-            for r in reports:
-                for t in r.round_trips:
-                    w.writerow([
-                        r.scenario.label, t.symbol, t.entry_date, t.exit_date,
-                        f"{t.entry_price:.4f}", f"{t.exit_price:.4f}",
-                        t.quantity, t.unit,
-                        f"{t.pnl_twd:.2f}", f"{t.pnl_pct:.4f}",
-                        t.entry_reason, f"{t.reference:.4f}",
-                    ])
-        logger.info("已匯出明細 %s", out)
+        if not args.json:
+            _print_audit(reports)
 
-    if not args.json:
-        _print_audit(reports)
-
-    return 0
+        return 0
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

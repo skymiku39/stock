@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.mops_scraper import ConferenceEntry, fetch_conference_schedule
+from bot.source_registry import SourceRegistry
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -99,12 +100,13 @@ def _fetch_month(
     year: int,
     month: int,
     *,
+    root: Optional[Path],
     logger: logging.Logger,
 ) -> List[ConferenceEntry]:
     """抓單一西元年/月 (內部會轉成民國年)。"""
     year_roc = year - 1911
     try:
-        entries = fetch_conference_schedule(year_roc, month, logger=logger)
+        entries = fetch_conference_schedule(year_roc, month, logger=logger, root=root)
     except Exception:
         logger.exception("MOPS 月份抓取失敗 %d/%d", year, month)
         return []
@@ -123,7 +125,44 @@ def _save_month(
         "fetched_at": now_tw().isoformat(timespec="seconds"),
         "entries": [_to_dict(e) for e in entries],
     }
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        document = SourceRegistry(root or Path.cwd()).capture_document(
+            "mops_conference_calendar",
+            serialized,
+            source_url="mops://conference-calendar",
+            source_ref=f"{year:04d}-{month:02d}",
+            title=f"MOPS 法說會行事曆 {year:04d}-{month:02d}",
+            kind="event_snapshot",
+            suffix="json",
+            mime_type="application/json",
+            as_of=f"{year:04d}-{month:02d}",
+            metadata={"year": year, "month": month, "entry_count": len(entries)},
+        )
+        try:
+            from bot.mops_conference_research import (
+                materialize_mops_conference_calendar_slice,
+            )
+
+            sliced = materialize_mops_conference_calendar_slice(
+                root=root or Path.cwd(),
+                source_document_id=document.document_id,
+            )
+            if sliced.status == "failed":
+                logging.getLogger("calendar").warning(
+                    "法說會行事曆 research slice 失敗 %s-%02d: %s",
+                    year, month, sliced.error,
+                )
+        except Exception:
+            logging.getLogger("calendar").exception(
+                "法說會行事曆 research slice 寫入失敗 %s-%02d", year, month,
+            )
+    except Exception:
+        # Cache availability must not depend on provenance storage.
+        logging.getLogger("calendar").debug(
+            "法說會行事曆 provenance 保存失敗 %s-%02d", year, month, exc_info=True,
+        )
+    p.write_text(serialized, encoding="utf-8")
     mirror_file_to_cloud(p, root=root)
     return p
 
@@ -190,7 +229,7 @@ def update_calendar(
     summary: Dict[str, int] = {}
     for delta in months:
         y, m = _shift_month(today, delta)
-        entries = _fetch_month(y, m, logger=log)
+        entries = _fetch_month(y, m, root=root, logger=log)
         if entries:
             _save_month(y, m, entries, root)
         else:

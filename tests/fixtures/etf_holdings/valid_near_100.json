@@ -1,0 +1,11 @@
+{
+  "symbol": "00980A",
+  "as_of": "2026-09-19",
+  "holdings": [
+    {"ticker": "2330", "name": "TSMC", "weight_pct": 40.0},
+    {"ticker": "2454", "name": "MediaTek", "weight_pct": 30.0},
+    {"ticker": "2317", "name": "Hon Hai", "weight_pct": 30.0}
+  ]
+}
+
+

@@ -90,3 +90,23 @@ def test_next_day_report_mirror_path(tmp_path: Path, monkeypatch) -> None:
     mirrored = cloud / "data" / "next_day_watch" / "2026-06-04" / "report.json"
     assert mirrored.exists()
     assert "2026-06-04" in mirrored.read_text(encoding="utf-8")
+
+
+def test_cloud_mirror_failure_does_not_block_local_cache(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    project = tmp_path / "project"
+    cloud = tmp_path / "drive-cache"
+    monkeypatch.setenv("GOOGLE_CACHE_DIR", str(cloud))
+    local = project / "data" / "macro" / "offline.json"
+    local.parent.mkdir(parents=True)
+    local.write_text('{"local": true}', encoding="utf-8")
+
+    def _offline(*_args, **_kwargs):
+        raise OSError("Drive temporarily unavailable")
+
+    monkeypatch.setattr("bot.cloud_file_cache.shutil.copy2", _offline)
+    assert mirror_file_to_cloud(local, root=project) is False
+    assert local.read_text(encoding="utf-8") == '{"local": true}'
+    assert write_json_cache(local, {"local": "still works"}, root=project) == local
+    assert local.exists()

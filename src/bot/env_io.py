@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -25,6 +27,28 @@ class EnvField:
     help: str = ""
     options: List[str] = field(default_factory=list)
     secret: bool = False
+
+
+def llm_provider_ready(values: Dict[str, Any]) -> bool:
+    """Return whether the selected provider has enough local configuration."""
+    provider = str(values.get("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
+    if provider == "codex_app_server":
+        endpoint = urlparse(str(values.get("CODEX_APP_SERVER_URL", "") or "").strip())
+        model = str(values.get("CODEX_APP_SERVER_MODEL", "") or "").strip()
+        if endpoint.scheme != "ws" or not endpoint.hostname:
+            return False
+        try:
+            port = endpoint.port
+        except ValueError:
+            return False
+        if port is None:
+            return False
+        try:
+            loopback = ipaddress.ip_address(endpoint.hostname).is_loopback
+        except ValueError:
+            loopback = endpoint.hostname.lower() == "localhost"
+        return bool(loopback and model)
+    return bool(str(values.get("GEMINI_API_KEY", "") or "").strip())
 
 
 # ----------------------------------------------------------------------
@@ -177,7 +201,12 @@ ENV_FIELDS: List[EnvField] = [
     EnvField(
         "LLM_GATE_ENABLED", "啟用 LLM 閘門", "LLM 分析", "bool",
         default="false",
-        help="LLM 評分達標才允許進場",
+        help="LLM 評分達標才允許進場（ConfigurableStrategy；EtfFollow 另見 ETF_FOLLOW_LLM_GATE）",
+    ),
+    EnvField(
+        "ETF_FOLLOW_LLM_GATE", "ETF跟單也套用LLM進場閘", "LLM 分析", "bool",
+        default="false",
+        help="false=ETF共識跟單略過LLM進場閘（預設）；true=與 configurable 相同走 allow_entry",
     ),
     EnvField(
         "LLM_MIN_SENTIMENT_SCORE", "進場最低 sentiment", "LLM 分析", "float",
@@ -370,6 +399,26 @@ ENV_FIELDS: List[EnvField] = [
         default="4.0",
     ),
 
+    # LLM provider
+    EnvField(
+        "LLM_PROVIDER", "LLM 提供者", "LLM 分析", "select",
+        default="gemini", options=["gemini", "codex_app_server"],
+        help="選擇 Gemini API 或本機 Codex App Server WebSocket",
+    ),
+    EnvField(
+        "CODEX_APP_SERVER_URL", "Codex App Server 位址", "LLM 分析", "str",
+        default="ws://127.0.0.1:4500",
+        help="僅使用本機 loopback WebSocket，例如 ws://127.0.0.1:4500",
+    ),
+    EnvField(
+        "CODEX_APP_SERVER_MODEL", "Codex 模型", "LLM 分析", "str",
+        default="gpt-6-sol",
+    ),
+    EnvField(
+        "CODEX_APP_SERVER_EFFORT", "Codex 推理強度", "LLM 分析", "select",
+        default="max", options=["low", "medium", "high", "xhigh", "max"],
+    ),
+
     # Gemini LLM
     EnvField(
         "GEMINI_API_KEY", "Google Gemini API Key", "LLM 分析", "password",
@@ -390,6 +439,13 @@ ENV_FIELDS: List[EnvField] = [
         "AUTO_LLM_ALLOW_LEGACY", "允許 auto_llm 舊版 fallback", "LLM 分析", "bool",
         default="false",
         help="僅在無 research_ticker prompt 時退回 analyze_presentation；預設關閉",
+    ),
+
+    # 記憶管理
+    EnvField(
+        "MEMORY_ADMIN_TOKEN", "記憶管理者 Token", "記憶管理", "password",
+        secret=True,
+        help="設定後，Dashboard 的記憶核准／拒絕／軟刪除才會啟用；留空則唯讀。",
     ),
 
     # 自動化管線

@@ -11,7 +11,11 @@
 
 from bot.events.bus import InMemoryEventBus, LoggingEventHandler
 from bot.events.protocols import EventBus, EventHandler, EventPublisher, EventSubscriber
-from bot.events.pipeline_helpers import publish_pipeline_completed, publish_pipeline_step
+from bot.events.pipeline_helpers import (
+    PipelineProgress,
+    publish_pipeline_completed,
+    publish_pipeline_step,
+)
 from bot.events.trading_handlers import (
     NotificationHandler,
     RiskPostTradeHandler,
@@ -61,6 +65,7 @@ __all__ = [
     "NotificationHandler",
     "NotifyRequested",
     "PipelineCompleted",
+    "PipelineProgress",
     "PipelineStepCompleted",
     "QuantDataFetchCompleted",
     "SchedulerJobCompleted",

@@ -119,7 +119,7 @@ def _check_env(
         out.append(CheckResult(
             "Shioaji API 金鑰",
             "ok",
-            f"已設定 (API_KEY 前 6 碼: {settings.api_key[:6]}…)",
+            "已設定 (內容不在報告中顯示)",
         ))
     else:
         miss = []
@@ -512,22 +512,8 @@ def _check_account(
             f"取商品檔失敗 (模擬環境常見): {e}",
         ))
 
-    # 餘額
-    bal_amount: Optional[float] = None
-    try:
-        balance = api.account_balance()
-        if balance:
-            bal_amount = float(getattr(balance, "acc_balance", 0) or 0)
-            out.append(CheckResult(
-                "帳戶餘額 (account_balance)", "ok",
-                f"可用餘額 {bal_amount:,.0f} TWD",
-                extra={"balance": bal_amount},
-            ))
-    except Exception as e:
-        out.append(CheckResult(
-            "帳戶餘額", "info",
-            f"無法取得 (Shioaji 模擬環境不支援): {e}",
-        ))
+    # 餘額：simulation 的 SDK 會回傳「不支援」或空值，不能把它轉成 0。
+    out.append(_check_account_balance(settings, api))
 
     # 部位 & 下單權限總判斷 (Token 沒 Trade 權限時這支會 401)
     has_trade_permission = True
@@ -572,6 +558,49 @@ def _check_account(
         ))
 
     return out
+
+
+def _check_account_balance(settings: Settings, api: Any) -> CheckResult:
+    """讀取帳戶餘額；不可用時明確回報 unknown，不臆造為零。"""
+    if settings.simulation:
+        return CheckResult(
+            "帳戶餘額 (account_balance)",
+            "info",
+            "simulation 環境不提供可用餘額；本次不把 0 當成帳戶餘額",
+            "切換到受支援的正式帳戶查詢環境後再驗證可用資金",
+            extra={"balance_available": False, "balance": None},
+        )
+    try:
+        balance = api.account_balance()
+    except Exception as exc:
+        return CheckResult(
+            "帳戶餘額 (account_balance)",
+            "info",
+            f"無法取得；餘額未知: {exc}",
+            extra={"balance_available": False, "balance": None},
+        )
+    if balance is None or not hasattr(balance, "acc_balance"):
+        return CheckResult(
+            "帳戶餘額 (account_balance)",
+            "info",
+            "API 未提供可用餘額；餘額未知",
+            extra={"balance_available": False, "balance": None},
+        )
+    try:
+        bal_amount = float(getattr(balance, "acc_balance"))
+    except (TypeError, ValueError):
+        return CheckResult(
+            "帳戶餘額 (account_balance)",
+            "info",
+            "API 回傳餘額格式無法解析；餘額未知",
+            extra={"balance_available": False, "balance": None},
+        )
+    return CheckResult(
+        "帳戶餘額 (account_balance)",
+        "ok",
+        f"可用餘額 {bal_amount:,.0f} TWD",
+        extra={"balance_available": True, "balance": bal_amount},
+    )
 
 
 def _check_risk(settings: Settings) -> List[CheckResult]:
@@ -796,6 +825,7 @@ def run_preflight(
     *,
     do_real_login: bool = True,
     test_ca_activate: bool = False,
+    project_root: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
 ) -> PreflightReport:
     """跑全部檢查，回傳結構化報告。
@@ -803,17 +833,17 @@ def run_preflight(
     do_real_login=False 可用於 CI / unit test，避免真的打 Shioaji。
     """
     log = logger or get_logger("preflight")
-    settings = settings or Settings()
+    root = (project_root or Path.cwd()).resolve()
+    if settings is None:
+        settings = Settings(_env_file=str(root / ".env"))  # type: ignore[call-arg]
 
     watch_pool_source_counts: Optional[Dict[str, int]] = None
     if getattr(settings, "symbols_auto_merge", True):
-        from pathlib import Path
-
         from bot.watch_symbol_pool import merge_watch_symbols_into_settings
 
         pool_result = merge_watch_symbols_into_settings(
             settings,
-            Path.cwd(),
+            root,
             reason="preflight",
             logger=log,
         )

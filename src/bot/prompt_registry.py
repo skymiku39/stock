@@ -53,10 +53,24 @@ class PromptTemplate:
     # ------------------------------------------------------------------
 
     def render(self, **vars: Any) -> str:
-        """以 str.format 風格替換變數，遇缺值會以空字串補上 (避免拋 KeyError)。
+        """以 str.format 風格替換變數；required input 缺失時拒絕送出。
 
         若 input 設了 max_chars，會自動截斷字串避免炸 token。
         """
+        missing = [
+            inp.name
+            for inp in self.inputs
+            if inp.required and (
+                inp.name not in vars
+                or vars.get(inp.name) is None
+                or (isinstance(vars.get(inp.name), str) and not vars[inp.name].strip())
+            )
+        ]
+        if missing:
+            raise ValueError(
+                f"Prompt {self.id} 缺少必要輸入: {', '.join(missing)}"
+            )
+
         for inp in self.inputs:
             if inp.max_chars and inp.name in vars and isinstance(vars[inp.name], str):
                 v = vars[inp.name]
@@ -272,16 +286,23 @@ class PromptRegistry:
 # Singleton 工具
 # ----------------------------------------------------------------------
 
-_registry: Optional[PromptRegistry] = None
+_registries: Dict[str, PromptRegistry] = {}
 _registry_lock = threading.Lock()
 
 
 def get_registry(prompts_dir: Optional[Path] = None) -> PromptRegistry:
-    global _registry
+    # Prompt files belong to the project root, just like SQLite and raw
+    # archives.  A single process may serve more than one root (tests,
+    # dashboard, or a migration), so a process-wide singleton would silently
+    # reuse whichever project's prompts were loaded first.
+    directory = (Path(prompts_dir) if prompts_dir is not None else Path.cwd() / "prompts").resolve()
+    key = str(directory).casefold()
     with _registry_lock:
-        if _registry is None:
-            _registry = PromptRegistry(prompts_dir=prompts_dir)
-    return _registry
+        registry = _registries.get(key)
+        if registry is None:
+            registry = PromptRegistry(prompts_dir=directory)
+            _registries[key] = registry
+        return registry
 
 
 __all__ = [

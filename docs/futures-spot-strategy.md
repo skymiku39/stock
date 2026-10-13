@@ -88,8 +88,8 @@
 
 | 策略環節 | 本專案現況 | 銜接方式 |
 |----------|-----------|----------|
-| 現股 / ETF 自動下單 | 已實作（Shioaji，現股當沖） | 直接沿用 `bot/broker.py` + `RiskGuard` 風控 |
-| 主動式 ETF 跟單 | 已實作（28+ 檔快照、共識計算） | 策略一的買入標的可優先取自跟單共識名單 |
+| 現股 / ETF 自動下單 | Shioaji 現股下單路徑已實作；當沖實單預設封存，需 `DAY_TRADING_UNFREEZE=true` 才可走 `RUN_MODE=trade`（見 [archive/day-trading.md](archive/day-trading.md)） | 直接沿用 `bot/broker.py` + `RiskGuard` 風控 |
+| 主動式 ETF 跟單 | 已實作（27 檔 *A 主動式 ETF + ALI006，共 28 檔追蹤標的、共識計算） | 策略一的買入標的可優先取自跟單共識名單 |
 | LLM 情緒 / 文本分析 | 已實作（Gemini，法說會分析） | 策略三可改接本地 Ollama，或沿用 `prompts/*.yaml` 版本化管理 |
 | 籌碼面拉取 | 已實作（TWSE OpenAPI 三大法人/借券/融資） | 策略二的外資籌碼可擴充至**期交所**期貨未平倉 |
 | **台指期正逆價差** | **已實作**（期交所 `DailyMarketReportFut` → `market_macro.FuturesBasis`） | 已併入 macro snapshot，並寫進 `intraday_brief` / `next_day_radar` / `next_day_brief` / `daily_brief` 的盤勢判斷 |

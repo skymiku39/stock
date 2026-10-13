@@ -6,7 +6,12 @@ mock 在 test_cloud_sync.py 另寫，避免測試需要真實的 Google 認證�
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
+import os
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,13 +20,17 @@ from bot.stock_db import (
     ALL_TABLES,
     SYNCABLE_TABLES,
     EtfMeta,
+    EntityClassification,
     MonthlyRevenue,
     LlmDailyReportRow,
     PriceBar,
     QuarterlyReport,
     StockDB,
     StockInfo,
+    SourceRun,
     WatchlistRow,
+    get_db,
+    reset_db_singleton,
 )
 
 
@@ -45,6 +54,97 @@ class TestSchema:
         for t in SYNCABLE_TABLES:
             assert t in table_names
 
+    def test_schema_migration_baseline_is_recorded(self, db: StockDB) -> None:
+        assert db.schema_version() == 1
+        migrations = db.schema_migrations()
+        assert migrations
+        assert migrations[0].name == "legacy-compatible-provenance-and-operations"
+
+    def test_existing_database_gets_provenance_columns(self, tmp_path: Path) -> None:
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE stock_info (symbol TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '')")
+        conn.execute("INSERT INTO stock_info(symbol, name) VALUES ('2330', '台積電')")
+        conn.commit()
+        conn.close()
+
+        migrated = StockDB.open(path=path)
+        columns = {row["name"] for row in migrated.conn.execute("PRAGMA table_info(stock_info)")}
+        assert "quality_status" in columns
+        assert migrated.get_stock_info("2330").quality_status == "unknown"
+
+    def test_existing_source_runs_backfill_health_summary(self, tmp_path: Path) -> None:
+        path = tmp_path / "legacy-source-health.db"
+        conn = sqlite3.connect(path)
+        conn.execute(
+            """
+            CREATE TABLE source_runs (
+                run_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'failed',
+                started_at TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL DEFAULT '',
+                source_date TEXT NOT NULL DEFAULT '', row_count INTEGER NOT NULL DEFAULT 0,
+                raw_hash TEXT NOT NULL DEFAULT '', schema_hash TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO source_runs(run_id, source, status, row_count) VALUES (?,?,?,?)",
+            ("legacy-1", "legacy", "ok", 2),
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = StockDB.open(path=path)
+        health = migrated.get_source_health("legacy")
+        assert health is not None
+        assert health.last_run_id == "legacy-1"
+        assert health.last_status == "ok"
+
+    def test_schema_initialization_is_safe_across_processes(self, tmp_path: Path) -> None:
+        """Parallel CLI startup must not fail on compatibility DDL."""
+        database_path = tmp_path / "parallel-startup.db"
+        code = (
+            "import sys; "
+            "from pathlib import Path; "
+            "from bot.stock_db import StockDB; "
+            "db = StockDB.open(path=Path(sys.argv[1])); "
+            "assert db.schema_version() == 1; "
+            "db.close()"
+        )
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        def start_one() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-c", code, str(database_path)],
+                cwd=Path.cwd(),
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=20,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(lambda _index: start_one(), range(3)))
+
+        assert [result.returncode for result in results] == [0, 0, 0], [
+            (result.stdout, result.stderr) for result in results
+        ]
+
+    def test_module_singleton_honors_project_root(self, tmp_path: Path) -> None:
+        reset_db_singleton()
+        try:
+            first = get_db(root=tmp_path / "project-one")
+            second = get_db(root=tmp_path / "project-two")
+            assert first.path == tmp_path / "project-one" / "data" / "stock.db"
+            assert second.path == tmp_path / "project-two" / "data" / "stock.db"
+            assert first is not second
+        finally:
+            reset_db_singleton()
+
 
 class TestStockInfo:
     def test_upsert_then_get(self, db: StockDB) -> None:
@@ -60,6 +160,8 @@ class TestStockInfo:
         assert got.industry == "半導體業"
         assert got.capital == pytest.approx(2593.0)
         assert got.updated_at  # 自動填入
+        assert got.retrieved_at
+        assert got.quality_status == "unknown"
 
     def test_upsert_overwrites(self, db: StockDB) -> None:
         db.upsert_stock_info(StockInfo(symbol="2330", name="舊名"))
@@ -195,6 +297,15 @@ class TestPriceHistory:
         assert rows[0].close == pytest.approx(910)
         assert rows[0].high == pytest.approx(915)
 
+    def test_invalid_ohlcv_is_retained_but_marked_invalid(self, db: StockDB) -> None:
+        db.upsert_price_bar(PriceBar(
+            symbol="2330", date="2026-05-20",
+            open=900, high=890, low=895, close=900, volume=10_000,
+        ))
+        row = db.get_price_history("2330")[0]
+        assert row.quality_status == "invalid"
+        assert "OHLC invariant" in row.note
+
     def test_bulk_upsert_returns_count(self, db: StockDB) -> None:
         n = db.bulk_upsert_price_bars(self._sample_bars())
         assert n == 3
@@ -318,6 +429,52 @@ class TestSyncMeta:
         assert meta.last_push_at != ""
         assert meta.last_synced_rows == 42
         assert meta.last_error == ""
+
+
+class TestQualityAndClassificationMetadata:
+    def test_source_run_round_trip(self, db: StockDB) -> None:
+        db.record_source_run(SourceRun(
+            run_id="run-1",
+            source="twse_company_info",
+            source_url="https://example.test",
+            status="ok",
+            row_count=10,
+            raw_hash="abc",
+            schema_hash="def",
+        ))
+        rows = db.list_source_runs(source="twse_company_info")
+        assert len(rows) == 1
+        assert rows[0].status == "ok"
+        assert rows[0].row_count == 10
+        health = db.get_source_health("twse_company_info")
+        assert health is not None
+        assert health.last_status == "ok"
+        assert health.consecutive_failures == 0
+
+        db.record_source_run(SourceRun(
+            run_id="run-2",
+            source="twse_company_info",
+            status="failed",
+            error="schema drift",
+        ))
+        health = db.get_source_health("twse_company_info")
+        assert health is not None
+        assert health.consecutive_failures == 1
+
+    def test_classification_round_trip(self, db: StockDB) -> None:
+        db.upsert_classification(EntityClassification(
+            id="2330:investment_theme:ai",
+            entity_type="stock",
+            entity_id="2330",
+            taxonomy="investment_theme",
+            label="AI",
+            confidence=1.5,
+            source="manual",
+        ))
+        rows = db.list_classifications("2330", taxonomy="investment_theme")
+        assert len(rows) == 1
+        assert rows[0].label == "AI"
+        assert rows[0].confidence == 1.0
 
     def test_mark_sync_error_then_clear(self, db: StockDB) -> None:
         db.mark_sync_error("watchlist", "boom")

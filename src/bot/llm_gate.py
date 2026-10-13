@@ -154,7 +154,7 @@ class LlmGate:
                 return
         elif not getattr(self.settings, "llm_refresh_on_entry", False):
             return
-        if not self.settings.gemini_api_key:
+        if not self.settings.llm_enabled:
             return
         with self._refresh_lock:
             if symbol in self._refreshing:

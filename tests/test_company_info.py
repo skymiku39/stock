@@ -29,12 +29,13 @@ def test_parse_twse_builds_stock_info() -> None:
         "公司代號": "2330", "公司名稱": "台灣積體電路製造股份有限公司",
         "公司簡稱": "台積電", "產業別": "24", "上市日期": "19940905",
     }]
-    out = ci._parse_twse(rows)
+    out = ci._parse_twse(rows, source_record_id="source-doc:twse:test")
     info = out["2330"]
     assert info.short_name == "台積電"
     assert info.industry == "半導體業"
     assert info.market == "TWSE"
     assert info.listed_date == "1994-09-05"
+    assert info.source_record_id == "source-doc:twse:test"
 
 
 def test_parse_tpex_builds_stock_info() -> None:
@@ -43,12 +44,13 @@ def test_parse_tpex_builds_stock_info() -> None:
         "CompanyAbbreviation": "環球晶", "SecuritiesIndustryCode": "24",
         "DateOfListing": "1040827",
     }]
-    out = ci._parse_tpex(rows)
+    out = ci._parse_tpex(rows, source_record_id="source-doc:tpex:test")
     info = out["6488"]
     assert info.short_name == "環球晶"
     assert info.industry == "半導體業"
     assert info.market == "TPEX"
     assert info.listed_date == "2015-08-27"
+    assert info.source_record_id == "source-doc:tpex:test"
 
 
 def test_merge_preserves_manual_fields() -> None:
@@ -89,3 +91,27 @@ def test_backfill_fills_missing_and_keeps_manual(monkeypatch) -> None:
     assert db.store["2330"].industry == "半導體"      # 保留人工
     assert db.store["2330"].listed_date == "1994-09-05"  # 補上市日
     assert db.store["1101"].industry == "水泥工業"     # 新增
+
+
+def test_company_update_cli_honors_explicit_root(monkeypatch, tmp_path) -> None:
+    from bot import company_update
+
+    seen: dict[str, object] = {}
+    fake_map = {
+        "2330": StockInfo("2330", "台積電", "台積電", "TWSE", "半導體業"),
+    }
+
+    def fake_load_company_map(**kwargs):
+        seen["load_root"] = kwargs.get("root")
+        return fake_map
+
+    def fake_backfill(db, **kwargs):
+        seen["backfill_root"] = kwargs.get("root")
+        return 0
+
+    monkeypatch.setattr(company_update, "load_company_map", fake_load_company_map)
+    monkeypatch.setattr(company_update, "backfill_stock_info", fake_backfill)
+
+    assert company_update.main(["--root", str(tmp_path), "--refresh"]) == 0
+    assert seen["load_root"] == tmp_path.resolve()
+    assert seen["backfill_root"] == tmp_path.resolve()

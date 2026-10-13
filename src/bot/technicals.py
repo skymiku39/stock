@@ -16,7 +16,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
@@ -30,7 +30,10 @@ from bot.utils import get_logger, mk_folder, now_tw
 # ----------------------------------------------------------------------
 
 URL_STOCK_DAY = (
-    "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
+    # ``/rwd/zh/afterTrading/STOCK_DAY`` 目前會對自身 URL 回 308，
+    # 讓 requests 追蹤時形成 redirect loop；exchangeReport 是同一份
+    # TWSE 官方 JSON 來源且目前可直接取得。
+    "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     "?response=json&date={ym}01&stockNo={ticker}"
 )
 
@@ -105,11 +108,97 @@ def _to_float(x: Any) -> float:
 
 @dataclass
 class MonthlyKlineResult:
-    """單月日 K 抓取結果（含 HTTP 狀態，供慢速排程判斷限流）。"""
+    """單月日 K 抓取結果（含 HTTP 狀態與 exact raw provenance）。"""
 
     rows: List[Dict[str, Any]]
     http_status: int = 0
     error: str = ""
+    source_document_id: str = ""
+    source_url: str = ""
+    source_date: str = ""
+    retrieved_at: str = ""
+    quality_status: str = "unknown"
+    source: str = ""
+
+
+class KlineRows(list):
+    """維持舊有 list API，同時攜帶本次抓取的來源 metadata。"""
+
+    def __init__(self, rows: List[Dict[str, Any]], result: MonthlyKlineResult):
+        super().__init__(rows)
+        self.source_document_id = result.source_document_id
+        self.source_url = result.source_url
+        self.source_date = result.source_date
+        self.retrieved_at = result.retrieved_at
+        self.quality_status = result.quality_status
+        self.source = result.source
+
+
+def _fetch_monthly_kline_compat(
+    ticker: str,
+    year: int,
+    month: int,
+    *,
+    market: str,
+    session: Optional[requests.Session],
+    logger: logging.Logger,
+    root: Optional[Path],
+) -> List[Dict[str, Any]]:
+    """呼叫舊入口；允許既有 monkeypatch/外部 wrapper 尚未接受 root。"""
+    try:
+        return fetch_monthly_kline(
+            ticker, year, month, market=market, session=session,
+            logger=logger, root=root,
+        )
+    except TypeError as exc:
+        if "root" not in str(exc):
+            raise
+        return fetch_monthly_kline(
+            ticker, year, month, market=market, session=session, logger=logger,
+        )
+
+
+def _capture_kline_response(
+    *,
+    root: Optional[Path],
+    source: str,
+    source_url: str,
+    source_ref: str,
+    title: str,
+    content: bytes | bytearray | str,
+    source_date: str,
+    retrieved_at: str,
+    quality_status: str,
+    logger: logging.Logger,
+) -> str:
+    """保存行情 API 原始回應並回傳 exact document id。
+
+    ``root=None`` 時維持舊有純抓取行為；正式資料收集傳入 root 後，
+    所有可寫入 canonical DB 的行情都必須能回到這個 immutable raw document。
+    這裡只接受本次 HTTP response，不依 URL、日期或內容反查來源。
+    """
+    if root is None:
+        return ""
+    try:
+        from bot.source_registry import SourceRegistry
+
+        document = SourceRegistry(Path(root)).capture_document(
+            source,
+            content,
+            source_url=source_url,
+            source_ref=source_ref,
+            title=title,
+            kind="http_response",
+            suffix="json",
+            mime_type="application/json",
+            as_of=source_date,
+            retrieved_at=retrieved_at,
+            quality_status=quality_status,
+        )
+        return document.document_id
+    except Exception as exc:  # pragma: no cover - filesystem/runtime boundary
+        logger.warning("%s 原始回應保存失敗：%s", source_ref, exc)
+        return ""
 
 
 def fetch_monthly_kline_with_meta(
@@ -120,37 +209,107 @@ def fetch_monthly_kline_with_meta(
     market: str = "twse",
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> MonthlyKlineResult:
     """抓單月日 K 並回傳 HTTP 狀態。"""
-    if market == "tpex":
-        rows = _fetch_tpex_monthly_kline(
-            ticker, year, month, session=session, logger=logger,
-        )
-        return MonthlyKlineResult(rows=rows, http_status=200 if rows else 0)
-
     log = logger or get_logger("technicals")
+    source_date = f"{year:04d}-{month:02d}"
+    retrieved_at = now_tw().isoformat(timespec="seconds")
+    if market == "tpex":
+        provenance: Dict[str, str] = {}
+        rows = _fetch_tpex_monthly_kline(
+            ticker, year, month, session=session, logger=logger, root=root,
+            provenance=provenance,
+        )
+        return MonthlyKlineResult(
+            rows=rows,
+            http_status=int(provenance.get("http_status") or (200 if rows else 0)),
+            error=provenance.get("error", ""),
+            source_document_id=provenance.get("source_document_id", ""),
+            source_url=provenance.get("source_url", ""),
+            source_date=provenance.get("source_date", source_date),
+            retrieved_at=provenance.get("retrieved_at", retrieved_at),
+            quality_status=provenance.get("quality_status", "unknown"),
+            source="tpex_stock_day",
+        )
+
     sess = session or _session()
     ym = f"{year:04d}{month:02d}"
     url = URL_STOCK_DAY.format(ym=ym, ticker=ticker)
+    source_ref = f"{ticker}:{source_date}"
+    source_meta: Dict[str, str] = {
+        "source_url": url,
+        "source_date": source_date,
+        "retrieved_at": retrieved_at,
+    }
     try:
-        resp = sess.get(url, timeout=20)
+        # TWSE 對不存在或不適用的代號偶爾會回到入口頁，requests 會
+        # 自動追蹤這個 redirect 迴圈直到 TooManyRedirects。行情來源層
+        # 不應把它當成程式例外；先禁止自動追蹤，讓 3xx 以可追蹤的
+        # invalid source result 返回。保留 TypeError fallback 以相容測試
+        # double 或舊的外部 session wrapper。
+        try:
+            resp = sess.get(url, timeout=20, allow_redirects=False)
+        except TypeError as exc:
+            if "allow_redirects" not in str(exc):
+                raise
+            resp = sess.get(url, timeout=20)
         status = int(resp.status_code)
         if status != 200:
             log.warning("%s/%s K 線 HTTP %d", ticker, ym, status)
-            return MonthlyKlineResult(rows=[], http_status=status)
+            source_meta["quality_status"] = "invalid"
+            error = f"http_status:{status}"
+            source_meta["source_document_id"] = _capture_kline_response(
+                root=root, source="twse_stock_day", source_url=url,
+                source_ref=source_ref, title=f"TWSE 日K {ticker} {source_date}",
+                content=getattr(resp, "content", b""), source_date=source_date,
+                retrieved_at=retrieved_at, quality_status="invalid", logger=log,
+            )
+            return MonthlyKlineResult(
+                rows=[], http_status=status, error=error,
+                source="twse_stock_day", **source_meta,
+            )
+        raw_content = getattr(resp, "content", b"")
         data = resp.json()
+        if not raw_content:
+            raw_content = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+        payload_ok = bool(
+            isinstance(data, dict)
+            and data.get("stat") == "OK"
+            and data.get("fields")
+            and data.get("data")
+        )
+        source_meta["quality_status"] = "ok" if payload_ok else "partial"
+        source_meta["source_document_id"] = _capture_kline_response(
+            root=root, source="twse_stock_day", source_url=url,
+            source_ref=source_ref, title=f"TWSE 日K {ticker} {source_date}",
+            content=raw_content, source_date=source_date, retrieved_at=retrieved_at,
+            quality_status=source_meta["quality_status"], logger=log,
+        )
         time.sleep(0.4)
+    except requests.TooManyRedirects as exc:
+        # 相容未支援 allow_redirects=False 的外部 session；仍以來源
+        # 失敗返回，不污染整批分析的 traceback。
+        log.warning("%s/%s K 線 redirect 失敗：%s", ticker, ym, exc)
+        source_meta["quality_status"] = "invalid"
+        return MonthlyKlineResult(
+            rows=[], http_status=0, error=f"too_many_redirects:{exc}",
+            source="twse_stock_day", **source_meta,
+        )
     except Exception as exc:
-        log.exception("%s/%s K 線抓取失敗", ticker, ym)
-        return MonthlyKlineResult(rows=[], http_status=0, error=str(exc))
+        log.warning("%s/%s K 線抓取失敗：%s", ticker, ym, exc)
+        source_meta["quality_status"] = "failed"
+        return MonthlyKlineResult(
+            rows=[], http_status=0, error=str(exc), source="twse_stock_day", **source_meta,
+        )
 
     if not isinstance(data, dict) or data.get("stat") != "OK":
-        return MonthlyKlineResult(rows=[], http_status=status)
+        return MonthlyKlineResult(rows=[], http_status=status, source="twse_stock_day", **source_meta)
 
     fields = data.get("fields") or []
     raw_rows = data.get("data") or []
     if not fields or not raw_rows:
-        return MonthlyKlineResult(rows=[], http_status=status)
+        return MonthlyKlineResult(rows=[], http_status=status, source="twse_stock_day", **source_meta)
 
     def idx(*kw: str) -> int:
         for i, f in enumerate(fields):
@@ -180,7 +339,7 @@ def fetch_monthly_kline_with_meta(
             "close": _to_float(r[i_close]) if i_close >= 0 else 0.0,
             "volume": _to_float(r[i_vol]) / 1000.0 if i_vol >= 0 else 0.0,
         })
-    return MonthlyKlineResult(rows=out, http_status=status)
+    return MonthlyKlineResult(rows=out, http_status=status, source="twse_stock_day", **source_meta)
 
 
 def fetch_monthly_kline(
@@ -191,6 +350,7 @@ def fetch_monthly_kline(
     market: str = "twse",
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """抓單月個股日K。
 
@@ -199,11 +359,10 @@ def fetch_monthly_kline(
 
     回傳 list[{date, open, high, low, close, volume(張)}]，依日期升冪。
     """
-    if market == "tpex":
-        return _fetch_tpex_monthly_kline(ticker, year, month, session=session, logger=logger)
-    return fetch_monthly_kline_with_meta(
-        ticker, year, month, market=market, session=session, logger=logger,
-    ).rows
+    result = fetch_monthly_kline_with_meta(
+        ticker, year, month, market=market, session=session, logger=logger, root=root,
+    )
+    return KlineRows(result.rows, result)
 
 
 def fetch_monthly_kline_yfinance(
@@ -264,6 +423,69 @@ def fetch_monthly_kline_yfinance(
     return []
 
 
+def capture_normalized_kline_rows(
+    *,
+    root: Optional[Path],
+    ticker: str,
+    rows: Sequence[Mapping[str, Any]],
+    market: str,
+    start_date: str,
+    end_date: str,
+    db: Any = None,
+    logger: Optional[logging.Logger] = None,
+) -> tuple[str, str, str]:
+    """保存 yfinance/其他 normalized 日 K 封套，並明確標為 cache-only。
+
+    DataFrame adapter 的輸出不是可宣稱為 TWSE/TPEx exact HTTP raw；但它仍應
+    有 immutable replay artifact、hash 與 canonical row 的 source_record_id。
+    ``db`` 可由呼叫端傳入，確保 raw manifest 與 canonical upsert 使用同一 DB。
+    """
+    if root is None or not rows:
+        return "", f"yfinance://{ticker}", ""
+    log = logger or get_logger("technicals")
+    retrieved_at = now_tw().isoformat(timespec="seconds")
+    source_url = f"yfinance://{ticker}"
+    normalized_rows = [dict(row) for row in rows]
+    payload = {
+        "schema_version": 1,
+        "adapter": "yfinance",
+        "market": market,
+        "symbol": ticker,
+        "start": start_date,
+        "end": end_date,
+        "rows": normalized_rows,
+    }
+    source_ref = f"{ticker}:{start_date}:{end_date}"
+    try:
+        from bot.source_registry import SourceRegistry
+
+        registry = SourceRegistry(Path(root), db=db) if db is not None else SourceRegistry(Path(root))
+        document = registry.capture_document(
+            "yfinance_stock_day",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+            source_url=source_url,
+            source_ref=source_ref,
+            title=f"yfinance 日K {ticker} {start_date}~{end_date}",
+            kind="normalized_response",
+            suffix="json",
+            mime_type="application/json",
+            as_of=start_date,
+            retrieved_at=retrieved_at,
+            quality_status="partial",
+            metadata={
+                "adapter": "yfinance",
+                "provenance_status": "cache_only",
+                "normalized": True,
+                "market": market,
+                "row_count": len(normalized_rows),
+            },
+        )
+        return document.document_id, source_url, retrieved_at
+    except Exception as exc:  # pragma: no cover - filesystem/runtime boundary
+        log.warning("%s yfinance normalized raw 保存失敗：%s", ticker, exc)
+        return "", source_url, retrieved_at
+
+
 def _fetch_tpex_monthly_kline(
     ticker: str,
     year: int,
@@ -271,6 +493,8 @@ def _fetch_tpex_monthly_kline(
     *,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
+    provenance: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """抓 TPEx 上櫃單月個股日K。
 
@@ -280,15 +504,59 @@ def _fetch_tpex_monthly_kline(
     log = logger or get_logger("technicals")
     sess = session or _session()
     url = URL_TPEX_STOCK_DAY.format(ticker=ticker, year=year, month=month)
+    source_date = f"{year:04d}-{month:02d}"
+    retrieved_at = now_tw().isoformat(timespec="seconds")
+    source_ref = f"{ticker}:{source_date}"
+    if provenance is not None:
+        provenance.update({
+            "source_url": url,
+            "source_date": source_date,
+            "retrieved_at": retrieved_at,
+        })
     try:
         resp = sess.get(url, timeout=20)
         if resp.status_code != 200:
             log.warning("%s %04d/%02d 上櫃K線 HTTP %d", ticker, year, month, resp.status_code)
+            if provenance is not None:
+                provenance.update({
+                    "http_status": str(resp.status_code),
+                    "quality_status": "invalid",
+                    "source_document_id": _capture_kline_response(
+                        root=root, source="tpex_stock_day", source_url=url,
+                        source_ref=source_ref, title=f"TPEx 日K {ticker} {source_date}",
+                        content=getattr(resp, "content", b""), source_date=source_date,
+                        retrieved_at=retrieved_at, quality_status="invalid", logger=log,
+                    ),
+                })
             return []
+        raw_content = getattr(resp, "content", b"")
         data = resp.json()
+        if not raw_content:
+            raw_content = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+        tables = data.get("tables") if isinstance(data, dict) else None
+        payload_ok = bool(
+            tables
+            and isinstance(tables[0], dict)
+            and tables[0].get("fields")
+            and tables[0].get("data")
+        )
+        if provenance is not None:
+            provenance.update({
+                "http_status": "200",
+                "quality_status": "ok" if payload_ok else "partial",
+                "source_document_id": _capture_kline_response(
+                    root=root, source="tpex_stock_day", source_url=url,
+                    source_ref=source_ref, title=f"TPEx 日K {ticker} {source_date}",
+                    content=raw_content, source_date=source_date,
+                    retrieved_at=retrieved_at,
+                    quality_status="ok" if payload_ok else "partial", logger=log,
+                ),
+            })
         time.sleep(0.4)
-    except Exception:
+    except Exception as exc:
         log.exception("%s %04d/%02d 上櫃K線抓取失敗", ticker, year, month)
+        if provenance is not None:
+            provenance.update({"http_status": "0", "error": str(exc)})
         return []
 
     tables = data.get("tables") if isinstance(data, dict) else None
@@ -389,15 +657,26 @@ def fetch_recent_kline(
             pass
 
     rows: List[Dict[str, Any]] = []
+    provenance_by_date: Dict[str, Dict[str, str]] = {}
     for (y, m) in months_back:
-        rows.extend(fetch_monthly_kline(
-            ticker, y, m, market=market, session=sess, logger=log,
-        ))
+        month_rows = _fetch_monthly_kline_compat(
+            ticker, y, m, market=market, session=sess, logger=log, root=root,
+        )
+        rows.extend(month_rows)
+        for row in month_rows:
+            date_text = str(row.get("date") or "")
+            if date_text:
+                provenance_by_date[date_text] = {
+                    "source": str(getattr(month_rows, "source", "") or market),
+                    "source_document_id": str(getattr(month_rows, "source_document_id", "") or ""),
+                    "source_url": str(getattr(month_rows, "source_url", "") or ""),
+                    "source_date": str(getattr(month_rows, "source_date", "") or ""),
+                    "retrieved_at": str(getattr(month_rows, "retrieved_at", "") or ""),
+                    "quality_status": str(getattr(month_rows, "quality_status", "") or "unknown"),
+                }
 
     if not rows and existing is not None and not existing.empty:
         df_out = _coerce_df(existing).sort_values("date").reset_index(drop=True)
-        if save_to_db:
-            _save_df_to_db(ticker, df_out, root=root, logger=log)
         return df_out
 
     new_df = pd.DataFrame(rows)
@@ -419,7 +698,10 @@ def fetch_recent_kline(
                 fresh = merged[merged["date"].isin(fresh_dates)]
             else:
                 fresh = merged
-            _save_df_to_db(ticker, fresh, root=root, logger=log)
+            _save_df_to_db(
+                ticker, fresh, root=root, logger=log,
+                provenance_by_date=provenance_by_date,
+            )
         except Exception:
             log.exception("%s 寫入 price_history DB 失敗 (忽略)", ticker)
     return merged
@@ -431,6 +713,7 @@ def _save_df_to_db(
     *,
     root: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
+    provenance_by_date: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> int:
     """把 K 線 DataFrame 批次寫入 SQLite price_history。失敗時記錄並回 0。"""
     log = logger or get_logger("technicals")
@@ -441,6 +724,7 @@ def _save_df_to_db(
     except Exception:
         log.warning("找不到 stock_db 模組；略過 DB 寫入")
         return 0
+    db = None
     try:
         db = StockDB.open(path=default_db_path(root))
         bars = []
@@ -448,6 +732,17 @@ def _save_df_to_db(
             d = str(r.get("date", "")).strip()
             if not d:
                 continue
+            metadata = dict((provenance_by_date or {}).get(d, {}))
+            source_id = str(
+                metadata.get("source_document_id")
+                or r.get("source_record_id", "")
+                or ""
+            )
+            quality_status = str(
+                metadata.get("quality_status")
+                or r.get("quality_status", "")
+                or ("ok" if source_id else "unknown")
+            )
             bars.append(PriceBar(
                 symbol=ticker,
                 date=d,
@@ -456,7 +751,12 @@ def _save_df_to_db(
                 low=float(r.get("low", 0) or 0),
                 close=float(r.get("close", 0) or 0),
                 volume=float(r.get("volume", 0) or 0),
-                source="twse",
+                source=str(metadata.get("source") or r.get("source") or "twse"),
+                source_url=str(metadata.get("source_url") or r.get("source_url") or ""),
+                source_date=str(metadata.get("source_date") or r.get("source_date") or ""),
+                retrieved_at=str(metadata.get("retrieved_at") or r.get("retrieved_at") or ""),
+                quality_status=quality_status,
+                source_record_id=source_id,
             ))
         if not bars:
             return 0
@@ -464,6 +764,9 @@ def _save_df_to_db(
     except Exception:
         log.exception("%s 寫入 DB 例外", ticker)
         return 0
+    finally:
+        if db is not None:
+            db.close()
 
 
 # ----------------------------------------------------------------------
@@ -572,6 +875,7 @@ def fetch_kline_range(
 
     total = len(months)
     rows: List[Dict[str, Any]] = []
+    provenance_by_date: Dict[str, Dict[str, str]] = {}
     fetched_months = 0
     for idx, (y, m) in enumerate(months, start=1):
         # 邊界月：cache 中可能只有部分日期 → 不跳過邊界月
@@ -590,9 +894,20 @@ def fetch_kline_range(
 
         label = f"{y}/{m:02d}"
         try:
-            month_rows = fetch_monthly_kline(
-                ticker, y, m, market=market, session=sess, logger=log,
+            month_rows = _fetch_monthly_kline_compat(
+                ticker, y, m, market=market, session=sess, logger=log, root=root,
             )
+            for row in month_rows:
+                date_text = str(row.get("date") or "")
+                if date_text:
+                    provenance_by_date[date_text] = {
+                        "source": str(getattr(month_rows, "source", "") or market),
+                        "source_document_id": str(getattr(month_rows, "source_document_id", "") or ""),
+                        "source_url": str(getattr(month_rows, "source_url", "") or ""),
+                        "source_date": str(getattr(month_rows, "source_date", "") or ""),
+                        "retrieved_at": str(getattr(month_rows, "retrieved_at", "") or ""),
+                        "quality_status": str(getattr(month_rows, "quality_status", "") or "unknown"),
+                    }
         except Exception as e:
             log.warning("%s %s 抓取例外：%s", ticker, label, e)
             month_rows = []
@@ -626,7 +941,10 @@ def fetch_kline_range(
         try:
             fresh_dates = {r["date"] for r in rows}
             fresh = merged[merged["date"].isin(fresh_dates)]
-            _save_df_to_db(ticker, fresh, root=root, logger=log)
+            _save_df_to_db(
+                ticker, fresh, root=root, logger=log,
+                provenance_by_date=provenance_by_date,
+            )
         except Exception:
             log.exception("%s 寫入 price_history DB 失敗 (忽略)", ticker)
 
@@ -702,6 +1020,7 @@ def load_kline_from_db(
         from bot.stock_db import StockDB, default_db_path
     except Exception:
         return pd.DataFrame()
+    db = None
     try:
         db = StockDB.open(path=default_db_path(root))
         if start or end:
@@ -723,14 +1042,33 @@ def load_kline_from_db(
         return _coerce_df(df).sort_values("date").reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
+    finally:
+        if db is not None:
+            db.close()
+
+
+_KLINE_COLUMNS = ("date", "open", "high", "low", "close", "volume")
+
+
+def _empty_kline_df() -> pd.DataFrame:
+    """回傳具有穩定欄位的空 K 線表，避免下游因缺欄位產生 KeyError。"""
+    return pd.DataFrame(columns=list(_KLINE_COLUMNS))
 
 
 def _coerce_df(df: pd.DataFrame) -> pd.DataFrame:
+    """正規化 K 線資料；欄位不足時安全返回空結果，不猜測缺失數值。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return _empty_kline_df()
+
+    missing = [col for col in _KLINE_COLUMNS if col not in df.columns]
+    if missing:
+        return _empty_kline_df()
+
+    out = df.copy()
     for col in ("open", "high", "low", "close", "volume"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["close"])
-    return df
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out = out.dropna(subset=["close"])
+    return out
 
 
 # ----------------------------------------------------------------------

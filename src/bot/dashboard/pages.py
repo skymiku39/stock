@@ -23,6 +23,7 @@ from bot.env_io import (  # noqa: E402
     EnvField,
     env_path,
     grouped_fields,
+    llm_provider_ready,
     load_env,
     save_env,
     validate,
@@ -76,7 +77,7 @@ from bot.stock_db import (  # noqa: E402
     SYNCABLE_TABLES,
     StockDB,
     StockInfo,
-    WatchlistRow,
+    backup_stock_db,
     default_db_path,
     get_db,
     reset_db_singleton,
@@ -109,6 +110,9 @@ from bot.dashboard.common import (
     _safe_read_csv,
     _ticker_local_data_summary,
 )
+from bot.dashboard.memory_page import page_memory_admin  # noqa: E402
+from bot.dashboard.tasks import find_task, submit_task, task_result
+from bot.dashboard.task_operations import restore_cards, to_data
 
 
 # ======================================================================
@@ -116,187 +120,9 @@ from bot.dashboard.common import (
 # ======================================================================
 
 
-FEATURE_GRID = [
-    ("三種執行模式", "trade 自動交易 / watch 看盤 / report 公開資料分析"),
-    ("Shioaji 原生整合", "Decorator 回呼、Queue 解耦、避免阻塞"),
-    ("盤前收盤價載入", "透過 snapshots / TWSE 取得精確前日收盤"),
-    ("多檔資金追蹤", "即時追蹤已用資金，避免超額下單"),
-    ("移動停利", "追蹤持倉最高價，自高點回撤 N% 觸發出場"),
-    ("部位管理", "即時持倉均價、數量，成交回報自動更新"),
-    ("委託單追蹤", "防止重複下單，輪詢狀態自動清理"),
-    ("斷線重連", "指數退避重試，自動恢復行情訂閱"),
-    ("收盤全出場", "EXIT_TIME 到後自動市價清倉"),
-    ("交易紀錄匯出", "trade 模式收盤後匯出 trades_*.csv"),
-    ("訊號與報表匯出", "watch/report 模式匯出 signals/report CSV"),
-    ("Telegram 通知", "買賣/停損停利/收盤摘要推播"),
-    ("模擬模式", "SIMULATION=true 走 Shioaji 模擬環境"),
-    ("主動 ETF 追蹤", "28+ 檔主動式 ETF 持股快照、權重、共識計算"),
-    ("ETF 共識跟單", "跨多檔 ETF 偵測新建倉/共識加碼，自動納入監控池"),
-    ("MOPS 法說會爬蟲", "抓取法人說明會行事曆與個股重大訊息"),
-    ("Gemini LLM 分析", "免費 API 解析法說會、提取情緒與成長驅動因子"),
-    ("言行反查", "用籌碼面驗證管理階層是否言行一致 (出貨/吸籌)"),
-    ("Prompt 版本化管理", "所有 LLM prompt 集中於 prompts/*.yaml，可在 UI 直接編輯"),
-    ("LLM 呼叫全紀錄", "每次 LLM 呼叫的 input/output/延遲/tokens 寫入 JSONL 供審計"),
-    ("ETF 持股自動抓取", "依 URL 配置 HTTP 下載 + Gemini 自動抽取持股 JSON"),
-    ("籌碼面自動拉取", "TWSE OpenAPI 自動抓三大法人/借券/融資/鉅額交易"),
-    ("一鍵研究管線", "ETF×籌碼×法說×LLM×每日簡報全部串連執行"),
-    ("評分量表系統", "九個 factor × 四時間框架 (當沖/短/中/長) 加權，自動產出建議"),
-    ("個股總覽 Watchlist", "表格式列出多檔股票，依時間框分數排序篩選"),
-    ("目前持股分析", "用本地成交紀錄彙總 FIFO 成本、市值、損益與曝險權重"),
-    ("個股深入分析", "單檔股票六分頁：分析、原資料、分析數據、購買策略、現況、歷史"),
-]
-
-MODES = [
-    {
-        "name": "trade",
-        "title": "trade — 自動交易",
-        "color": "green",
-        "desc": "完整 Shioaji 登入 + CA，策略觸發時真正送單 (SIMULATION=true 走模擬環境)。",
-        "needs": ["API Key", "Secret Key", "電子憑證 (實單)"],
-        "outputs": ["data/trades_YYYY-MM-DD.csv"],
-    },
-    {
-        "name": "watch",
-        "title": "watch — 看盤模式",
-        "color": "blue",
-        "desc": "Shioaji 即時行情 + 不啟用 CA 不下單，記錄 would-buy / would-sell 訊號。",
-        "needs": ["API Key", "Secret Key"],
-        "outputs": ["data/reports/signals_*.csv", "data/reports/report_*.csv"],
-    },
-    {
-        "name": "report",
-        "title": "report — 報表分析",
-        "color": "yellow",
-        "desc": "不登入券商，輪詢 TWSE 公開延遲報價 (≥ 20 分鐘) 做策略分析。",
-        "needs": ["(不需要 API Key)"],
-        "outputs": ["data/reports/signals_*.csv", "data/reports/report_*.csv"],
-    },
-]
-
-
 def page_overview() -> None:
-    st.title("Stock Bot 功能總覽")
-    st.caption("台股當沖自動交易機器人 · Shioaji + TWSE 公開資料")
-
-    env_values = load_env()
-    runner = get_runner(PROJECT_ROOT)
-    current = runner.current()
-    running = runner.is_running()
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("執行模式", env_values.get("RUN_MODE", "trade"))
-    col2.metric("行情來源", env_values.get("MARKET_SOURCE", "") or "(自動)")
-    col3.metric(
-        "監控股票",
-        len([s for s in env_values.get("SYMBOLS", "").split(",") if s.strip()]) or 0,
-    )
-    sim = env_values.get("SIMULATION", "true").lower() == "true"
-    col4.markdown(
-        f"**模擬模式**<br>{_badge('SIMULATION', 'yellow' if sim else 'red')} "
-        f"{_badge('ON', 'green') if sim else _badge('OFF', 'red')}",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("---")
-
-    s1, s2, s3 = st.columns([1, 1, 2])
-    with s1:
-        if running:
-            st.markdown(_badge("● Bot 執行中", "green"), unsafe_allow_html=True)
-        else:
-            st.markdown(_badge("○ Bot 未執行", "gray"), unsafe_allow_html=True)
-    with s2:
-        if current:
-            elapsed = (current.ended_at or time.time()) - current.started_at
-            st.caption(
-                f"最近一次: {current.run_mode} (PID {current.pid}, {_human_duration(elapsed)})"
-            )
-        else:
-            st.caption("尚未從儀表板啟動過")
-    with s3:
-        st.caption(f"專案位置: `{PROJECT_ROOT}`")
-
-    st.markdown("### 三種執行模式")
-    cols = st.columns(3)
-    for col, m in zip(cols, MODES):
-        with col:
-            st.markdown(f"#### {m['title']}")
-            st.markdown(_badge(m["name"].upper(), m["color"]), unsafe_allow_html=True)
-            st.write(m["desc"])
-            st.caption("需要：" + " / ".join(m["needs"]))
-            st.caption("輸出：")
-            for o in m["outputs"]:
-                st.code(o, language="text")
-
-    st.markdown("### 核心功能")
-    grid_cols = st.columns(3)
-    for i, (title, desc) in enumerate(FEATURE_GRID):
-        with grid_cols[i % 3]:
-            st.markdown(f"**{title}**")
-            st.caption(desc)
-
-    st.markdown("### 快速入口")
-    st.caption("整體工作流程：(1) 自動化管線一鍵抓料 → (2) 個股總覽看 watchlist 評分 → (3) 點個股深入分析")
-
-    q1, q2, q3, q4 = st.columns(4)
-    if q1.button("📊 K 線看板", use_container_width=True, type="primary"):
-        st.session_state.page = "K 線看板"
-        st.rerun()
-    if q2.button("🔬 個股深入分析", use_container_width=True):
-        st.session_state.page = "個股深入分析"
-        st.rerun()
-    if q3.button("⚙ 自動化管線", use_container_width=True):
-        st.session_state.page = "自動化管線"
-        st.rerun()
-    if q4.button("🔧 組態設定", use_container_width=True):
-        st.session_state.page = "組態設定"
-        st.rerun()
-
-    q5, q6, q7, q8 = st.columns(4)
-    if q5.button("跟單訊號", use_container_width=True):
-        st.session_state.page = "跟單訊號"
-        st.rerun()
-    if q6.button("主動 ETF 追蹤 🤖", use_container_width=True, help="此頁的「立即抓取所有」會呼叫 Gemini。"):
-        st.session_state.page = "主動 ETF 追蹤"
-        st.rerun()
-    if q7.button("🤖 LLM 法說分析", use_container_width=True, help="此頁所有「用 Gemini 分析 / 執行反查」按鈕都會呼叫 Gemini。"):
-        st.session_state.page = "LLM 法說分析"
-        st.rerun()
-    if q8.button("啟動 / 監控", use_container_width=True):
-        st.session_state.page = "啟動 / 監控"
-        st.rerun()
-
-    q9, _, _, _ = st.columns(4)
-    if q9.button("目前持股分析", use_container_width=True):
-        st.session_state.page = "目前持股分析"
-        st.rerun()
-
-    st.markdown("---")
-    with st.container(border=True):
-        st.markdown("### 🤖 哪些操作會呼叫 LLM (消耗 Gemini API 額度)？")
-        st.markdown(
-            "| 頁面 | 操作 | LLM 呼叫類型 |\n"
-            "|------|------|--------------|\n"
-            "| 🤖 LLM 法說分析 | 用 Gemini 分析 / 執行反查 | **直接** (1-2 次/按) |\n"
-            "| 🤖 自動化管線 | 立即執行管線 (LLM toggle 開) | **直接** (數次 ~ 數十次) |\n"
-            "| 🤖 主動 ETF 追蹤 | 立即抓取所有 (有 URL 的) | **直接** (每檔 ETF 1 次) |\n"
-            "| 🤖 今日當沖戰情室 | 重抓新聞 + 重跑 / 用快取重跑 | **直接** (至少 2 次) |\n"
-            "| 🤖 美股 / 跨市場 | 呼叫 Gemini 產出簡報 | **直接** (1 次) |\n"
-            "| 🤖 個股深入分析 | 分析 / 強制重抓全部資料 | **自動** (該檔缺 LLM 法說時) |\n"
-            "| 🤖 個股總覽 | 計算評分 | **自動** (對每檔缺 LLM 法說的個股) |\n"
-            "| Prompt 管理 / LLM 呼叫紀錄 | (檢視/編輯) | ❌ 不呼叫 |\n"
-            "| 其他頁面 (組態/資料庫/風控/報表/...) | — | ❌ 不呼叫 |\n"
-        )
-        st.caption(
-            "ℹ 自動觸發的 LLM 呼叫有 12 小時快取 (`data/auto_llm/<ticker>.json`)，"
-            "且未設 `GEMINI_API_KEY` 時整段 graceful skip，不會偷扣額度。"
-            "所有 LLM 呼叫的 input/output/延遲/tokens 都會記在『LLM 呼叫紀錄』頁。"
-        )
-
-
-# ======================================================================
-# 頁面: 組態設定
-# ======================================================================
+    from bot.dashboard.workspace import page_home
+    page_home()
 
 
 def _render_field(f: EnvField, value: str) -> str:
@@ -770,6 +596,7 @@ def page_preflight() -> None:
                     S(),
                     do_real_login=do_login,
                     test_ca_activate=test_ca and do_login,
+                    project_root=PROJECT_ROOT,
                 )
                 st.session_state["preflight_report"] = report_to_dict(report)
             except Exception as e:
@@ -883,9 +710,10 @@ def page_simulation() -> None:
     from bot.llm_gate import LlmGate
     from bot.sim_monitor import SIM_TEMPLATES, fund_state_from_signals, load_risk_state
 
-    env_values = load_env()
+    project_env = env_path(PROJECT_ROOT)
+    env_values = load_env(project_env)
     try:
-        settings = Settings()
+        settings = Settings(_env_file=str(project_env))
     except Exception as exc:
         st.error(f"無法載入 Settings: {exc}")
         return
@@ -919,13 +747,13 @@ def page_simulation() -> None:
     with t1:
         if st.button("階段 A: watch 驗證 (1 萬)", use_container_width=True):
             merged = {**env_values, **SIM_TEMPLATES["watch_10k"]}
-            save_env(merged)
+            save_env(merged, project_env)
             st.success("已套用 watch 模板")
             st.rerun()
     with t2:
         if st.button("階段 B: Shioaji 模擬 (1 萬)", use_container_width=True):
             merged = {**env_values, **SIM_TEMPLATES["shioaji_sim_10k"]}
-            save_env(merged)
+            save_env(merged, project_env)
             st.success("已套用 trade+SIMULATION 模板")
             st.rerun()
 
@@ -977,8 +805,8 @@ def page_simulation() -> None:
                 "快取時間": snap.fetched_at or "-",
             })
         st.dataframe(pd.DataFrame(gate_rows), use_container_width=True)
-        if not settings.gemini_api_key:
-            st.caption("未設定 GEMINI_API_KEY；請先執行 stock-auto-research --llm-only 預熱快取。")
+        if not settings.llm_enabled:
+            st.caption("目前未設定可用的 LLM 提供者；請先設定 LLM_PROVIDER 與端點。")
 
     with tab_risk:
         risk_data = load_risk_state(risk_path)
@@ -1271,10 +1099,13 @@ def page_docs() -> None:
 
 def page_etf_tracker() -> None:
     st.title("主動式 ETF 追蹤")
-    st.caption("依 2025-2026 公開資訊整理的主動式 ETF 清單與持股快照")
+    st.caption(
+        "依 2025-2026 公開資訊整理的主動式 ETF 清單與持股快照；"
+        "亦含明星共同基金（如 ALI006 安聯台灣科技基金）"
+    )
 
     etfs = load_active_etfs(PROJECT_ROOT)
-    st.markdown(f"### 共 **{len(etfs)}** 檔主動式 ETF")
+    st.markdown(f"### 共 **{len(etfs)}** 檔追蹤標的")
 
     df_meta = pd.DataFrame([
         {
@@ -1337,11 +1168,11 @@ def page_etf_tracker() -> None:
     else:
         st.info("此 ETF 尚無對應日期的持股檔。可在下方匯入 / 編輯。")
 
-    with st.expander("自動從投信網頁抓持股 (🤖 使用 Gemini 抽取)", expanded=False):
+    with st.expander("自動從投信網頁抓持股 (deterministic 優先)", expanded=False):
         st.caption(
             "於下方填入每一檔 ETF 的官方持股頁 URL (或留空關閉)，"
-            "按「🤖 立即抓取所有」會：HTTP 下載 → 轉純文字 → **呼叫 Gemini "
-            "`extract_etf_holdings` prompt (消耗 LLM)** → 存為當日 CSV。"
+            "按「立即抓取所有」會：HTTP 下載 → 保存 raw → 優先使用來源專用 parser "
+            "→ 存為當日 CSV；只有 parser 契約失敗時才會使用 Gemini `extract_etf_holdings`。"
         )
         edited_rows = []
         for e in etfs:
@@ -1368,49 +1199,53 @@ def page_etf_tracker() -> None:
             st.rerun()
 
         if cf.button(
-            "🤖 立即抓取所有 (有 URL 的)",
+            "立即抓取所有 (有 URL 的)",
             type="primary",
             key="fetch_all",
             help=(
-                "對每檔有 URL 的 ETF 逐一呼叫 Gemini `extract_etf_holdings` "
-                "從 HTML 抽出結構化持股 JSON。每檔約 1 次 LLM call。"
+                "每檔先嘗試 deterministic parser；只有來源頁無法通過契約時，"
+                "才會呼叫 Gemini `extract_etf_holdings`。"
                 "\n\n" + LLM_HINT_DIRECT
             ),
         ):
             env_values = load_env()
             api_key = env_values.get("GEMINI_API_KEY", "")
             model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
-            if not api_key:
-                st.error("請先在「組態設定」填入 GEMINI_API_KEY")
-            else:
-                from bot.etf_holdings_fetcher import fetch_all_active_etfs
-                from bot.llm_analyzer import GeminiClient
+            llm_ready = llm_provider_ready(env_values)
+            from bot.etf_holdings_fetcher import fetch_all_active_etfs
+            from bot.llm_analyzer import GeminiClient
 
-                client = GeminiClient(api_key=api_key, model=model)
-                status = st.status("抓取 ETF 持股", expanded=True)
-                status.write(f"準備處理 {len(etfs_with_url)} 檔有 URL 的 ETF。")
-                status.write("每檔會下載來源頁面，並呼叫 Gemini 抽取結構化持股。")
-                try:
-                    results = fetch_all_active_etfs(
-                        client, root=PROJECT_ROOT,
-                    )
-                    status.update(
-                        label=f"ETF 持股抓取完成：{len(results)} 檔",
-                        state="complete",
-                        expanded=False,
-                    )
-                except Exception as exc:
-                    status.update(label="ETF 持股抓取失敗", state="error", expanded=True)
-                    raise exc
-                rows = [{
+            client = GeminiClient(api_key=api_key, model=model, root=PROJECT_ROOT)
+            status = st.status("抓取 ETF 持股", expanded=True)
+            status.write(f"準備處理 {len(etfs_with_url)} 檔有 URL 的 ETF。")
+            status.write(
+                "先使用 deterministic parser；"
+                + ("parser 失敗時可使用所選 LLM fallback。" if llm_ready
+                   else "未設定 LLM，parser 失敗的來源會保留 raw 並標記未完成。")
+            )
+            try:
+                results = fetch_all_active_etfs(
+                    client, root=PROJECT_ROOT,
+                )
+                status.update(
+                    label=f"ETF 持股抓取完成：{len(results)} 檔",
+                    state="complete",
+                    expanded=False,
+                )
+            except Exception as exc:
+                status.update(label="ETF 持股抓取失敗", state="error", expanded=True)
+                raise exc
+            rows = [{
                     "代號": r.etf.symbol,
                     "名稱": r.etf.name,
                     "成功": r.success,
                     "持股數": r.holdings_count,
                     "錯誤": r.error,
+                    "Research": r.research_status,
+                    "Research錯誤": r.research_error,
                     "存檔": str(r.saved_path) if r.saved_path else "",
                 } for r in results]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     with st.expander("匯入 / 編輯持股 CSV", expanded=False):
         st.caption(
@@ -1662,17 +1497,6 @@ def _render_earnings_source_panel(
         except Exception:
             sections = {}
 
-    live_fallback = False
-    if not sections:
-        try:
-            from bot.auto_llm import build_live_source_sections
-            live = build_live_source_sections(ticker, PROJECT_ROOT)
-            if live:
-                sections = live
-                live_fallback = True
-        except Exception:
-            pass
-
     if not sections:
         st.info(
             f"尚無 `{ticker}` 的原始素材快取。"
@@ -1680,7 +1504,7 @@ def _render_earnings_source_panel(
         )
         return
 
-    if live_fallback or sections.get("_source") == "live":
+    if sections.get("_source") == "live":
         st.caption(
             "以下為即時抓取的 MOPS / 行事曆素材（非 auto_llm 快取）。"
             "執行「自動研究」可取得新聞、網頁原文與 LLM 輸入預覽。"
@@ -1741,7 +1565,7 @@ def _render_earnings_source_panel(
                         from bot.auto_llm import patch_material_detail_in_cache
                         from bot.mops_scraper import fetch_material_detail
                         with st.spinner("自 MOPS 抓取詳情…"):
-                            text = fetch_material_detail(detail_url)
+                            text = fetch_material_detail(detail_url, root=PROJECT_ROOT)
                         if text:
                             st.session_state[cache_key] = text
                             patch_material_detail_in_cache(
@@ -1792,7 +1616,7 @@ def _render_earnings_source_panel(
         st.text(preview or "(無)")
 
 
-def _render_auto_research_tab(api_key: str, model: str) -> None:
+def _render_auto_research_tab(api_key: str, model: str, llm_ready: bool) -> None:
     """LLM 法說分析頁 → 「🤖 自動研究」分頁的內容。
 
     使用者只需要輸入個股代號 → 一鍵自動跑完
@@ -1845,7 +1669,7 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
 
     btn_run = st.button(
         "🤖 開始自動研究", type="primary",
-        disabled=not api_key, key="auto_research_run",
+        disabled=not llm_ready, key="auto_research_run",
     )
     if btn_run:
         tickers: List[str] = []
@@ -1867,64 +1691,8 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
             st.error("沒有 ticker 可分析；請輸入代號或先建立 watchlist。")
             return
 
-        from bot.auto_llm import auto_research_ticker
-        from bot.llm_analyzer import GeminiClient
-
-        client = GeminiClient(api_key=api_key, model=model)
-        results: List[Dict] = []
-        progress = st.progress(
-            0.0,
-            text=(
-                f"準備自動研究 {len(tickers)} 檔：先檢查 12 小時快取，"
-                "必要時抓 MOPS / 新聞 / 網頁資料並呼叫 Gemini"
-            ),
-        )
-        for i, ticker in enumerate(tickers, 1):
-            progress.progress(
-                (i - 1) / max(len(tickers), 1),
-                text=(
-                    f"[{i}/{len(tickers)}] {ticker}: 檢查快取 → 籌碼摘要 → "
-                    "MOPS/新聞/網頁素材 → Gemini 分析"
-                ),
-            )
-            name_hint = ""
-            try:
-                for it in wl.load(PROJECT_ROOT).items:
-                    if it.ticker == ticker:
-                        name_hint = it.name
-                        break
-            except Exception:
-                pass
-            try:
-                res = auto_research_ticker(
-                    ticker,
-                    root=PROJECT_ROOT,
-                    name_hint=name_hint,
-                    force_refresh=force,
-                    refresh_calendar=False,
-                )
-            except Exception as e:
-                results.append({"ticker": ticker, "error": str(e)})
-                continue
-            if res is None:
-                results.append({"ticker": ticker, "error": "無結果 (素材不足或 LLM 停用)"})
-                continue
-            row = {
-                "ticker": ticker,
-                "name": name_hint,
-                "sentiment": res.get("sentiment"),
-                "score": res.get("sentiment_score"),
-                "confidence": res.get("confidence"),
-                "catalyst_outlook": res.get("catalyst_outlook", ""),
-                "logic_verdict": (res.get("logic_check") or {}).get("verdict", ""),
-                "logic_suggestion": (res.get("logic_check") or {}).get("suggestion", ""),
-                "_raw": res,
-            }
-            results.append(row)
-        progress.progress(1.0, text=f"完成 {len(results)} 檔")
-        st.session_state["auto_research_results"] = results
-        st.success(f"完成：{len(results)} 檔已自動研究")
-
+        submit_task("research", "research", f"自動研究 · {', '.join(tickers[:4])}", "LLM 法說分析",
+                    {"tickers": tickers, "force": force})
     # ------ 自動載入/還原快取結果 ------
     current_tickers: List[str] = []
     for raw in (tickers_input or "").split(","):
@@ -1937,6 +1705,14 @@ def _render_auto_research_tab(api_key: str, model: str) -> None:
             current_tickers = [i.ticker for i in items if i.ticker]
         except Exception:
             current_tickers = []
+
+    if include_upcoming:
+        for event in upcoming:
+            if event.ticker and event.ticker not in current_tickers:
+                current_tickers.append(event.ticker)
+    finished_research = task_result("research", "research", {"tickers": current_tickers})
+    if finished_research is not None:
+        st.session_state["auto_research_results"] = finished_research
 
     results = st.session_state.get("auto_research_results")
     results_tickers = [r["ticker"] for r in results] if results is not None else []
@@ -2056,12 +1832,17 @@ def page_llm_analysis() -> None:
     _llm_caption(
         "全自動：抓 MOPS 法說會行事曆 + 上網搜尋 (DuckDuckGo + Google News) + 鉅亨新聞 "
         "→ Gemini 結構化研究 → 籌碼面言行反查。"
-        "本頁進入時會自動更新行事曆快取 (一日一次)。"
+        "頁面先讀已有行事曆；需要更新時可在 MOPS 分頁手動重抓。"
     )
 
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
-    model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = (
+        env_values.get("CODEX_APP_SERVER_MODEL", "gpt-6-sol")
+        if env_values.get("LLM_PROVIDER", "gemini") == "codex_app_server"
+        else env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
+    )
+    llm_ready = llm_provider_ready(env_values)
 
     try:
         from bot.conference_calendar import (
@@ -2069,13 +1850,12 @@ def page_llm_analysis() -> None:
             last_refresh_at,
             presentation_url_fill_rate,
         )
-        ensure_calendar_fresh(root=PROJECT_ROOT)
         cal_last = last_refresh_at(PROJECT_ROOT)
         filled, total, rate = presentation_url_fill_rate(PROJECT_ROOT)
         if total > 0 and rate < 0.05:
             st.warning(
                 f"行事曆快取 {total} 場法說會中僅 {filled} 場有簡報連結 "
-                f"({rate:.0%})。系統已嘗試自動重抓；若仍偏低請到「MOPS 行事曆」"
+                f"({rate:.0%})。需要更新時請到「MOPS 行事曆」"
                 "分頁手動「立即重抓」。"
             )
     except Exception:
@@ -2083,15 +1863,15 @@ def page_llm_analysis() -> None:
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        f"Gemini API Key: {_badge('已設定', 'green') if api_key else _badge('未設定', 'gray')}",
+        f"LLM 提供者: {_badge(env_values.get('LLM_PROVIDER', 'gemini'), 'green') if llm_ready else _badge('未設定', 'gray')}",
         unsafe_allow_html=True,
     )
     c2.markdown(f"模型: `{model}`")
     c3.markdown(f"行事曆快取: `{cal_last or '尚未更新'}`")
 
-    if not api_key:
+    if not llm_ready:
         st.warning(
-            "請先到「組態設定」頁填入 `GEMINI_API_KEY`。"
+            "請先到「組態設定」頁設定可用的 LLM 提供者。"
             "可在 https://aistudio.google.com 免費取得。"
         )
 
@@ -2103,12 +1883,16 @@ def page_llm_analysis() -> None:
     ])
 
     with tab_auto:
-        _render_auto_research_tab(api_key, model)
+        _render_auto_research_tab(api_key, model, llm_ready)
 
     with tab_paste:
         # ------ 自動載入貼文字分析結果 ------
+        saved_presentation = find_task("presentation", "presentation")
+        if "llm_ticker" not in st.session_state and saved_presentation:
+            st.session_state["llm_ticker"] = saved_presentation["params"]["ticker"]
+            st.session_state["llm_text"] = saved_presentation["params"]["text"]
         cached_paste = None
-        if "last_llm_analysis" not in st.session_state:
+        if "last_llm_analysis" not in st.session_state and not saved_presentation:
             cached_paste = _load_paste_analysis()
             if cached_paste:
                 st.session_state["last_llm_analysis"] = cached_paste["analysis"]
@@ -2125,19 +1909,18 @@ def page_llm_analysis() -> None:
         run = st.button(
             "🤖 用 Gemini 分析",
             type="primary",
-            disabled=not (api_key and text),
+            disabled=not (llm_ready and text),
             help=LLM_HINT_DIRECT,
         )
         if run:
-            from bot.llm_analyzer import GeminiClient, analyze_presentation
-            client = GeminiClient(api_key=api_key, model=model)
-            with st.spinner("Gemini 正在解析貼上的法說內容，並輸出結構化 JSON..."):
-                analysis = analyze_presentation(text, ticker=ticker, client=client)
-            st.session_state["last_llm_analysis"] = analysis
-            _save_paste_analysis(analysis, text)
+            submit_task("presentation", "presentation", f"{ticker} 逐字稿分析", "LLM 法說分析", {"ticker": ticker, "text": text})
+        presentation_result = task_result("presentation", "presentation", {"ticker": ticker})
+        if presentation_result is not None:
+            from bot.llm_analyzer import PresentationAnalysis
+            st.session_state["last_llm_analysis"] = PresentationAnalysis(**presentation_result)
 
         analysis = st.session_state.get("last_llm_analysis")
-        if analysis:
+        if analysis and analysis.ticker == ticker:
             c1, c2, c3 = st.columns(3)
             c1.metric("情緒", analysis.sentiment)
             c2.metric("情緒分數", f"{analysis.sentiment_score:+.2f}")
@@ -2228,7 +2011,7 @@ def page_llm_analysis() -> None:
                                 )
                                 with st.spinner("下載中…"):
                                     pt = download_presentation(
-                                        e.presentation_url, dest,
+                                        e.presentation_url, dest, root=PROJECT_ROOT,
                                     )
                                 if pt and pt.text:
                                     st.session_state[pdf_key] = pt.text
@@ -2258,7 +2041,9 @@ def page_llm_analysis() -> None:
                 from bot.mops_scraper import fetch_material_info, fetch_material_detail
                 mat_stats: Dict[str, Any] = {}
                 with st.spinner(f"自 MOPS 抓取 {mt} 的重大訊息..."):
-                    materials = fetch_material_info(mt, stats=mat_stats)
+                    materials = fetch_material_info(
+                        mt, stats=mat_stats, root=PROJECT_ROOT,
+                    )
                 if materials:
                     oa = int(mat_stats.get("openapi_count", 0))
                     mp = int(mat_stats.get("mops_count", 0))
@@ -2299,7 +2084,9 @@ def page_llm_analysis() -> None:
                                     key=f"mops_mat_detail_{mt}_{i}",
                                 ):
                                     with st.spinner("抓取中…"):
-                                        text = fetch_material_detail(m.detail_url)
+                                        text = fetch_material_detail(
+                                            m.detail_url, root=PROJECT_ROOT,
+                                        )
                                     if text:
                                         st.session_state[mat_key] = text
                                         from bot.auto_llm import (
@@ -2425,11 +2212,12 @@ def page_llm_analysis() -> None:
                     block_trade_net=block,
                     notes=note,
                 )
-                client = GeminiClient(api_key=api_key, model=model) if api_key else None
-                with st.spinner("用籌碼摘要反查 LLM 結論一致性..."):
-                    result = logic_check(last_analysis, chips, client)
-                st.session_state["last_logic_check_result"] = result
-                _save_logic_check(last_analysis.ticker, chips, result)
+                submit_task("logic_check", "logic_check", f"{last_analysis.ticker} 言行反查", "LLM 法說分析",
+                            {"ticker": last_analysis.ticker, "analysis": to_data(last_analysis), "chips": to_data(chips)})
+            finished_check = task_result("logic_check", "logic_check", {"ticker": last_analysis.ticker})
+            if finished_check is not None:
+                from bot.llm_analyzer import LogicCheckResult
+                st.session_state["last_logic_check_result"] = LogicCheckResult(**finished_check)
 
             result = st.session_state.get("last_logic_check_result")
             if result:
@@ -2469,10 +2257,11 @@ def page_pipeline() -> None:
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
     model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash")
+    llm_ready = llm_provider_ready(env_values)
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
-        f"Gemini API Key: {_badge('已設定', 'green') if api_key else _badge('未設定', 'red')}",
+        f"LLM 提供者: {_badge(env_values.get('LLM_PROVIDER', 'gemini'), 'green') if llm_ready else _badge('未設定', 'red')}",
         unsafe_allow_html=True,
     )
     c2.markdown(f"模型: `{model}`")
@@ -2489,7 +2278,7 @@ def page_pipeline() -> None:
         "抓籌碼面",
         value=env_values.get("PIPELINE_FETCH_CHIPS", "true").lower() == "true",
     )
-    run_llm = c.toggle("LLM 法說分析", value=bool(api_key))
+    run_llm = c.toggle("LLM 法說分析", value=llm_ready)
     gen_brief = d.toggle(
         "產出每日簡報",
         value=env_values.get("PIPELINE_GENERATE_BRIEF", "true").lower() == "true",
@@ -2521,7 +2310,7 @@ def page_pipeline() -> None:
         key="pipe_pres_text",
     )
 
-    will_call_llm = (bool(run_llm) or bool(gen_brief)) and bool(api_key)
+    will_call_llm = (bool(run_llm) or bool(gen_brief)) and llm_ready
     btn_label = (
         "🤖 立即執行管線 (含 LLM 呼叫)"
         if will_call_llm
@@ -2538,67 +2327,19 @@ def page_pipeline() -> None:
         ),
     )
     if run_now:
-        from bot.data_pipeline import (
-            PipelineConfig,
-            PresentationInput,
-            run_full_pipeline,
-        )
-
-        focus = [s.strip() for s in extra_focus.split(",") if s.strip()]
-        presentations: List[PresentationInput] = []
+        presentations = []
         if pres_ticker.strip() and pres_text.strip():
-            presentations.append(PresentationInput(
-                ticker=pres_ticker.strip(),
-                text=pres_text,
-                source="dashboard",
-                label="manual_paste",
-            ))
-
-        config = PipelineConfig(
-            project_root=PROJECT_ROOT,
-            gemini_api_key=api_key,
-            gemini_model=model,
-            focus_tickers=focus,
-            chip_lookback_days=int(days),
-            fetch_etf_holdings=bool(fetch_etf),
-            fetch_chips=bool(fetch_chips),
-            run_llm_analysis=bool(run_llm) and bool(api_key),
-            generate_brief=bool(gen_brief) and bool(api_key),
-            min_consensus_for_focus=int(min_cons),
-            presentation_inputs=presentations,
-        )
-
-        planned_steps = []
-        if fetch_etf:
-            planned_steps.append("抓 ETF 持股並更新本地快取")
-        if fetch_chips:
-            planned_steps.append(f"抓籌碼面近 {int(days)} 日")
-        planned_steps.append("計算 ETF 共識與焦點股")
-        if config.run_llm_analysis:
-            planned_steps.append("呼叫 Gemini 做法說分析")
-        if config.generate_brief:
-            planned_steps.append("呼叫 Gemini 產出每日簡報")
-        if presentations:
-            planned_steps.append(f"處理手動貼上的法說輸入 {len(presentations)} 筆")
-
-        status = st.status("研究管線執行中", expanded=True)
-        status.write("本次步驟：" + " → ".join(planned_steps))
-        status.write("後端正在依序執行；完成後會寫入 `data/pipeline_runs/`。")
-        try:
-            run = run_full_pipeline(config)
-            status.update(
-                label=f"研究管線完成：run_id={run.run_id}",
-                state="complete",
-                expanded=False,
-            )
-        except Exception as exc:
-            status.update(label="研究管線執行失敗", state="error", expanded=True)
-            raise exc
-        st.success(
-            f"完成! run_id={run.run_id} 耗時 {run.duration_sec:.1f}s "
-            f"焦點 {len(run.focus_tickers)} 檔，錯誤 {len(run.errors)} 筆"
-        )
-        st.session_state["last_pipeline_run_id"] = run.run_id
+            presentations.append({"ticker": pres_ticker.strip(), "text": pres_text, "source": "dashboard", "label": "manual_paste"})
+        submit_task("pipeline", "pipeline", "自動化研究管線", "自動化管線", {
+            "presentations": presentations,
+            "config": {"focus_tickers": [t.strip() for t in extra_focus.split(",") if t.strip()],
+                       "chip_lookback_days": int(days), "fetch_etf_holdings": bool(fetch_etf),
+                       "fetch_chips": bool(fetch_chips), "run_llm_analysis": bool(run_llm) and llm_ready,
+                       "generate_brief": bool(gen_brief) and llm_ready, "min_consensus_for_focus": int(min_cons)},
+        })
+    pipeline_result = task_result("pipeline", "pipeline")
+    if pipeline_result:
+        st.session_state["last_pipeline_run_id"] = pipeline_result["run_id"]
 
     st.markdown("---")
     st.markdown("### 歷史執行紀錄")
@@ -2952,6 +2693,18 @@ def _build_scorecards(
     return out
 
 
+def _apply_watchlist_change(action) -> bool:
+    try:
+        action()
+        return True
+    except wl.WatchlistSnapshotError as exc:
+        st.warning(str(exc))
+        return False
+    except Exception as exc:
+        st.error(f"清單操作未完成：{exc}")
+        return False
+
+
 def page_watchlist() -> None:
     st.title("個股總覽 (Watchlist)")
     st.caption(
@@ -2975,13 +2728,13 @@ def page_watchlist() -> None:
         new_tag = c3.text_input("標籤", value="", placeholder="AI", key="wl_new_tag")
         if c3.button("加入", use_container_width=True, key="wl_add"):
             if new_ticker.strip():
-                wl.add(
+                if _apply_watchlist_change(lambda: wl.add(
                     new_ticker.strip(), name=new_name.strip(),
                     tags=[new_tag.strip()] if new_tag.strip() else [],
                     root=PROJECT_ROOT,
-                )
-                st.toast(f"已加入 {new_ticker}", icon="✅")
-                st.rerun()
+                )):
+                    st.toast(f"已加入 {new_ticker}", icon="✅")
+                    st.rerun()
 
         st.markdown("##### 一鍵從現有資料合併")
         s1, s2 = st.columns(2)
@@ -3002,8 +2755,10 @@ def page_watchlist() -> None:
                 key="wl_del",
             )
             if st.button("移除", key="wl_del_btn"):
-                wl.remove(del_t.split()[0], root=PROJECT_ROOT)
-                st.rerun()
+                symbol = del_t.split()[0]
+                revision = next(i.revision for i in wlist.items if i.ticker == symbol)
+                if _apply_watchlist_change(lambda: wl.remove(symbol, root=PROJECT_ROOT, expected_revision=revision)):
+                    st.rerun()
 
     # ------ 評分量表規則 ------
     with st.expander("評分規則速覽 (四時間框架 × 8 個 factor)", expanded=False):
@@ -3078,56 +2833,17 @@ def page_watchlist() -> None:
             "依勾選狀態決定是否補抓外部資料或呼叫 Gemini。"
         ),
     ):
-        st.session_state["watchlist_calc_pending"] = True
-        st.session_state.pop("watchlist_cards", None)
-        st.rerun()
-
-    cards = st.session_state.get("watchlist_cards")
-    if cards is None:
-        if not st.session_state.get("watchlist_calc_pending"):
-            st.info(
-                "按 **🤖 計算評分** 才會載入表格（預設不自動計算，避免換頁或首次進入卡頓）。"
-            )
-            return
-        st.session_state.pop("watchlist_calc_pending", None)
-        status = st.status("準備計算 watchlist 評分", expanded=True)
-        status.write(f"檢查清單：{len(wlist.items)} 檔，優先讀取本地 SQLite / CSV / JSON。")
-        if any((refresh_chips, refresh_tech, refresh_fund, refresh_dist)):
-            status.write("已勾選刷新項目：部分 ticker 會呼叫外部資料源。")
-        elif auto_fill_missing:
-            status.write("缺資料補抓已開啟：本地沒有資料時才呼叫外部資料源。")
-        else:
-            status.write("快速模式：不補抓外部資料，缺資料會標示並降低資料覆蓋。")
-        if auto_llm:
-            status.write("自動 LLM 已開啟：缺少分析快取時可能呼叫 Gemini。")
-        else:
-            status.write("自動 LLM 關閉：只使用既有 LLM / pipeline 快取。")
-        progress = st.progress(0.0, text="尚未開始")
-
-        def _progress(idx: int, total: int, ticker: str) -> None:
-            progress.progress(
-                (idx - 1) / max(total, 1),
-                text=f"[{idx}/{total}] {ticker}: 讀取本地資料、套用刷新設定並計算評分",
-            )
-
-        try:
-            cards = _build_scorecards(
-                [i.ticker for i in wlist.items],
-                name_map={i.ticker: i.name for i in wlist.items},
-                refresh_chips=refresh_chips,
-                refresh_technicals=refresh_tech,
-                refresh_fundamentals=refresh_fund,
-                refresh_distribution=refresh_dist,
-                auto_fill_missing=auto_fill_missing,
-                auto_llm=auto_llm,
-                on_progress=_progress,
-            )
-            st.session_state["watchlist_cards"] = cards
-            progress.progress(1.0, text=f"完成 {len(cards)} 檔評分")
-            status.update(label=f"watchlist 評分完成：{len(cards)} 檔", state="complete", expanded=False)
-        except Exception as exc:
-            status.update(label="watchlist 評分失敗", state="error", expanded=True)
-            raise exc
+        submit_task("watchlist", "watchlist", f"追蹤清單評分 · {len(wlist.items)} 檔", "個股總覽", {
+            "tickers": [i.ticker for i in wlist.items], "names": {i.ticker: i.name for i in wlist.items},
+            "options": {"refresh_chips": refresh_chips, "refresh_technicals": refresh_tech,
+                        "refresh_fundamentals": refresh_fund, "refresh_distribution": refresh_dist,
+                        "auto_fill_missing": auto_fill_missing, "auto_llm": auto_llm},
+        })
+    result = task_result("watchlist", "watchlist", {"tickers": [i.ticker for i in wlist.items]})
+    if result is None:
+        st.info("按「計算評分」後會在背景處理，完成後在這裡顯示。")
+        return
+    cards = restore_cards(result)
 
     # ------ 主表 ------
     rows = []
@@ -3341,104 +3057,6 @@ def _portfolio_warnings(df: pd.DataFrame) -> List[str]:
         warnings.append(f"{names} 同時包含本工具與手動/外部庫存，標記為估算值。")
 
     return warnings
-
-
-def _collect_portfolio_analysis_bundle(
-    *,
-    df: pd.DataFrame,
-    broker_snapshot: Any,
-    warnings: List[str],
-    max_holdings: int,
-    auto_fill_missing: bool,
-    refresh_chips: bool,
-    refresh_fundamentals: bool,
-    refresh_technicals: bool,
-    refresh_distribution: bool,
-    auto_ticker_llm: bool,
-) -> Dict[str, Any]:
-    ranked = df.sort_values("權重%", ascending=False).head(max_holdings)
-    rows = ranked.to_dict("records")
-    snapshots: Dict[str, Dict[str, Any]] = {}
-
-    status = st.status("蒐集目前持股分析資料包", expanded=True)
-    status.write(
-        f"準備蒐集 {len(rows)} 檔：券商庫存、本工具標記、個股快照、"
-        "基本面、技術面、籌碼、TDCC、ETF 共識與既有 LLM。"
-    )
-    if auto_fill_missing:
-        status.write("缺資料補抓已開啟：本地缺資料時會呼叫外部公開資料源。")
-    else:
-        status.write("local-first：優先使用 SQLite/CSV/JSON 快取，不主動補抓缺漏資料。")
-    if auto_ticker_llm:
-        status.write("個股 LLM 素材補強已開啟：缺少個股研究快取時，可能逐檔呼叫 Gemini。")
-
-    progress = st.progress(0.0, text="尚未開始")
-    try:
-        for idx, row in enumerate(rows, 1):
-            symbol = str(row.get("代號", "")).strip()
-            progress.progress(
-                (idx - 1) / max(len(rows), 1),
-                text=f"[{idx}/{len(rows)}] {symbol}: 蒐集個股資料包",
-            )
-            snap = build_snapshot(
-                symbol,
-                PROJECT_ROOT,
-                name_hint=str(row.get("名稱", "") or ""),
-                refresh_chips=refresh_chips,
-                refresh_fundamentals=refresh_fundamentals,
-                refresh_technicals=refresh_technicals,
-                refresh_distribution=refresh_distribution,
-                auto_fill_missing=auto_fill_missing,
-                auto_llm=auto_ticker_llm,
-                macro_cache_only=not auto_fill_missing,
-            )
-            snapshots[symbol] = snapshot_to_dict(snap)
-        progress.progress(1.0, text=f"完成 {len(rows)} 檔資料蒐集")
-        bundle = build_portfolio_analysis_bundle(
-            rows=rows,
-            snapshots=snapshots,
-            broker_meta={
-                "broker": getattr(broker_snapshot, "broker", ""),
-                "account": getattr(broker_snapshot, "account", ""),
-                "asof": getattr(broker_snapshot, "asof", ""),
-                "simulation": getattr(broker_snapshot, "simulation", False),
-            },
-            warnings=warnings,
-        )
-        _save_portfolio_bundle(bundle)
-        status.update(label=f"資料包完成：{len(bundle.get('holdings', []))} 檔", state="complete", expanded=False)
-        return bundle
-    except Exception:
-        status.update(label="資料包蒐集失敗", state="error", expanded=True)
-        raise
-
-
-def _save_portfolio_bundle(bundle: Dict[str, Any]) -> Path:
-    out_dir = _project_path("data", "portfolio_analysis")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = out_dir / f"portfolio_bundle_{stamp}.json"
-    path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
-    (out_dir / "latest_bundle.json").write_text(
-        json.dumps(bundle, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _save_portfolio_llm_result(markdown: str, info: Dict[str, Any]) -> Path:
-    out_dir = _project_path("data", "portfolio_analysis")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = out_dir / f"portfolio_analysis_{stamp}.md"
-    header = (
-        f"<!-- prompt={info.get('prompt_id', '')} "
-        f"version={info.get('prompt_version', '')} "
-        f"model={info.get('model', '')} -->\n\n"
-    )
-    path.write_text(header + markdown, encoding="utf-8")
-    (out_dir / "latest_analysis.md").write_text(header + markdown, encoding="utf-8")
-    return path
 
 
 # ------ 持股快照磁碟快取 ------
@@ -3669,20 +3287,17 @@ def _render_portfolio_analysis_section(
             key="portfolio_collect_bundle",
             disabled=df.empty,
         ):
-            bundle = _collect_portfolio_analysis_bundle(
-                df=df,
-                broker_snapshot=broker_snapshot,
-                warnings=warnings,
-                max_holdings=max_holdings,
-                auto_fill_missing=auto_fill_missing,
-                refresh_chips=refresh_chips,
-                refresh_fundamentals=refresh_fund,
-                refresh_technicals=refresh_tech,
-                refresh_distribution=refresh_dist,
-                auto_ticker_llm=auto_ticker_llm,
-            )
-            st.session_state["portfolio_analysis_bundle"] = bundle
-            st.session_state.pop("portfolio_analysis_result", None)
+            rows = df.sort_values("權重%", ascending=False).head(max_holdings).to_dict("records")
+            submit_task("portfolio_bundle", "portfolio_bundle", "持股資料整理", "目前持股分析", {
+                "rows": rows, "warnings": warnings,
+                "broker": {k: getattr(broker_snapshot, k, "") for k in ("broker", "account", "asof", "simulation")},
+                "options": {"refresh_chips": refresh_chips, "refresh_technicals": refresh_tech,
+                            "refresh_fundamentals": refresh_fund, "refresh_distribution": refresh_dist,
+                            "auto_fill_missing": auto_fill_missing, "auto_llm": auto_ticker_llm},
+            })
+    finished_bundle = task_result("portfolio_bundle", "portfolio_bundle")
+    if finished_bundle is not None:
+        st.session_state["portfolio_analysis_bundle"] = finished_bundle
 
     bundle = st.session_state.get("portfolio_analysis_bundle")
     if bundle:
@@ -3713,38 +3328,24 @@ def _render_portfolio_analysis_section(
 
         api_key = env_values.get("GEMINI_API_KEY", "")
         model = env_values.get("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
-        if not api_key:
-            st.warning("尚未設定 `GEMINI_API_KEY`，可以先蒐集資料包，但無法產生 LLM 投組分析。")
+        llm_ready = llm_provider_ready(env_values)
+        if not llm_ready:
+            st.warning("尚未設定可用的 LLM 提供者，可以先蒐集資料包，但無法產生 LLM 投組分析。")
         if st.button(
             _llm_button_label("分析目前持股"),
             use_container_width=True,
-            disabled=not api_key,
+            disabled=not llm_ready,
             key="portfolio_llm_analyze",
             help=LLM_HINT_DIRECT,
         ):
-            from bot.llm_analyzer import GeminiClient, gemini_call
-
-            client = GeminiClient(api_key=api_key, model=model)
-            with st.spinner("Gemini 正在讀取資料包並分析投組..."):
-                raw, info = gemini_call(
-                    "portfolio_analysis",
-                    client=client,
-                    registry=get_registry(PROJECT_ROOT / "prompts"),
-                    metadata={
-                        "task": "portfolio_analysis",
-                        "symbols": [h.get("symbol") for h in bundle.get("holdings", [])],
-                    },
-                    today=dt.date.today().isoformat(),
-                    broker_asof=str((bundle.get("broker") or {}).get("asof", "")),
-                    portfolio_json=bundle_to_json(bundle),
-                )
-            markdown = raw or "(LLM 未產出內容)"
-            result_path = _save_portfolio_llm_result(markdown, info)
-            st.session_state["portfolio_analysis_result"] = {
-                "markdown": markdown,
-                "info": info,
-                "path": str(result_path),
-            }
+            submit_task("portfolio_analysis", "portfolio_analysis", "LLM 持股分析", "目前持股分析", {
+                "inputs": {"today": dt.date.today().isoformat(),
+                           "broker_asof": str((bundle.get("broker") or {}).get("asof", "")),
+                           "portfolio_json": bundle_to_json(bundle)},
+            })
+    finished_analysis = task_result("portfolio_analysis", "portfolio_analysis")
+    if finished_analysis is not None:
+        st.session_state["portfolio_analysis_result"] = finished_analysis
 
     result = st.session_state.get("portfolio_analysis_result")
     if result:
@@ -4073,163 +3674,68 @@ def _tf_card(tf_score) -> None:
         st.caption(n)
 
 
+def _detail_choose_watchlist():
+    selected = st.session_state.get("detail_pick_wl")
+    if selected:
+        st.session_state["detail_symbol"] = selected
+        st.session_state["detail_ticker"] = selected
+
+
 def page_ticker_detail() -> None:
     st.title("個股深入分析")
-    _llm_auto_banner(
-        "「🤖 分析」預設採 local-first：先讀本地 DB/CSV/JSON 快取。"
-        "要補外部資料請勾「缺資料補抓」或指定刷新項目；"
-        "要補 LLM 分析請勾「自動 LLM」。"
-    )
-
-    wlist = wl.load(PROJECT_ROOT)
-    options: List[str] = sorted({i.ticker for i in wlist.items})
-
-    # 來自 watchlist 跳轉
-    default_t = st.session_state.get("detail_ticker")
-    if not default_t:
-        default_t = _load_last_viewed_ticker()
-        if default_t:
-            st.session_state["detail_ticker"] = default_t
-            
-    free_t = st.text_input(
-        "Ticker", value=default_t or "",
-        placeholder="輸入代號 (例如 2330)，或從 watchlist 選一檔",
-    )
-    if options:
-        from_wl = st.selectbox("或從 Watchlist 選", [""] + options, key="detail_pick_wl")
-        if from_wl and from_wl != default_t:
-            free_t = from_wl
-            st.session_state["detail_ticker"] = from_wl
-
-    cgo, ccall, cauto, cllm, crefresh, ctech, cfund, cdist, cadd = st.columns(
-        [1.0, 1.1, 0.9, 0.9, 0.9, 0.9, 0.9, 0.8, 1.0],
-    )
-    if ccall.button(
-        "🤖 強制重抓全部資料",
-        use_container_width=True,
-        key="detail_fetch_all",
-        help=(
-            "把資料刷新、缺資料補抓與自動 LLM 都打開。"
-            "適合你明確要更新全部來源時使用；會比 local-first 慢。"
-            "\n\n" + LLM_HINT_AUTO
-        ),
-    ):
-        for k in (
-            "detail_rc", "detail_rt", "detail_rf", "detail_rd",
-            "detail_auto_fill", "detail_auto_llm",
-        ):
-            st.session_state[k] = True
-        st.session_state.pop("detail_cache", None)
-        st.session_state.pop("detail_cache_key", None)
-    auto_fill_missing = cauto.toggle(
-        "缺資料補抓",
-        value=False,
-        key="detail_auto_fill",
-        help="本地資料缺漏時才呼叫外部資料源補齊。關閉時只讀本地與已勾選的刷新項目。",
-    )
-    auto_llm = cllm.toggle(
-        "自動 LLM",
-        value=False,
-        key="detail_auto_llm",
-        help="缺少 LLM 法說分析時呼叫 Gemini；關閉時只使用既有 LLM 快取或 pipeline 分析。",
-    )
-    refresh_chips = crefresh.toggle("即時抓籌碼", value=False, key="detail_rc")
-    refresh_technicals = ctech.toggle("抓日K + 指標", value=False, key="detail_rt")
-    refresh_fundamentals = cfund.toggle("更新基本面", value=False, key="detail_rf")
-    refresh_distribution = cdist.toggle("更新 TDCC", value=False, key="detail_rd")
-    if cgo.button(
-        "🤖 分析",
-        type="primary",
-        use_container_width=True,
-        key="detail_go",
-        help=(
-            "組裝該股全部 3D 資料 (基本面/技術面/籌碼/集保/ETF/macro)。"
-            "預設先用本地快取；依勾選狀態決定是否補抓外部資料或呼叫 Gemini。"
-        ),
-    ):
-        st.session_state["detail_ticker"] = free_t.strip()
-        st.session_state.pop("detail_cache", None)
-        st.session_state.pop("detail_cache_key", None)
-
-    if cadd.button("加入 Watchlist", use_container_width=True, key="detail_add"):
-        if free_t.strip():
-            wl.add(free_t.strip(), root=PROJECT_ROOT)
-            st.toast(f"已加入 {free_t} 到 Watchlist", icon="✅")
-
-    ticker = st.session_state.get("detail_ticker", free_t.strip())
+    st.caption("先選股票，再決定要讀取的資料。送出後可切換頁面，結果會保存在任務中心。")
+    options = sorted({i.ticker for i in wl.load(PROJECT_ROOT).items})
+    if "detail_symbol" not in st.session_state:
+        st.session_state["detail_symbol"] = st.session_state.get("detail_ticker") or _load_last_viewed_ticker()
+    with st.container(border=True):
+        left, right = st.columns([2, 1])
+        if options:
+            right.selectbox("從追蹤清單選擇", [""] + options, key="detail_pick_wl", on_change=_detail_choose_watchlist)
+        free_t = left.text_input("股票代號", placeholder="例如 2330、2317、0050", key="detail_symbol", max_chars=12)
+        with st.expander("資料與分析選項 · 預設更新日K與收盤價"):
+            a, b, c = st.columns(3)
+            auto_fill_missing = a.toggle("缺資料補抓", value=False, key="detail_auto_fill", help="本地缺資料時呼叫外部來源。")
+            auto_llm = b.toggle("自動 LLM", value=False, key="detail_auto_llm", help="缺少分析時呼叫 LLM，可能消耗額度。")
+            refresh_chips = c.toggle("即時抓籌碼", value=False, key="detail_rc")
+            refresh_technicals = a.toggle("抓日K + 指標", value=True, key="detail_refresh_daily", help="分析前更新日線收盤資料；關閉後只使用本地資料。這不是即時報價。")
+            refresh_fundamentals = b.toggle("更新基本面", value=False, key="detail_rf")
+            refresh_distribution = c.toggle("更新 TDCC", value=False, key="detail_rd")
+        go, add = st.columns([2, 1])
+        if go.button("開始分析", type="primary", use_container_width=True, key="detail_go"):
+            if not free_t.strip() or not free_t.strip().isalnum():
+                st.warning("請先輸入有效的股票代號。")
+            else:
+                ticker = free_t.strip()
+                st.session_state["detail_ticker"] = ticker
+                _save_last_viewed_ticker(ticker)
+                submit_task("detail", "ticker", f"{ticker} 個股分析", "個股深入分析", {
+                    "tickers": [ticker], "options": {
+                        "refresh_chips": refresh_chips, "refresh_technicals": refresh_technicals,
+                        "refresh_fundamentals": refresh_fundamentals, "refresh_distribution": refresh_distribution,
+                        "auto_fill_missing": auto_fill_missing, "auto_llm": auto_llm,
+                    },
+                })
+        if add.button("加入追蹤清單", use_container_width=True, key="detail_add"):
+            if free_t.strip() and _apply_watchlist_change(lambda: wl.add(free_t.strip(), root=PROJECT_ROOT)):
+                st.toast(f"已加入 {free_t.strip()} 到追蹤清單")
+    ticker = free_t.strip()
     if not ticker:
-        st.info("請輸入或選擇一檔股票")
+        st.info("輸入股票代號，按「開始分析」後會在這裡顯示結果。")
         return
-
-    st.caption(f"本地資料檢查：{_ticker_local_data_summary(ticker)}")
-
-    cache_key = (
-        f"detail_{ticker}_{refresh_chips}_{refresh_technicals}_"
-        f"{refresh_fundamentals}_{refresh_distribution}_"
-        f"{auto_fill_missing}_{auto_llm}_llmv3"
-    )
-    if (
-        st.session_state.get("detail_cache_key") != cache_key
-        or "detail_cache" not in st.session_state
-    ):
-        status = st.status(f"組裝 {ticker} 的完整資料", expanded=True)
-        status.write("先檢查本地 DB / CSV / JSON 快取。")
-        if any((refresh_chips, refresh_technicals, refresh_fundamentals, refresh_distribution)):
-            status.write("已勾選刷新項目：會呼叫對應外部資料源。")
-        elif auto_fill_missing:
-            status.write("缺資料補抓已開啟：本地缺資料時才補抓外部來源。")
-        else:
-            status.write("快速模式：不補抓外部資料，缺資料會在下方提示。")
-        status.write("開始組裝 snapshot 並計算四時間框架評分。")
-        try:
-            from bot.fundamentals_fetcher import snapshot_to_dict as _fund_dict
-            from bot.technicals import snapshot_to_dict as _tech_dict
-            snap = build_snapshot(
-                ticker, PROJECT_ROOT,
-                refresh_chips=refresh_chips,
-                refresh_fundamentals=refresh_fundamentals,
-                refresh_technicals=refresh_technicals,
-                refresh_distribution=refresh_distribution,
-                auto_fill_missing=auto_fill_missing,
-                auto_llm=auto_llm,
-                macro_cache_only=not auto_fill_missing,
-            )
-            card = compute_scorecard(
-                ticker=snap.ticker, name=snap.name,
-                price=snap.price, pct_change=snap.pct_change, volume=snap.volume,
-                llm_analysis=snap.llm_analysis,
-                logic_result=snap.logic_check,
-                consensus=snap.consensus,
-                new_build_signal=snap.new_build_signal,
-                add_signal=snap.add_signal,
-                chip_summary=snap.chip_summary,
-                fundamental=_fund_dict(snap.fundamentals) if snap.fundamentals else None,
-                technical_snapshot=_tech_dict(snap.technicals) if snap.technicals else None,
-                distribution_label=snap.distribution_label,
-                distribution_detail=snap.distribution_detail,
-                distribution_score=snap.distribution_score,
-                has_distribution=bool(snap.distribution_trend and snap.distribution_trend.weeks),
-                macro_snapshot=snap.macro_snapshot,
-                related_us_stocks=snap.us_related,
-                adr_premium=snap.adr_premium,
-                fetched_at=snap.fetched_at,
-            )
-            st.session_state["detail_cache"] = (snap, card)
-            st.session_state["detail_cache_key"] = cache_key
-            status.update(label=f"{ticker} 資料組裝完成", state="complete", expanded=False)
-        except Exception as exc:
-            status.update(label=f"{ticker} 資料組裝失敗", state="error", expanded=True)
-            raise exc
-
-    snap, card = st.session_state["detail_cache"]
-    _save_last_viewed_ticker(ticker)
+    result = task_result("detail", "ticker", {"tickers": [ticker]})
+    if result is None:
+        st.caption("尚無這檔股票的已完成分析。請按「開始分析」，進度可在側欄或任務中心查看。")
+        return
+    snap, card = restore_cards(result)[0]
+    with st.expander("本地資料概況"):
+        st.caption(_ticker_local_data_summary(ticker))
 
     # ---- 資料完整度提示 ----
     # local-first 模式下缺資料是正常狀態；引導使用者只刷新需要的資料源。
     missing: List[str] = []
     try:
         from bot.market_meta import detect_market, is_etf, market_label
-        _mkt = detect_market(snap.ticker, root=PROJECT_ROOT)
+        _mkt = detect_market(snap.ticker, root=PROJECT_ROOT, cache_only=True)
         _is_etf = is_etf(snap.ticker)
         _mkt_label = market_label(_mkt)
     except Exception:
@@ -4263,9 +3769,9 @@ def page_ticker_detail() -> None:
                 "**LLM 法說分析** — 本次自動 LLM 關閉；若要補分析，請勾選 `自動 LLM` "
                 "或到 `LLM 法說分析` 頁手動貼逐字稿"
             )
-        elif not _le().get("GEMINI_API_KEY"):
+        elif not llm_provider_ready(_le()):
             missing.append(
-                "**LLM 法說分析** — 請到 `組態設定` 填入 `GEMINI_API_KEY`，"
+                "**LLM 法說分析** — 請到 `組態設定` 設定可用的 LLM 提供者，"
                 "再勾選 `自動 LLM`；若有完整法說逐字稿可到 `LLM 法說分析` 頁手動貼"
             )
         else:
@@ -4287,7 +3793,12 @@ def page_ticker_detail() -> None:
     )
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("現價", f"{snap.price:.2f}" if snap.price else "—")
+    k1.metric("日線收盤價", f"{snap.price:.2f}" if snap.price else "—")
+    from bot.utils import now_tw
+    price_date = snap.technicals.last_date if snap.technicals else ""
+    k1.caption(f"行情日期：{price_date or '未知'} · 非即時報價")
+    if not price_date or str(price_date)[:10] < now_tw().date().isoformat():
+        st.warning(f"目前使用 {price_date or '日期未知'} 的日線資料，尚無今日收盤資料。分析時間不代表行情更新時間；休市、尚未公布或更新失敗都可能造成此情況。")
     k2.metric("漲跌%", f"{snap.pct_change:+.2f}%" if snap.pct_change else "—")
     if snap.chip_summary:
         k3.metric("外資累計 (張)", f"{snap.chip_summary.get('foreign_net', 0):+.0f}")
@@ -4399,7 +3910,10 @@ def page_ticker_detail() -> None:
                         f"{q.get('price', 0):.2f}",
                         f"{q.get('pct_change', 0):+.2f}%",
                     )
-            st.caption(f"asof: {macro.get('asof_date', '-')} ｜ USDTWD={macro.get('usdtwd', 0):.3f}")
+            st.caption(
+                f"asof: {macro.get('asof_date', '-')} ｜ "
+                f"USDTWD={float(macro.get('usdtwd') or 0):.3f}"
+            )
 
         st.markdown("##### 對應美股客戶 / 供應鏈夥伴")
         if related:
@@ -6266,7 +5780,7 @@ def page_board() -> None:
         "把 `price_history` 整張表推到雲端 worksheet (覆蓋整張)，"
         "另一台電腦或手機可 Pull 回本地。完整設定請見「資料庫 / 雲端同步」頁。"
     )
-    cfg = load_config_from_env()
+    cfg = load_config_from_env(PROJECT_ROOT)
     sc1, sc2, sc3 = st.columns(3)
     sc1.markdown(
         f"雲端狀態: {_badge('啟用', 'green') if cfg.enabled else _badge('未設定', 'gray')}",
@@ -6285,9 +5799,11 @@ def page_board() -> None:
         if sc3.button("⬇ Pull price_history (覆蓋本地)",
                       use_container_width=True, key="board_pull"):
             try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-pull")
                 sync = GoogleSheetSync(cfg, db=db)
                 with st.spinner("Pulling price_history..."):
                     r = sync.pull("price_history")
+                st.caption(f"Pull 前備份：`{backup}`")
                 st.markdown(_format_sync_result(r))
                 st.rerun()
             except Exception as e:
@@ -6302,10 +5818,6 @@ def page_board() -> None:
 
 
 def _resolved_db_path() -> Path:
-    env = load_env()
-    p = env.get("STOCK_DB_PATH", "").strip()
-    if p:
-        return Path(p).expanduser()
     return default_db_path(PROJECT_ROOT)
 
 
@@ -6314,6 +5826,8 @@ def _open_db_for_page() -> StockDB:
     target = _resolved_db_path()
     cached = st.session_state.get("_db_handle")
     if cached is None or cached.path != target:
+        if cached is not None:
+            cached.close()
         reset_db_singleton()
         cached = StockDB.open(path=target)
         st.session_state["_db_handle"] = cached
@@ -6372,7 +5886,7 @@ def page_database() -> None:
 
     # ---- 雲端同步 ----
     st.markdown("### Google Sheets 雲端同步")
-    cfg = load_config_from_env()
+    cfg = load_config_from_env(PROJECT_ROOT)
     cc1, cc2, cc3 = st.columns([2, 2, 1])
     cc1.markdown(
         f"Sheet ID: {_badge('已設定', 'green') if cfg.sheet_id else _badge('未設定', 'gray')}",
@@ -6407,6 +5921,14 @@ def page_database() -> None:
     if not cfg.enabled:
         st.warning("雲端同步未啟用 — 上方欄位填齊後才能 push/pull。")
     else:
+        row_level_sync = st.checkbox(
+            "使用逐列合併模式",
+            value=True,
+            help=(
+                "依各 table 主鍵合併兩端資料，適合 price_history / 月營收等歷史表；"
+                "時間相同但內容不同時保留本地並回報衝突。若需舊行為請取消勾選。"
+            ),
+        )
         cs1, cs2, cs3, cs4 = st.columns(4)
         if cs1.button("🔌 測試連線", use_container_width=True):
             try:
@@ -6420,9 +5942,11 @@ def page_database() -> None:
 
         if cs2.button("⬇ Pull 全部", help="把雲端覆蓋到本地", use_container_width=True):
             try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-pull")
                 sync = GoogleSheetSync(cfg, db=db)
                 with st.spinner("Pulling from Google Sheets..."):
                     results = sync.pull_all()
+                st.caption(f"Pull 前備份：`{backup}`")
                 for r in results:
                     st.markdown(_format_sync_result(r))
             except Exception as e:
@@ -6439,12 +5963,16 @@ def page_database() -> None:
             except Exception as e:
                 st.error(f"Push 失敗: {e}")
 
-        if cs4.button("🔄 智能同步", help="依 updated_at 自動判斷方向",
+        if cs4.button(
+            "🔄 智能同步",
+            help=("逐列合併" if row_level_sync else "依 updated_at 自動判斷方向"),
                       use_container_width=True):
             try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-sync")
                 sync = GoogleSheetSync(cfg, db=db)
                 with st.spinner("Syncing..."):
-                    results = sync.sync_all()
+                    results = sync.sync_all(row_level=row_level_sync)
+                st.caption(f"同步前備份：`{backup}`")
                 for r in results:
                     st.markdown(_format_sync_result(r))
             except Exception as e:
@@ -6454,17 +5982,31 @@ def page_database() -> None:
         tcol1, tcol2, tcol3, tcol4 = st.columns([2, 1, 1, 1])
         picked = tcol1.selectbox("選擇 table", list(SYNCABLE_TABLES))
         if tcol2.button("⬇ Pull", key="single_pull", use_container_width=True):
-            sync = GoogleSheetSync(cfg, db=db)
-            r = sync.pull(picked)
-            st.markdown(_format_sync_result(r))
+            try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-pull")
+                sync = GoogleSheetSync(cfg, db=db)
+                r = sync.pull(picked)
+                st.caption(f"Pull 前備份：`{backup}`")
+                st.markdown(_format_sync_result(r))
+            except Exception as e:
+                st.error(f"Pull 失敗（未寫入本地）：{e}")
         if tcol3.button("⬆ Push", key="single_push", use_container_width=True):
             sync = GoogleSheetSync(cfg, db=db)
             r = sync.push(picked)
             st.markdown(_format_sync_result(r))
         if tcol4.button("🔄 Sync", key="single_sync", use_container_width=True):
-            sync = GoogleSheetSync(cfg, db=db)
-            r = sync.sync(picked)
-            st.markdown(_format_sync_result(r))
+            try:
+                backup = backup_stock_db(src=db.path, label="pre-dashboard-sync")
+                sync = GoogleSheetSync(cfg, db=db)
+                r = (
+                    sync.sync_row_level(picked)
+                    if row_level_sync
+                    else sync.sync(picked)
+                )
+                st.caption(f"同步前備份：`{backup}`")
+                st.markdown(_format_sync_result(r))
+            except Exception as e:
+                st.error(f"同步失敗（未執行本地寫入）：{e}")
 
     st.markdown("---")
 
@@ -6515,9 +6057,15 @@ def page_database() -> None:
     # --- watchlist ---
     with tabs[1]:
         st.caption("使用者監控清單 (與雲端同步可在多機共用)")
+        if "db_watchlist_snapshot" not in st.session_state:
+            st.session_state["db_watchlist_snapshot"] = wl.load(PROJECT_ROOT)
+        if st.button("重新載入清單", key="db_watchlist_reload"):
+            st.session_state["db_watchlist_snapshot"] = wl.load(PROJECT_ROOT)
+            st.rerun()
         watch_rows = db.list_watchlist()
         if watch_rows:
             df = pd.DataFrame([dataclasses_asdict(w) for w in watch_rows])
+            df = df.drop(columns=["revision", "deleted_at", "restored_from"], errors="ignore")
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("Watchlist 是空的。")
@@ -6533,17 +6081,24 @@ def page_database() -> None:
                 if not wsym.strip():
                     st.error("symbol 必填")
                 else:
-                    db.upsert_watch(WatchlistRow(
-                        symbol=wsym.strip(), name=wname.strip(),
-                        tags=wtags.strip(), note=wnote.strip(),
-                    ))
-                    st.success(f"{wsym} 已加入 watchlist")
-                    st.rerun()
+                    snapshot = st.session_state["db_watchlist_snapshot"]
+                    item = next((i for i in snapshot.items if i.ticker == wsym.strip()), None)
+                    if item is None:
+                        item = wl.WatchItem(wsym.strip())
+                        snapshot.items.append(item)
+                    item.name, item.tags, item.note = wname.strip(), [t.strip() for t in wtags.split(",") if t.strip()], wnote.strip()
+                    if _apply_watchlist_change(lambda: wl.save(snapshot, PROJECT_ROOT)):
+                        st.session_state.pop("db_watchlist_snapshot", None)
+                        st.success(f"{wsym} 已儲存")
+                        st.rerun()
             del_sym = ba2.text_input("欲刪除 symbol", key="wl_del")
             if st.button("刪除", key="wl_del_btn") and del_sym.strip():
-                db.remove_watch(del_sym.strip())
-                st.success(f"{del_sym} 已刪除")
-                st.rerun()
+                snapshot = st.session_state["db_watchlist_snapshot"]
+                item = next((i for i in snapshot.items if i.ticker == del_sym.strip()), None)
+                if _apply_watchlist_change(lambda: wl.remove(del_sym.strip(), root=PROJECT_ROOT, expected_revision=item.revision if item else "")):
+                    st.session_state.pop("db_watchlist_snapshot", None)
+                    st.success(f"{del_sym} 已刪除")
+                    st.rerun()
 
     # --- etf_meta ---
     with tabs[2]:
@@ -6712,23 +6267,7 @@ def page_intraday() -> None:
             + "\n\n" + LLM_HINT_DIRECT
         ),
     ):
-        env_values = load_env()
-        from bot.config import Settings as S
-        # 確保 GEMINI_API_KEY 從 .env 載到 process env
-        import os
-        for k, v in env_values.items():
-            if v and not os.environ.get(k):
-                os.environ[k] = v
-        s = S()
-        with st.spinner("LLM 跑當沖管線中 (預估 30-60 秒)..."):
-            report = run_intraday(
-                project_root=PROJECT_ROOT,
-                settings=s,
-                force_refresh_news=True,
-            )
-        from bot.pipeline_shared import intraday_report_to_dict
-        st.session_state["intra_report"] = intraday_report_to_dict(report)
-        st.session_state["intra_report_key"] = report_key
+        submit_task("intraday", "intraday", f"{date_iso} 當沖報告", "今日當沖戰情室", {"date": date_iso, "refresh": True})
     if cs[3].button(
         "🤖 用快取重跑",
         use_container_width=True,
@@ -6742,17 +6281,10 @@ def page_intraday() -> None:
             + "\n\n" + LLM_HINT_DIRECT
         ),
     ):
-        env_values = load_env()
-        from bot.config import Settings as S
-        import os
-        for k, v in env_values.items():
-            if v and not os.environ.get(k):
-                os.environ[k] = v
-        s = S()
-        with st.spinner("跑當沖管線..."):
-            report = run_intraday(project_root=PROJECT_ROOT, settings=s)
-        from bot.pipeline_shared import intraday_report_to_dict
-        st.session_state["intra_report"] = intraday_report_to_dict(report)
+        submit_task("intraday", "intraday", f"{date_iso} 當沖報告", "今日當沖戰情室", {"date": date_iso, "refresh": False})
+    finished_report = task_result("intraday", "intraday", {"date": date_iso})
+    if finished_report is not None:
+        st.session_state["intra_report"] = finished_report
         st.session_state["intra_report_key"] = report_key
 
     if (
@@ -6836,6 +6368,8 @@ def page_intraday() -> None:
                 "技術分": r.get("technical_score", 50),
                 "今日%": r.get("today_pct_change", 0),
                 "量比": r.get("volume_ratio", 0),
+                "資料品質": r.get("data_quality", "unavailable"),
+                "資料基準日": r.get("data_asof", ""),
                 "動作": r.get("action", "HOLD"),
                 "美股連動": r.get("us_market_score", 50),
                 "ADR 溢價%": prem if prem is not None else float("nan"),
@@ -6882,10 +6416,9 @@ def page_market_movers() -> None:
     st.title("📊 盤中強弱排行")
     st.caption(
         "TWSE MIS 全市場掃描 → 依即時漲跌幅排序。"
-        "資料有約 20–30 秒快取，避免每次換頁重打數十批 API。"
+        "搜尋結果會保存；切換頁面不會重新掃描。需要最新報價時請再次搜尋。"
     )
 
-    from bot.dashboard.cache_helpers import cached_market_movers
     from bot.intraday_live import extract_llm_mentions
     from bot.intraday_pipeline import load_intraday_by_date
     from bot.utils import now_tw
@@ -6901,21 +6434,16 @@ def page_market_movers() -> None:
         }[x],
         key="movers_direction",
     )
-    top_n = int(c2.number_input("顯示檔數", min_value=10, max_value=100, value=50, step=10))
+    top_n = int(c2.number_input("顯示檔數", min_value=10, max_value=100, value=50, step=10, key="movers_limit"))
     exclude_etf = c3.toggle("排除 ETF", value=True, key="movers_exclude_etf")
-    force = c4.button("🔄 強制重掃", use_container_width=True)
-
+    force = c4.button("搜尋市場", type="primary", use_container_width=True, key="movers_search")
+    search_params = {"limit": top_n, "direction": direction, "exclude_etf": exclude_etf}
     if force:
-        cached_market_movers.clear()
-        st.rerun()
-
-    with st.spinner("掃描全市場 MIS 報價（首次約 10–20 秒）..."):
-        payload = cached_market_movers(
-            top_n,
-            direction,
-            exclude_etf,
-            str(PROJECT_ROOT),
-        )
+        submit_task("movers", "movers", "盤中強弱排行搜尋", "盤中強弱排行", search_params)
+    payload = task_result("movers", "movers", search_params)
+    if payload is None:
+        st.info("選擇條件後按「搜尋市場」。搜尋會在背景執行，完成後顯示排行。")
+        return
 
     rows = payload.get("rows") or []
     m1, m2, m3, m4 = st.columns(4)
@@ -6928,6 +6456,11 @@ def page_market_movers() -> None:
         with st.expander("掃描警告", expanded=False):
             for err in payload["errors"]:
                 st.caption(f"• {err}")
+
+    if payload.get("stale_count"):
+        st.warning(
+            f"已拒絕 {payload['stale_count']} 筆非今日報價；本頁只顯示 {payload.get('source_date') or '今日'} 資料。"
+        )
 
     if not rows:
         st.warning("尚無有效報價（可能非盤中、或 MIS 暫時無資料）。")
@@ -6943,6 +6476,7 @@ def page_market_movers() -> None:
             "成交量": r.get("volume"),
             "昨收": r.get("prev_close"),
             "價格基準": r.get("price_basis", ""),
+            "報價日期": r.get("quote_date", ""),
             "報價時間": r.get("quote_time", ""),
         })
     df = pd.DataFrame(table_rows)
@@ -7073,7 +6607,9 @@ def _render_intraday_live_tracking_table(
             "初始今日%": row.get("initial_pct_change", 0),
             "早盤量比": row.get("initial_volume_ratio"),
             "慢速量比": row.get("current_volume_ratio"),
+            "技術量比": row.get("technical_volume_ratio"),
             "技術來源": row.get("technical_source", ""),
+            "技術資料日": row.get("technical_last_date", ""),
             "規則檢討": row.get("correctness", ""),
             "狀態": row.get("status", ""),
             "理由": row.get("reason", ""),
@@ -7220,11 +6756,10 @@ def page_intraday_live() -> None:
     st.markdown("### LLM 即時推演 / 檢討")
     latest_review = load_live_review(PROJECT_ROOT, today)
     env_values = load_env()
-    api_ready = bool(env_values.get("GEMINI_API_KEY"))
-    ran_manual_llm = False
+    api_ready = llm_provider_ready(env_values)
 
     if not api_ready:
-        st.info("尚未設定 GEMINI_API_KEY；可以看自動追蹤表，但無法手動刷新 LLM 推演。")
+        st.info("尚未設定可用的 LLM 提供者；可以看自動追蹤表，但無法手動刷新 LLM 推演。")
 
     if st.button(
         "🤖 手動刷新 LLM 即時推演 / 檢討",
@@ -7233,73 +6768,11 @@ def page_intraday_live() -> None:
         help=LLM_HINT_DIRECT,
         use_container_width=True,
     ):
-        ran_manual_llm = True
-        import os
-        for key, value in env_values.items():
-            if value and not os.environ.get(key):
-                os.environ[key] = value
-
-        from bot.llm_analyzer import GeminiClient, gemini_call
-        from bot.market_macro import fetch_macro_snapshot, macro_to_dict
-        from bot.news_fetcher import fetch_today_news, news_to_compact_text
-        from bot.prompt_registry import get_registry
-
-        settings = S()
-        client = GeminiClient(api_key=settings.gemini_api_key, model=settings.gemini_model)
-        registry = get_registry(PROJECT_ROOT / "prompts")
-        registry.reload()
-        with st.spinner("刷新新資料並請 LLM 檢討早盤判斷..."):
-            fresh_tracking = build_live_tracking_rows(
-                report,
-                root=PROJECT_ROOT,
-                max_tickers=max_tickers,
-                refresh_quotes=True,
-                refresh_technicals=True,
-                refresh_chips=True,
-                refresh_news=True,
-                include_news=True,
-            )
-            macro = fetch_macro_snapshot(
-                root=PROJECT_ROOT,
-                force_refresh=True,
-                use_cache=True,
-            )
-            news_items = fetch_today_news(
-                limit=120,
-                use_cache=False,
-                force_refresh=True,
-                root=PROJECT_ROOT,
-            )
-            raw, info = gemini_call(
-                "intraday_live_review",
-                client=client,
-                registry=registry,
-                metadata={"task": "intraday_live_review", "asof": today.isoformat()},
-                asof_time=now_tw().isoformat(timespec="seconds"),
-                original_brief=report.get("brief_md") or report.get("overall_brief") or "",
-                themes_json=json.dumps(report.get("themes") or [], ensure_ascii=False, indent=2),
-                live_rows_json=json.dumps(fresh_tracking.get("rows") or [], ensure_ascii=False, indent=2),
-                macro_json=json.dumps(macro_to_dict(macro), ensure_ascii=False, indent=2),
-                news_text=news_to_compact_text(news_items, max_chars=5000),
-            )
-        if raw:
-            payload = {
-                "generated_at": now_tw().isoformat(timespec="seconds"),
-                "prompt_id": info.get("prompt_id", ""),
-                "prompt_version": info.get("prompt_version", ""),
-                "llm_info": info,
-                "tracking": fresh_tracking,
-            }
-            save_live_review(
-                root=PROJECT_ROOT,
-                report_date=today,
-                markdown=raw,
-                payload=payload,
-            )
-            latest_review = {"markdown": raw, **payload}
-            st.success("LLM 即時推演已更新。")
-        else:
-            st.warning("LLM 未產出內容，請到 LLM 呼叫紀錄查看錯誤。")
+        submit_task("live_review", "live_review", f"{today.isoformat()} 即時推演", "今日當沖即時追蹤",
+                    {"date": today.isoformat(), "report": report, "max_tickers": max_tickers})
+    finished_review = task_result("live_review", "live_review", {"date": today.isoformat()})
+    if finished_review is not None:
+        latest_review = finished_review
 
     if latest_review and latest_review.get("markdown"):
         st.caption(
@@ -7375,23 +6848,7 @@ def page_next_day_watch() -> None:
             + "\n\n" + LLM_HINT_DIRECT
         ),
     ):
-        env_values = load_env()
-        from bot.config import Settings as S
-        import os
-        for k, v in env_values.items():
-            if v and not os.environ.get(k):
-                os.environ[k] = v
-        s = S()
-        with st.spinner("跑明日預備清單 (draft) — 預估 60-120 秒..."):
-            report = run_next_day_watch(
-                mode="draft",
-                project_root=PROJECT_ROOT,
-                settings=s,
-                force_refresh_news=True,
-            )
-        from bot.next_day_watch_pipeline import _report_to_json
-        st.session_state["nextday_report"] = _report_to_json(report)
-        st.session_state["nextday_report_key"] = report_key
+        submit_task("nextday", "nextday", f"{date_iso} 明日關注 · draft", "明日當沖關注", {"date": date_iso, "mode": "draft"})
 
     if cs[3].button(
         "🤖 跑 update (凌晨更新)",
@@ -7407,22 +6864,13 @@ def page_next_day_watch() -> None:
             + "\n\n" + LLM_HINT_DIRECT
         ),
     ):
-        env_values = load_env()
-        from bot.config import Settings as S
-        import os
-        for k, v in env_values.items():
-            if v and not os.environ.get(k):
-                os.environ[k] = v
-        s = S()
-        with st.spinner("跑明日預備清單 (update) — 重抓 macro，預估 60-120 秒..."):
-            report = run_next_day_watch(
-                mode="update",
-                project_root=PROJECT_ROOT,
-                settings=s,
-                force_refresh_macro=True,
-            )
-        from bot.next_day_watch_pipeline import _report_to_json
-        st.session_state["nextday_report"] = _report_to_json(report)
+        submit_task("nextday", "nextday", f"{date_iso} 明日關注 · update", "明日當沖關注", {"date": date_iso, "mode": "update"})
+    report_match = {"date": date_iso}
+    if mode_for_load:
+        report_match["mode"] = mode_for_load
+    finished_report = task_result("nextday", "nextday", report_match)
+    if finished_report is not None:
+        st.session_state["nextday_report"] = finished_report
         st.session_state["nextday_report_key"] = report_key
 
     if st.session_state.get("nextday_report_key") != report_key:
@@ -7570,6 +7018,8 @@ def page_next_day_watch() -> None:
                 "強勢分": r.get("strength_score", 0),
                 "今日%": r.get("today_pct_change", 0),
                 "量比": r.get("volume_ratio", 0),
+                "資料品質": r.get("data_quality", "unavailable"),
+                "資料基準日": r.get("data_asof", ""),
                 "題材": r.get("theme", ""),
                 "事件": r.get("event", ""),
                 "進場邏輯": r.get("entry_logic", ""),
@@ -7784,6 +7234,11 @@ def page_hot_stock_futures() -> None:
             for err in band_payload["errors"]:
                 st.caption(f"• {err}")
 
+    if band_payload.get("stale_count"):
+        st.warning(
+            f"已拒絕 {band_payload['stale_count']} 筆非今日報價；本頁只顯示 {band_payload.get('source_date') or '今日'} 資料。"
+        )
+
     if not band_rows:
         st.info("此價格區間內尚無有效報價（可能非盤中）。")
         return
@@ -7856,44 +7311,31 @@ def page_macro() -> None:
         save_supply_chain,
     )
 
+    from bot.utils import now_tw
     cs = st.columns([2, 1, 1])
     if cs[1].button("使用快取", use_container_width=True, key="macro_cache"):
-        st.session_state["macro_force"] = False
         st.session_state.pop("macro_data", None)
     if cs[2].button("重新抓取", type="primary", use_container_width=True, key="macro_refresh"):
-        st.session_state["macro_force"] = True
-        st.session_state.pop("macro_data", None)
-
+        submit_task("macro", "macro", "跨市場資料更新", "美股 / 跨市場", {"date": now_tw().date().isoformat()})
+    finished_macro = task_result("macro", "macro", {"date": now_tw().date().isoformat()})
+    if finished_macro is not None:
+        st.session_state["macro_data"] = finished_macro
     if "macro_data" not in st.session_state:
-        force_macro = st.session_state.get("macro_force", False)
-        status = st.status(
-            "載入跨市場資料",
-            expanded=True,
-        )
-        if force_macro:
-            status.write("重新抓取：呼叫 yfinance、TWSE 收盤價與 TAIFEX 期貨資料。")
-        else:
-            status.write("先讀今日 `data/macro/` 快取；若不存在才抓外部資料。")
-        try:
-            snap = fetch_macro_snapshot(
-                root=PROJECT_ROOT,
-                force_refresh=force_macro,
-            )
-            st.session_state["macro_data"] = macro_to_dict(snap)
-            status.update(
-                label="跨市場資料載入完成",
-                state="complete",
-                expanded=False,
-            )
-        except Exception as exc:
-            status.update(label="跨市場資料載入失敗", state="error", expanded=True)
-            raise exc
+        st.session_state["macro_data"] = macro_to_dict(fetch_macro_snapshot(root=PROJECT_ROOT, cache_only=True))
     data = st.session_state["macro_data"]
+    if not data.get("indices"):
+        st.info("尚無本地跨市場資料；按「重新抓取」可在背景更新。")
 
     cs[0].caption(
         f"asof: {data.get('asof_date', '-')} ｜ "
-        f"USDTWD={data.get('usdtwd', 0):.3f} ｜ "
+        f"USDTWD={float(data.get('usdtwd') or 0):.3f} ｜ "
         f"{'快取' if data.get('cached') else '即時抓取'}"
+    )
+    source_dates = sorted({str(v) for v in (data.get("source_dates") or {}).values() if v})
+    st.caption(
+        "來源實際日期: "
+        + (", ".join(source_dates) if source_dates else "未知")
+        + "（不同市場交易日可能不同，請以各列來源日為準）"
     )
 
     # ---- 指數 ----
@@ -7920,6 +7362,7 @@ def page_macro() -> None:
             "類別": info.get("role", ""),
             "收盤 (USD)": round(info.get("price", 0), 2),
             "漲跌 %": round(info.get("pct_change", 0), 2),
+            "來源日": info.get("source_date", ""),
             "母股": info.get("parent_tw_ticker", ""),
         })
     df = pd.DataFrame(rows)
@@ -7958,8 +7401,9 @@ def page_macro() -> None:
 
     env_values = load_env()
     api_key = env_values.get("GEMINI_API_KEY", "")
-    if not api_key:
-        st.info("尚未設定 GEMINI_API_KEY，無法產出 LLM 簡報")
+    llm_ready = llm_provider_ready(env_values)
+    if not llm_ready:
+        st.info("尚未設定可用的 LLM 提供者，無法產出 LLM 簡報")
     else:
         if st.button(
             "🤖 呼叫 Gemini 產出簡報",
@@ -7967,28 +7411,16 @@ def page_macro() -> None:
             key="macro_brief",
             help=LLM_HINT_DIRECT,
         ):
-            from bot.llm_analyzer import GeminiClient, gemini_call
-
-            client = GeminiClient(
-                api_key=api_key,
-                model=env_values.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            )
-            with st.spinner("Gemini 正在撰寫美股/ADR 對台股影響簡報..."):
-                raw, info = gemini_call(
-                    "us_market_brief",
-                    client=client,
-                    metadata={"task": "us_market_brief", "source": "dashboard"},
-                    asof_date=data.get("asof_date", ""),
-                    indices_json=json.dumps(data.get("indices", {}), ensure_ascii=False, indent=2),
-                    stocks_json=json.dumps(data.get("stocks", {}), ensure_ascii=False, indent=2),
-                    adr_premiums_json=json.dumps(data.get("adr_premiums", []), ensure_ascii=False, indent=2),
-                    supply_chain_json=json.dumps(
-                        load_supply_chain(PROJECT_ROOT).get("us_stocks", {}),
-                        ensure_ascii=False, indent=2,
-                    ),
-                )
-            if raw:
-                st.session_state["us_brief"] = (raw, info)
+            submit_task("macro_brief", "macro_brief", "跨市場 LLM 簡報", "美股 / 跨市場", {"inputs": {
+                "asof_date": data.get("asof_date", ""),
+                "indices_json": json.dumps(data.get("indices", {}), ensure_ascii=False, indent=2),
+                "stocks_json": json.dumps(data.get("stocks", {}), ensure_ascii=False, indent=2),
+                "adr_premiums_json": json.dumps(data.get("adr_premiums", []), ensure_ascii=False, indent=2),
+                "supply_chain_json": json.dumps(load_supply_chain(PROJECT_ROOT).get("us_stocks", {}), ensure_ascii=False, indent=2),
+            }})
+        finished_brief = task_result("macro_brief", "macro_brief")
+        if finished_brief is not None:
+            st.session_state["us_brief"] = (finished_brief["markdown"], finished_brief["info"])
 
         brief = st.session_state.get("us_brief")
         if brief:

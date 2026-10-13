@@ -341,18 +341,23 @@ class IntradayBacktester:
         db: Optional[StockDB] = None,
     ) -> BacktestSummary:
         from pathlib import Path
+        owns_db = db is None
         database = db or StockDB.open(path=default_db_path(Path(root or ".")))
-        daily_cache: Dict[str, List[PriceBar]] = {}
-        results = [
-            self.run_symbol(
-                database, sym, start=start, end=end, daily_cache=daily_cache,
+        try:
+            daily_cache: Dict[str, List[PriceBar]] = {}
+            results = [
+                self.run_symbol(
+                    database, sym, start=start, end=end, daily_cache=daily_cache,
+                )
+                for sym in symbols
+            ]
+            lo, hi = resolve_entry_range("", self.settings)
+            note = (
+                f"entry {lo:.1f}~{hi:.1f}% | sl {self.settings.stop_loss_pct}% | "
+                f"trail {self.settings.take_profit_pct}%/{self.settings.trailing_stop_pct}% | "
+                f"exit {self.settings.exit_time.strftime('%H:%M')}"
             )
-            for sym in symbols
-        ]
-        lo, hi = resolve_entry_range("", self.settings)
-        note = (
-            f"entry {lo:.1f}~{hi:.1f}% | sl {self.settings.stop_loss_pct}% | "
-            f"trail {self.settings.take_profit_pct}%/{self.settings.trailing_stop_pct}% | "
-            f"exit {self.settings.exit_time.strftime('%H:%M')}"
-        )
-        return BacktestSummary(results=results, settings_note=note)
+            return BacktestSummary(results=results, settings_note=note)
+        finally:
+            if owns_db:
+                database.close()

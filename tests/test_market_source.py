@@ -90,10 +90,71 @@ class TestPoll:
 
         assert source._exchange_map["2330"] == "tse"
 
+    def test_poll_carries_source_document_id_when_rooted(self, tmp_path) -> None:
+        from pathlib import Path
+
+        import json
+        from bot.stock_db import StockDB
+
+        raw = json.dumps({"msgArray": SAMPLE_MSG_ARRAY[:1]}).encode("utf-8")
+
+        class _Response:
+            content = raw
+            headers = {"Content-Type": "application/json"}
+            status_code = 200
+            url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                return json.loads(self.content.decode("utf-8"))
+
+        class _Session:
+            def get(self, _url, **_kwargs):
+                return _Response()
+
+        source = TwsePublicMarketSource(symbols=["2330"], root=tmp_path)
+        source._session = _Session()
+        source._initialized = True
+        ticks = source.poll()
+        assert len(ticks) == 1
+        assert ticks[0].source_document_id.startswith("source-doc:")
+        docs = StockDB.open(root=Path(tmp_path)).list_source_documents(
+            source="twse_mis_quote",
+        )
+        assert any(doc.document_id == ticks[0].source_document_id for doc in docs)
+
+    def test_poll_source_document_id_empty_without_root(self) -> None:
+        class _Response:
+            content = b'{"msgArray":[{"c":"2330","z":"600.00","v":"15000","y":"580.00","t":"13:30:00","ex":"tse"}]}'
+            headers = {"Content-Type": "application/json"}
+            status_code = 200
+            url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                import json
+                return json.loads(self.content.decode("utf-8"))
+
+        class _Session:
+            def get(self, _url, **_kwargs):
+                return _Response()
+
+        source = TwsePublicMarketSource(symbols=["2330"], root=None)
+        source._session = _Session()
+        source._initialized = True
+        ticks = source.poll()
+        assert len(ticks) == 1
+        assert ticks[0].source_document_id == ""
+
 
 class TestGetQuotes:
     def test_uses_last_trade_when_available(self) -> None:
         source = TwsePublicMarketSource(symbols=["2330"])
+        source._last_source_document_id = "source-doc:twse-mis:fixture"
         with patch.object(source, "_fetch_raw", return_value=SAMPLE_MSG_ARRAY[:1]):
             quotes = source.get_quotes()
 
@@ -101,6 +162,7 @@ class TestGetQuotes:
         assert quote["price"] == 600.0
         assert quote["price_basis"] == "last_trade"
         assert quote["pct_chg"] == pytest.approx(3.45, abs=0.01)
+        assert quote["source_document_id"] == "source-doc:twse-mis:fixture"
 
     def test_uses_bid_ask_mid_when_last_trade_missing(self) -> None:
         items = [{

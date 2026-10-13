@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 from bot.ownership import BOT_OWNER_TAG
 
@@ -64,6 +64,10 @@ class MarketTick:
     pct_chg: float
     prev_close: float
     source: str  # "shioaji" | "twse_public"
+    observed_at: Optional[datetime.datetime] = None
+    quality_status: str = "ok"
+    price_basis: str = "last_trade"
+    source_document_id: str = ""
 
 
 @dataclass
