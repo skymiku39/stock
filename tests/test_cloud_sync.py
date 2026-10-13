@@ -612,3 +612,52 @@ def test_merge_compares_instants_with_different_timezones():
     local = {"symbol": "2330", "note": "older", "updated_at": "2026-10-07T10:00:00+08:00"}
     remote = {"symbol": "2330", "note": "newer", "updated_at": "2026-10-07T03:00:00Z"}
     assert merge_rows_by_key("watchlist", [local], [remote]).rows[0]["note"] == "newer"
+
+
+@pytest.mark.parametrize("operation", ["sync_row_level", "sync", "push", "pull"])
+@pytest.mark.parametrize("change", ["renamed", "duplicate", "extra", "missing"])
+def test_sync_revalidates_header_of_data_snapshot(operation, change, sync, db, monkeypatch):
+    db.upsert_watch(WatchlistRow(symbol="2330", note="local note"))
+    before = db.fetch_all_rows("watchlist")
+    columns = db._table_columns("watchlist")
+    remote = {**before[0], "note": "remote note", "updated_at": "2099-01-01T00:00:00+08:00"}
+    changed = list(columns)
+    if change == "missing":
+        changed = []
+        values = [remote[c] for c in columns]
+    elif change == "extra":
+        changed.append("manual_note")
+        values = [remote[c] for c in columns] + ["keep this column"]
+    else:
+        changed[columns.index("note")] = "memo" if change == "renamed" else "name"
+        values = [remote[c] for c in columns]
+    ws = FakeWorksheet([changed, [str(value) for value in values]])
+    # The first request sees a valid header. The sheet is edited before the
+    # subsequent get_all_values request, which must validate its own snapshot.
+    monkeypatch.setattr(ws, "row_values", lambda row: list(columns))
+    sheet = MagicMock()
+    sheet.worksheet.return_value = ws
+    monkeypatch.setattr(sync, "_ensure_sheet", lambda: sheet)
+    remote_before = ws.get_all_values()
+
+    result = getattr(sync, operation)("watchlist")
+
+    if operation == "pull" and change == "missing":
+        assert result.skipped
+    else:
+        assert not result.ok
+        assert result.error
+    assert db.fetch_all_rows("watchlist") == before
+    assert ws.get_all_values() == remote_before
+    assert not ws.updated
+
+
+def test_row_sync_populates_genuinely_empty_worksheet(sync, db, monkeypatch):
+    db.upsert_watch(WatchlistRow(symbol="2330", note="keep"))
+    ws = FakeWorksheet()
+    sheet = MagicMock()
+    sheet.worksheet.return_value = ws
+    monkeypatch.setattr(sync, "_ensure_sheet", lambda: sheet)
+    assert sync.sync_row_level("watchlist").ok
+    assert ws.values[0] == db._table_columns("watchlist")
+    assert ws.values[1][ws.values[0].index("note")] == "keep"
