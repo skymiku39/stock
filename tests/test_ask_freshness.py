@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from bot.ask import AskEngine
 from bot.evidence import is_evidence_fresh, make_evidence
 from bot.query_plan import plan_query
@@ -18,6 +20,35 @@ from bot.utils import TW_TZ
 
 
 REFERENCE = dt.datetime(2026, 9, 10, 12, 0, tzinfo=dt.timezone.utc)
+
+
+@pytest.mark.parametrize("policy", ["24h", "7d", "30d"])
+@pytest.mark.parametrize("kind,field", [
+    ("news", "published_at"),
+    ("valuation_daily", "retrieved_at"),
+    ("dividend_history", "retrieved_at"),
+    ("monthly_revenue", "retrieved_at"),
+    ("quote", "observed_at"),
+])
+def test_strict_freshness_rejects_future_timestamps(policy, kind, field):
+    future = (REFERENCE + dt.timedelta(seconds=1)).isoformat()
+    item = {"kind": kind, field: future}
+    assert not is_evidence_fresh(item, policy, now=REFERENCE)
+
+
+@pytest.mark.parametrize("policy", ["as_available", "unbounded"])
+def test_unbounded_freshness_does_not_filter_future_timestamps(policy):
+    item = {"kind": "news", "published_at": "2099-01-01T00:00:00Z"}
+    assert is_evidence_fresh(item, policy, now=REFERENCE)
+
+
+@pytest.mark.parametrize("policy,window", [("24h", 1), ("7d", 7), ("30d", 30)])
+def test_strict_freshness_includes_current_instant_and_window_boundary(policy, window):
+    for stamp in (REFERENCE, REFERENCE - dt.timedelta(days=window)):
+        item = {"kind": "news", "published_at": stamp.astimezone(TW_TZ).isoformat()}
+        assert is_evidence_fresh(item, policy, now=REFERENCE)
+    stale = REFERENCE - dt.timedelta(days=window, microseconds=1)
+    assert not is_evidence_fresh({"kind": "news", "published_at": stale.isoformat()}, policy, now=REFERENCE)
 
 
 def test_valuation_daily_uses_retrieved_at_for_strict_freshness() -> None:

@@ -330,7 +330,7 @@ def is_evidence_fresh(
     else:
         reference = reference.astimezone(TW_TZ)
     age = reference - observed
-    return age <= window
+    return dt.timedelta(0) <= age <= window
 
 
 @dataclass
