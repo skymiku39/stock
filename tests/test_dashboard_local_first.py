@@ -25,7 +25,10 @@ def test_macro_cache_only_miss_does_not_fetch(monkeypatch, tmp_path: Path) -> No
 
 
 def test_macro_cache_only_hit_reads_local_cache(monkeypatch, tmp_path: Path) -> None:
-    today = dt.date.today().isoformat()
+    # The cache uses the Taipei date, even while a UTC runner is still yesterday.
+    now = dt.datetime(2026, 10, 14, 2, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    monkeypatch.setattr("bot.market_macro.now_tw", lambda: now)
+    today = now.date().isoformat()
     cache = tmp_path / "data" / "macro" / f"macro_{today}.json"
     cache.parent.mkdir(parents=True)
     cache.write_text(
