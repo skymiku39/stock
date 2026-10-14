@@ -1102,6 +1102,13 @@ _SCHEMA: Dict[str, str] = {
 # in ALL_TABLES/SYNCABLE_TABLES because Google Sheets is not an immutable raw
 # archive and must not become the source of truth for downloaded documents.
 _INTERNAL_SCHEMA: Dict[str, str] = {
+    "source_registration_receipts": """
+        CREATE TABLE IF NOT EXISTS source_registration_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            ingestion_run_id TEXT NOT NULL DEFAULT ''
+        )
+    """,
     "source_documents": """
         CREATE TABLE IF NOT EXISTS source_documents (
             document_id       TEXT PRIMARY KEY,

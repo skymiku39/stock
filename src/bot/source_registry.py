@@ -175,6 +175,33 @@ class SourceRegistry:
         suffix_part = _safe_part(suffix.lstrip("."), "bin")
         path = self.raw_root / source_part / f"{content_hash}.{suffix_part}"
         path.parent.mkdir(parents=True, exist_ok=True)
+        retrieved = retrieved_at or now_tw().isoformat(timespec="seconds")
+        document_id = f"source-doc:{source_part}:{content_hash}"
+        row = SourceDocumentRow(
+            document_id=document_id,
+            source=str(source or "unknown"),
+            kind=str(kind or "raw"),
+            source_ref=str(source_ref or ""),
+            url=str(url or ""),
+            title=str(title or ""),
+            content_path=str(path.relative_to(self.root)),
+            content_hash=content_hash,
+            mime_type=str(mime_type or ""),
+            as_of=str(as_of or ""),
+            published_at=str(published_at or ""),
+            retrieved_at=retrieved,
+            valid_from=str(valid_from or ""),
+            valid_to=str(valid_to or ""),
+            ingestion_run_id=str(ingestion_run_id or ""),
+            quality_status=normalize_quality_status(quality_status),
+            metadata_json=json.dumps(
+                dict(metadata or {}), ensure_ascii=False, sort_keys=True, default=str,
+            ),
+        )
+        # Persist the exact registration intent before publishing any raw bytes.
+        # This survives a failed manifest transaction or a process restart.
+        from bot.source_recovery import write_receipt, commit_registration
+        receipt_id = write_receipt(self.root, row)
         # Hash-addressed paths are immutable.  Do not rewrite an existing
         # object; a changed response receives a new hash and a new manifest id.
         if not path.exists():
@@ -203,30 +230,9 @@ class SourceRegistry:
         # GOOGLE_CACHE_DIR，與其他 data cache 使用相同相對路徑鏡像。
         mirror_file_to_cloud(path, root=self.root)
 
-        retrieved = retrieved_at or now_tw().isoformat(timespec="seconds")
-        document_id = f"source-doc:{source_part}:{content_hash}"
-        row = SourceDocumentRow(
-            document_id=document_id,
-            source=str(source or "unknown"),
-            kind=str(kind or "raw"),
-            source_ref=str(source_ref or ""),
-            url=str(url or ""),
-            title=str(title or ""),
-            content_path=str(path.relative_to(self.root)),
-            content_hash=content_hash,
-            mime_type=str(mime_type or ""),
-            as_of=str(as_of or ""),
-            published_at=str(published_at or ""),
-            retrieved_at=retrieved,
-            valid_from=str(valid_from or ""),
-            valid_to=str(valid_to or ""),
-            ingestion_run_id=str(ingestion_run_id or ""),
-            quality_status=normalize_quality_status(quality_status),
-            metadata_json=json.dumps(
-                dict(metadata or {}), ensure_ascii=False, sort_keys=True, default=str,
-            ),
-        )
-        self.db.upsert_source_document(row)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != content_hash:
+            raise ValueError(f"raw archive hash mismatch: {path}")
+        commit_registration(self.db, receipt_id, row)
         return self.db.get_source_document(document_id) or row
 
     def capture_document(
