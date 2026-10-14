@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import pytest
 
 from bot.auto_llm import (
     MIN_PRESENTATION_CHARS,
@@ -166,15 +167,9 @@ def test_try_research_ticker_passes_presentation_block():
     assert "PER=20" in captured["kwargs"]["quant_block"]
 
 
-def test_auto_research_registers_evidence_and_links_llm_row(tmp_path: Path):
+@pytest.mark.parametrize("registration_fails", [False, True])
+def test_auto_research_registers_evidence_and_links_llm_row(tmp_path: Path, monkeypatch, registration_fails):
     db = StockDB.open(root=tmp_path)
-    db.upsert_llm_analysis(LlmAnalysisRow(
-        id="analysis-1",
-        ts="2026-09-17T10:00:00+08:00",
-        ticker="2330",
-        prompt_id="research_ticker",
-        prompt_version="1.2",
-    ))
     evidence = make_evidence(
         "news",
         source="fixture",
@@ -193,23 +188,27 @@ def test_auto_research_registers_evidence_and_links_llm_row(tmp_path: Path):
         "capex_signal": "未提及",
         "margin_outlook": "未提及",
     }
-    result = {
-        "raw": json.dumps(data, ensure_ascii=False),
-        "info": {
-            "prompt_id": "research_ticker",
-            "prompt_version": "1.2",
-            "analysis_id": "analysis-1",
-        },
-        "data": data,
-    }
-    client = SimpleNamespace(enabled=True, model="test-model")
+    from bot.llm_log import LlmCallLogger, research_run_id
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    source_prompt = Path(__file__).resolve().parents[1] / "prompts" / "research_ticker.yaml"
+    (prompts / source_prompt.name).write_text(source_prompt.read_text(encoding="utf-8"), encoding="utf-8")
+    calls = []
+    def generate_raw(rendered, **kwargs):
+        calls.append(rendered)
+        # The registry must exist before the external-call boundary is crossed.
+        assert db.get_evidence(evidence["id"]) is not None
+        return json.dumps(data, ensure_ascii=False), {}
+    client = SimpleNamespace(enabled=True, model="test-model", generate_raw=generate_raw)
+    if registration_fails:
+        def fail(*args, **kwargs):
+            raise RuntimeError("fixture registration failure")
+        monkeypatch.setattr(StockDB, "upsert_evidence", fail)
     with patch("bot.auto_llm.load_cached_auto_analysis", return_value=None), patch(
         "bot.auto_llm._gather_material_info", return_value=[]
     ), patch("bot.auto_llm._gather_news", return_value=[]), patch(
         "bot.auto_llm._resolve_presentation_block", return_value=""
     ), patch("bot.auto_llm._load_research_memory_context", return_value=""), patch(
-        "bot.auto_llm._try_research_ticker", return_value=result
-    ), patch(
         "bot.auto_llm._build_source_sections",
         return_value={"evidence": [evidence]},
     ), patch("bot.auto_llm._save_cache"):
@@ -224,12 +223,24 @@ def test_auto_research_registers_evidence_and_links_llm_row(tmp_path: Path):
             enable_quant=False,
         )
 
+    if registration_fails:
+        assert payload is None
+        assert calls == []
+        assert db.list_llm_analysis() == []
+        db.close()
+        return
     assert payload is not None
+    assert len(calls) == 1
     assert payload["evidence_ids"] == [evidence["id"]]
     assert db.get_evidence(evidence["id"]) is not None
     row = db.list_llm_analysis(prompt_id="research_ticker", limit=1)[0]
     assert json.loads(row.evidence_json) == [evidence["id"]]
+    rec = LlmCallLogger(root=tmp_path).read()[0]
+    assert rec.metadata["evidence_ids"] == [evidence["id"]]
+    assert [item.evidence_id for item in db.list_llm_run_evidence(research_run_id(rec))] == [evidence["id"]]
+    assert db.conn.execute("SELECT is_publishable FROM llm_outputs").fetchone()[0] == 0
     assert db.list_memory_items(memory_layer="long") == []
+    db.close()
 
 
 def test_long_memory_gate_keeps_only_exact_registered_evidence(tmp_path: Path) -> None:

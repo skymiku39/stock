@@ -1103,6 +1103,7 @@ def _try_research_ticker(
     presentation_block: str = "",
     quant_block: str = "",
     memory_context: str = "",
+    evidence_ids: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """嘗試呼叫 ``research_ticker`` prompt；若 registry 沒有此 prompt 回 None。"""
     try:
@@ -1143,7 +1144,10 @@ def _try_research_ticker(
         "research_ticker",
         client=client,
         root=root,
-        metadata={"ticker": ticker, "task": "research_ticker"},
+        metadata={
+            "ticker": ticker, "task": "research_ticker",
+            **({"evidence_ids": list(evidence_ids)} if evidence_ids is not None else {}),
+        },
         ticker=ticker,
         name=name or "Unknown",
         today=now_tw().date().isoformat(),
@@ -1297,6 +1301,31 @@ def auto_analyze_ticker(
             chip_days=chip_days,
         )
 
+    # Freeze and register the input sources before generating/logging output.
+    # A registration error must not trigger an untraceable paid model call.
+    source_sections = _build_source_sections(
+        ticker, root=root, materials=materials, news=news,
+        calendar_data=calendar_data, web_material=web_material,
+        pipeline_text=pipeline_text, quant_block=quant_block, logger=log,
+    )
+    input_evidence = source_sections.get("evidence") or []
+    input_evidence_ids = list(dict.fromkeys(
+        str(item.get("id") or "").strip() for item in input_evidence
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ))
+    from bot.evidence import persist_evidence_items
+    from bot.stock_db import StockDB
+
+    provenance_db = StockDB.open(root=root)
+    try:
+        with provenance_db.transaction():
+            persist_evidence_items(provenance_db, input_evidence)
+    except Exception:
+        log.exception("[%s] 研究輸入證據登錄失敗，略過 LLM 呼叫", ticker)
+        return None
+    finally:
+        provenance_db.close()
+
     res = _try_research_ticker(
         ticker,
         name=name_hint,
@@ -1310,6 +1339,7 @@ def auto_analyze_ticker(
         presentation_block=pipeline_text,
         quant_block=quant_block,
         memory_context=memory_context,
+        evidence_ids=input_evidence_ids,
     )
 
     analysis: Optional[PresentationAnalysis] = None
@@ -1379,6 +1409,7 @@ def auto_analyze_ticker(
             call_logger=get_call_logger(root=root),
             root=root,
             logger=log,
+            evidence_ids=input_evidence_ids,
         )
         if not analysis.enabled:
             return None
@@ -1415,18 +1446,9 @@ def auto_analyze_ticker(
         "web_search_results": len(web_material.search_results) if web_material else 0,
         "web_pages_fetched": len(web_material.pages) if web_material else 0,
     }
-    payload["source_sections"] = _build_source_sections(
-        ticker,
-        root=root,
-        materials=materials,
-        news=news,
-        calendar_data=calendar_data,
-        web_material=web_material,
-        pipeline_text=pipeline_text,
-        composed_preview=composed_for_preview,
-        quant_block=quant_block,
-        logger=log,
-    )
+    payload["source_sections"] = source_sections
+    if composed_for_preview:
+        source_sections["composed_preview"] = _truncate_text(composed_for_preview, 8000)
     payload["evidence"] = payload["source_sections"].get("evidence", [])
     payload["evidence_ids"] = [
         str(item.get("id") or "")
@@ -1434,34 +1456,6 @@ def auto_analyze_ticker(
         if isinstance(item, dict) and str(item.get("id") or "").strip()
     ]
     payload["fetched_at"] = now_tw().isoformat(timespec="seconds")
-
-    # 先登錄本次研究實際使用的來源，再把 evidence ids 回填到
-    # research_ticker 的 LLM history。這使得長期記憶、cache 與 LLM audit
-    # 共享同一組來源識別；若後續升級記憶失敗，來源稽核仍然保留。
-    provenance_db = None
-    try:
-        from bot.evidence import persist_evidence_items
-        from bot.stock_db import StockDB
-
-        provenance_db = StockDB.open(root=root)
-        try:
-            persist_evidence_items(provenance_db, payload["evidence"])
-            research_info = (res or {}).get("info") if isinstance(res, dict) else {}
-            research_analysis_id = str(
-                (research_info or {}).get("analysis_id") or ""
-            )
-            if research_analysis_id:
-                provenance_db.update_llm_analysis_evidence(
-                    research_analysis_id,
-                    payload["evidence_ids"],
-                    quality_status=(
-                        "ok" if not payload.get("validation_errors") else "unknown"
-                    ),
-                )
-        finally:
-            provenance_db.close()
-    except Exception:
-        log.exception("[%s] 研究證據 registry／LLM 關聯回填失敗", ticker)
 
     if chips is not None and analysis is not None:
         try:
