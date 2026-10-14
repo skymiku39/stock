@@ -185,6 +185,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         auto_research_limit=args.auto_research_limit,
         run_llm_analysis=(not args.no_llm) and settings.llm_enabled,
         generate_brief=(not args.no_brief) and settings.llm_enabled,
+        generate_us_brief=(not args.no_brief) and settings.llm_enabled,
         min_consensus_for_focus=args.min_consensus,
         presentation_inputs=presentations,
     )
