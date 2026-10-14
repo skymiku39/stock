@@ -150,7 +150,7 @@ class LlmCallLogger:
             try:
                 _mirror_to_stock_db(rec, logger=self.logger, root=self.root)
             except Exception:
-                self.logger.debug("LLM analysis mirror 失敗", exc_info=True)
+                self.logger.warning("LLM analysis mirror 失敗；保留 JSONL 供重播", exc_info=True)
         else:
             self.logger.debug("自訂 LLM log_dir 未指定 project root，略過 DB mirror")
         return rec
@@ -229,13 +229,7 @@ def _mirror_to_stock_db(
     解析 output 嘗試抽出 sentiment / sentiment_score / summary / drivers / risks。
     失敗時欄位留空。
     """
-    try:
-        from bot.stock_db import (
-            LlmAnalysisRow,
-            get_db,
-        )
-    except Exception:
-        return  # stock_db 模組無法載入時 silently skip
+    from bot.stock_db import LlmAnalysisRow, get_db
 
     md = rec.metadata or {}
     ticker = str(md.get("ticker") or md.get("symbol") or "")

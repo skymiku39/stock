@@ -21,7 +21,7 @@ from bot.auto_llm import (
 )
 from bot.evidence import make_evidence, persist_evidence_items
 from bot.memory_store import MemoryStore
-from bot.stock_db import LlmAnalysisRow, StockDB
+from bot.stock_db import StockDB
 from bot.mops_scraper import PresentationText
 
 

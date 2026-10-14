@@ -26,6 +26,7 @@ from bot.stock_db import SourceDocumentRow, default_db_path
 from bot.canonical_audit import audit_canonical_database
 from bot.research_audit import audit_research_database
 from bot.source_registry import is_source_document_replayable
+from bot.llm_provenance import evidence_ids as normalize_evidence_ids
 
 
 _TRACKED_TABLES = (
@@ -76,6 +77,78 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _llm_provenance_report(conn: sqlite3.Connection, tables: set[str]) -> Dict[str, Any]:
+    """Read execution and linkage separately, checking receipts against SQL."""
+    counts = dict.fromkeys((
+        "linked", "partial", "successful_without_evidence", "failed",
+        "not_required", "legacy_unresolved", "unassessed",
+    ), 0)
+    result: Dict[str, Any] = {
+        "counts": counts, "by_task": [], "without_evidence": 0,
+        "legacy_without_evidence": 0, "planner_analysis_ids": set(),
+    }
+    if not {"llm_runs", "llm_run_evidence", "evidence_items"} <= tables:
+        return result
+    linked: Dict[str, set[str]] = {}
+    for row in conn.execute(
+        "SELECT x.run_id, x.evidence_id FROM llm_run_evidence x "
+        "JOIN evidence_items e ON e.evidence_id=x.evidence_id"
+    ):
+        linked.setdefault(str(row["run_id"]), set()).add(str(row["evidence_id"]))
+    groups: Dict[tuple[str, str, str], int] = {}
+    analysis_classes: Dict[str, set[str]] = {}
+    for row in conn.execute("SELECT run_id, task_type, prompt_id, status, metadata_json FROM llm_runs"):
+        try:
+            md = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            md = {}
+        md = md if isinstance(md, dict) else {}
+        receipt = md.get("input_evidence")
+        receipt = receipt if isinstance(receipt, dict) and receipt.get("version") == 1 else {}
+        if receipt.get("state") not in {"linked", "partial", "missing", "not_required", "unassessed"}:
+            receipt = {}
+        expected = set(normalize_evidence_ids(md.get("evidence_ids")))
+        actual = linked.get(str(row["run_id"]), set())
+        status = str(row["status"])
+        if status == "legacy_unresolved":
+            category = "legacy_unresolved"
+        elif status == "failed":
+            category = "failed"
+        elif (
+            receipt.get("state") == "not_required"
+            and row["task_type"] == row["prompt_id"] == "query_plan"
+            and not expected and not actual
+        ):
+            category = "not_required"
+        elif not receipt or receipt.get("state") == "unassessed":
+            category = "unassessed"
+        elif expected and actual == expected:
+            category = "linked"
+        elif actual:
+            category = "partial"
+        else:
+            category = "successful_without_evidence"
+        counts[category] += 1
+        key = (str(row["task_type"]), status, category)
+        groups[key] = groups.get(key, 0) + 1
+        analysis_id = str(md.get("analysis_id") or "")
+        if analysis_id:
+            analysis_classes.setdefault(analysis_id, set()).add(category)
+        if not actual:
+            if category == "legacy_unresolved":
+                result["legacy_without_evidence"] += 1
+            elif category not in {"failed", "not_required"}:
+                result["without_evidence"] += 1
+    result["planner_analysis_ids"] = {
+        key for key, categories in analysis_classes.items() if categories == {"not_required"}
+    }
+    result["by_task"] = [
+        {"task_type": task, "execution_status": status, "evidence_category": category, "count": count}
+        for (task, status, category), count in sorted(groups.items())
+    ]
+    return result
 
 
 def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
@@ -287,6 +360,9 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
         llm_without_evidence = 0
         llm_legacy_unresolved = 0
         llm_with_unresolved_evidence = 0
+        llm_failed = 0
+        llm_not_required = 0
+        llm_provenance = _llm_provenance_report(conn, table_names)
         if "llm_analysis_history" in table_names:
             registered_evidence_ids = set()
             legacy_run_ids = set()
@@ -303,8 +379,14 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                     ).fetchall()
                 }
             for row in conn.execute(
-                "SELECT id, evidence_json FROM llm_analysis_history"
+                "SELECT id, evidence_json, success FROM llm_analysis_history"
             ).fetchall():
+                if not row["success"]:
+                    llm_failed += 1
+                    continue
+                if str(row["id"]) in llm_provenance["planner_analysis_ids"]:
+                    llm_not_required += 1
+                    continue
                 raw_evidence = str(row["evidence_json"] or "").strip()
                 if raw_evidence in {"", "[]", "{}"}:
                     if f"legacy-analysis:{row['id']}" in legacy_run_ids:
@@ -431,19 +513,9 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                             str(key) for key in details.keys()
                         ) if isinstance(details, dict) else [],
                     })
-        llm_runs_without_evidence = 0
-        llm_runs_legacy_unresolved = 0
+        llm_runs_without_evidence = llm_provenance["without_evidence"]
+        llm_runs_legacy_unresolved = llm_provenance["legacy_without_evidence"]
         conflicted_claims = 0
-        if "llm_runs" in table_names and "llm_run_evidence" in table_names:
-            llm_runs_without_evidence = int(conn.execute(
-                "SELECT COUNT(*) FROM llm_runs r WHERE NOT EXISTS "
-                "(SELECT 1 FROM llm_run_evidence e WHERE e.run_id=r.run_id) "
-                "AND r.status <> 'legacy_unresolved'"
-            ).fetchone()[0])
-            llm_runs_legacy_unresolved = int(conn.execute(
-                "SELECT COUNT(*) FROM llm_runs r WHERE r.status='legacy_unresolved' "
-                "AND NOT EXISTS (SELECT 1 FROM llm_run_evidence e WHERE e.run_id=r.run_id)"
-            ).fetchone()[0])
         if "claims" in table_names:
             conflicted_claims = int(conn.execute(
                 "SELECT COUNT(*) FROM claims WHERE status='conflicted'"
@@ -674,8 +746,13 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
             "llm_analysis_without_evidence": llm_without_evidence,
             "llm_analysis_legacy_unresolved": llm_legacy_unresolved,
             "llm_analysis_with_unresolved_evidence": llm_with_unresolved_evidence,
+            "llm_analysis_failed": llm_failed,
+            "llm_analysis_evidence_not_required": llm_not_required,
             "llm_runs_without_evidence": llm_runs_without_evidence,
             "llm_runs_legacy_unresolved": llm_runs_legacy_unresolved,
+            "llm_run_provenance": {
+                "counts": llm_provenance["counts"], "by_task": llm_provenance["by_task"],
+            },
             "llm_daily_reports_with_unresolved_evidence": daily_reports_with_unresolved_evidence,
             "llm_daily_report_unresolved_evidence_items": daily_report_unresolved_evidence_items,
             "llm_daily_reports_without_evidence": daily_reports_without_evidence,
@@ -871,6 +948,13 @@ def audit_project(root: Path) -> Dict[str, Any]:
             "code": "research_llm_run_without_evidence",
             "severity": "warning",
             "message": f"有 {run_without_evidence} 筆 research LLM run 沒有可回溯 evidence link。",
+        })
+    partial_llm_runs = int((db_report.get("llm_run_provenance") or {}).get("counts", {}).get("partial", 0))
+    if partial_llm_runs:
+        gaps.append({
+            "code": "research_llm_run_incomplete_evidence",
+            "severity": "warning",
+            "message": f"有 {partial_llm_runs} 筆 LLM run 的輸入證據與已保存連結不一致。",
         })
     conflicted_claims = int(db_report.get("conflicted_claims") or 0)
     if conflicted_claims:

@@ -76,6 +76,39 @@ uv run stock-research-quarantine --root C:\skymiku\stock `
 缺少 `--source-document-id` 時，`--apply` 會被拒絕（exit code 2）。此命令與交易／
 下單路徑無關，請勿對正式庫直接 `--apply` 除非已確認 exact ID 與備份。
 
+## 〇・二、LLM 執行與輸入證據
+
+使用唯讀稽核查看目前分類：
+
+```powershell
+uv run --no-sync stock-data-audit --root C:\skymiku\stock --json
+```
+
+`database.llm_run_provenance.counts` 區分 `linked`、`partial`、
+`successful_without_evidence`、`failed`、`not_required`、
+`legacy_unresolved` 與 `unassessed`；`by_task` 另外保留任務種類、
+執行狀態及各類筆數。失敗呼叫與明確登錄的 `query_plan` 不列為成功分析缺證據；
+沒有新版 metadata 的舊紀錄維持未判定，仍缺連結時繼續列入缺口。
+稽核會重查資料表的實際連結，不直接相信當時保存的 `linked` 標記。
+
+新 JSONL 的 `call_id` 識別一次呼叫；run metadata 的 `pipeline_run_id`
+只用於批次分組。相同秒數、相同 prompt 或相同 pipeline 的呼叫不會互相覆寫。
+舊 JSONL 保持原有識別方式；重播新版紀錄會使用相同 call ID。
+
+`research_ticker` 在模型呼叫之前登錄來源，再讓 JSONL、分析歷史和 run
+保存相同輸入 ID；登錄失敗會略過模型呼叫。run metadata 的
+`input_evidence` 保存預期、已連結及未解析的 ID。這只代表輸入來源的關聯；
+`linked` 不代表所有輸入都有官方 raw，也不代表模型的結論已驗證。
+
+呼叫日誌與 `stock-provenance-backfill --apply` 的結果預設不可發布，
+回填的 claims 保持 `unverified`。回填只接受輸入 metadata 明確列出的 ID，
+不把模型輸出自稱的引用當成輸入證明。Ask 通過既有回答驗證後，必須將 run、
+全部引用、output 與 claims 一併提交，才會留下可發布結果；任何寫入失敗都回滾。
+JSONL 保留於 `log/llm_calls/`，可供後續重播。
+
+正式歷史資料不會因程式升級而自動重寫。需要回填時先備份，在資料副本驗證
+結果；沒有原始輸入證明的內容維持未驗證，不能靠猜測補造證據 ID。
+
 ## 一、每日操作流程
 
 ### 盤前（08:00 ~ 09:00）

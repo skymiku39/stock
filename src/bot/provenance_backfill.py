@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from bot.llm_log import LlmCallLogger, LlmCallRecord, _mirror_to_stock_db, research_run_id
-from bot.llm_provenance import evidence_ids as normalize_evidence_ids
+from bot.llm_provenance import evidence_ids as normalize_evidence_ids, evidence_receipt
 from bot.stock_db import (
     ClaimEvidenceRow,
     ClaimRow,
@@ -88,7 +88,9 @@ def backfill_llm_provenance(
         ids = _evidence_ids(record, parsed)
         missing = [value for value in ids if database.get_evidence(value) is None]
         report["unresolved_evidence"] += len(missing)
-        if missing:
+        if evidence_receipt(database, record.metadata or {}, record.prompt_id)["state"] in {
+            "missing", "partial", "unassessed",
+        }:
             report["unresolved_records"] += 1
         run_id = research_run_id(record)
         if not apply:
