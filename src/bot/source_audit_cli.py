@@ -89,6 +89,7 @@ def _llm_provenance_report(conn: sqlite3.Connection, tables: set[str]) -> Dict[s
     result: Dict[str, Any] = {
         "counts": counts, "by_task": [], "without_evidence": 0,
         "legacy_without_evidence": 0, "planner_analysis_ids": set(),
+        "findings": [],
     }
     if not {"llm_runs", "llm_run_evidence", "evidence_items"} <= tables:
         return result
@@ -132,6 +133,9 @@ def _llm_provenance_report(conn: sqlite3.Connection, tables: set[str]) -> Dict[s
         else:
             category = "successful_without_evidence"
         counts[category] += 1
+        result["findings"].append({"run_id": str(row["run_id"]), "category": category,
+                                   "has_evidence": bool(actual), "task_type": str(row["task_type"]),
+                                   "execution_status": status})
         key = (str(row["task_type"]), status, category)
         groups[key] = groups.get(key, 0) + 1
         analysis_id = str(md.get("analysis_id") or "")
@@ -359,6 +363,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                 "consistent": index_count is None or index_count == base_count,
             }
         llm_without_evidence = 0
+        llm_analysis_gap_ids = {"without_evidence": [], "unresolved_evidence": []}
         llm_legacy_unresolved = 0
         llm_with_unresolved_evidence = 0
         llm_failed = 0
@@ -394,6 +399,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                         llm_legacy_unresolved += 1
                     else:
                         llm_without_evidence += 1
+                        llm_analysis_gap_ids["without_evidence"].append(str(row["id"]))
                     continue
                 try:
                     ids = json.loads(raw_evidence)
@@ -408,6 +414,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                         llm_legacy_unresolved += 1
                     else:
                         llm_with_unresolved_evidence += 1
+                        llm_analysis_gap_ids["unresolved_evidence"].append(str(row["id"]))
         documents = []
         document_manifest = []
         source_runs_without_documents = 0
@@ -749,6 +756,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
             },
             "unresolved_source_runs": unresolved_source_runs,
             "llm_analysis_without_evidence": llm_without_evidence,
+            "llm_analysis_gap_ids": llm_analysis_gap_ids,
             "llm_analysis_legacy_unresolved": llm_legacy_unresolved,
             "llm_analysis_with_unresolved_evidence": llm_with_unresolved_evidence,
             "llm_analysis_failed": llm_failed,
@@ -757,6 +765,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
             "llm_runs_legacy_unresolved": llm_runs_legacy_unresolved,
             "llm_run_provenance": {
                 "counts": llm_provenance["counts"], "by_task": llm_provenance["by_task"],
+                "findings": llm_provenance["findings"],
             },
             "llm_evidence_review": review_plan(conn),
             "llm_daily_reports_with_unresolved_evidence": daily_reports_with_unresolved_evidence,
@@ -777,7 +786,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
         conn.close()
 
 
-def audit_project(root: Path) -> Dict[str, Any]:
+def audit_project(root: Path, *, include_archived: bool = False) -> Dict[str, Any]:
     """建立不抓外網、不改業務資料的專案 provenance 報告。"""
     root = Path(root).resolve()
     db_report = _db_report(default_db_path(root), root=root)
@@ -786,6 +795,10 @@ def audit_project(root: Path) -> Dict[str, Any]:
     registered = set(db_report.get("registered_content_paths") or [])
     raw_files = set(_relative_files(root, raw_dir))
     unregistered_raw = sorted(raw_files - registered)
+    historical_archive = {}
+    if not include_archived:
+        from bot.historical_archive import partition_audit
+        historical_archive, unregistered_raw = partition_audit(root, db_report, unregistered_raw)
 
     raw_archive = {
         "checked": 0,
@@ -1067,6 +1080,8 @@ def audit_project(root: Path) -> Dict[str, Any]:
         },
         "raw_archive": raw_archive,
         "unregistered_raw_files": unregistered_raw[:1000],
+        "historical_archive": historical_archive,
+        "include_archived": include_archived,
         "known_limits": ([
             {
                 "code": "legacy_llm_without_provable_evidence",
@@ -1096,13 +1111,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--json", action="store_true", help="輸出 JSON")
+    parser.add_argument("--include-archived", action="store_true", help="完整歷史稽核，包含已封存缺口")
     parser.add_argument(
         "--fail-on-gap",
         action="store_true",
         help="有任何 provenance 缺口時回傳 exit code 2",
     )
     args = parser.parse_args(argv)
-    report = audit_project(args.root)
+    report = audit_project(args.root, include_archived=args.include_archived)
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:

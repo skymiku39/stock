@@ -75,6 +75,7 @@ CLI_META: Dict[str, Tuple[str, str]] = {
     "stock-data-audit": ("validate", "只讀稽核 SQLite、raw archive、FTS 與 provenance 缺口"),
     "stock-source-recovery": ("data", "預設只讀預覽；以原始登錄收據與 hash 精確恢復 raw manifest"),
     "stock-llm-evidence-review": ("validate", "預設只讀分類 LLM 證據缺口；明確套用未驗證標記並限制發布"),
+    "stock-history-archive": ("data", "封存確定的歷史缺口，保留原始資料與新缺口警示"),
     "stock-provenance-backfill": ("data", "只對可證明 exact source 的歷史資料補 provenance"),
     "stock-evidence-link-repair": ("data", "只依 exact provenance 修復 evidence 的歷史來源連結"),
     "stock-research-quarantine": ("validate", "以明確 source_document_id 隔離錯誤研究鏈；不刪 raw、不猜 provenance"),

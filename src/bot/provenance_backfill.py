@@ -126,7 +126,7 @@ def backfill_llm_provenance(
     # Some older deployments kept only llm_analysis_history and no JSONL.  Do
     # not discard those rows: represent them as explicitly unresolved legacy
     # runs, preserving raw_output without inventing evidence links.
-    for row in database.list_llm_analysis(limit=limit):
+    for row in database.list_llm_analysis(limit=limit, include_archived=True):
         # Current calls already have a canonical run; do not create a second
         # legacy-analysis run for the same JSONL/history record.
         if database.conn.execute(

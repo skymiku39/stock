@@ -1102,6 +1102,16 @@ _SCHEMA: Dict[str, str] = {
 # in ALL_TABLES/SYNCABLE_TABLES because Google Sheets is not an immutable raw
 # archive and must not become the source of truth for downloaded documents.
 _INTERNAL_SCHEMA: Dict[str, str] = {
+    "historical_exclusions": """
+        CREATE TABLE IF NOT EXISTS historical_exclusions (
+            kind TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            archived_at TEXT NOT NULL,
+            PRIMARY KEY (kind, record_id, fingerprint)
+        )
+    """,
     "llm_evidence_reviews": """
         CREATE TABLE IF NOT EXISTS llm_evidence_reviews (
             record_type TEXT NOT NULL,
@@ -2798,8 +2808,11 @@ class StockDB:
         ticker: Optional[str] = None,
         prompt_id: Optional[str] = None,
         limit: int = 200,
+        include_archived: bool = False,
     ) -> List[LlmAnalysisRow]:
         sql = "SELECT * FROM llm_analysis_history WHERE 1=1"
+        if not include_archived:
+            sql += " AND id NOT IN (SELECT record_id FROM historical_exclusions WHERE kind='analysis')"
         args: List[Any] = []
         if ticker:
             sql += " AND ticker = ?"
@@ -3023,6 +3036,11 @@ class StockDB:
         limit: int = 200,
     ) -> List[MemoryItemRow]:
         sql = "SELECT * FROM memory_items WHERE 1=1"
+        if memory_status == "active":
+            sql += (" AND NOT EXISTS (SELECT 1 FROM historical_exclusions h WHERE h.kind='analysis' "
+                    "AND (h.record_id=memory_items.source_record_id OR h.record_id=memory_items.source_ref))")
+            sql += (" AND (memory_type != 'llm_call' OR NOT EXISTS (SELECT 1 FROM historical_exclusions "
+                    "WHERE kind='policy' AND record_id='trusted_research_only'))")
         args: List[Any] = []
         if memory_layer:
             sql += " AND memory_layer = ?"
@@ -3066,6 +3084,10 @@ class StockDB:
         if statuses:
             where.append("m.memory_status IN (?)")
             args.append(statuses[0])
+            where.append("NOT EXISTS (SELECT 1 FROM historical_exclusions h "
+                         "WHERE h.kind='analysis' AND (h.record_id=m.source_record_id OR h.record_id=m.source_ref))")
+            where.append("(m.memory_type != 'llm_call' OR NOT EXISTS "
+                         "(SELECT 1 FROM historical_exclusions WHERE kind='policy' AND record_id='trusted_research_only'))")
             # Expired short memory must not leak into normal retrieval even if
             # the maintenance command has not yet archived it.  ``include_non_active``
             # remains available for audit/admin views.

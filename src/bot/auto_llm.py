@@ -1046,6 +1046,7 @@ def load_cached_auto_analysis(
     root: Path,
     *,
     max_age_hours: int = DEFAULT_AGE_HOURS,
+    include_archived: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """讀取仍有效的快取 (None 表示過期或不存在)。"""
     p = _cache_path(ticker, root)
@@ -1056,6 +1057,12 @@ def load_cached_auto_analysis(
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+    if not isinstance(data, dict):
+        return None
+    if not include_archived:
+        from bot.historical_archive import cache_is_trusted
+        if not cache_is_trusted(root, data):
+            return None
     ts = data.get("fetched_at", "")
     if not ts:
         return data
