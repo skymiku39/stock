@@ -1,10 +1,13 @@
 id: us_market_brief
-version: "1.0"
+version: "1.1"
 description: 將當日 (或當夜) 美股表現整合為「對台股供應鏈影響」中文簡報
 model_hint: gemini-2.5-flash
 max_output_tokens: 2500
 temperature: 0.25
 inputs:
+  - name: input_provenance_json
+    required: true
+    desc: 已驗證輸入的來源索引、實際日期與排除原因
   - name: asof_date
     required: true
   - name: indices_json
@@ -23,6 +26,12 @@ output_format: markdown
 template: |
   你是一位專注「美台連動」的機構研究員。請依以下當日美股資料，
   寫一份「{asof_date} 美股盤後 → 台股早盤影響評估」(Markdown 中文簡報)。
+  只能使用以下已驗證輸入，引用 evidence ID 與實際來源日期；資料不足的章節直接標示「資料不足」。
+  不得以自身知識、先前簡報或 excluded 項目補值。沒有供應鏈證據時不得推薦對應台股，
+  沒有已對齊日期的 ADR 溢價時不得推導其開盤偏多偏空訊號。
+
+  ## 輸入證據與排除項目
+  {input_provenance_json}
 
   輸出結構 (請嚴格遵守)：
 

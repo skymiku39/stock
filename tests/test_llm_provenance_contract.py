@@ -26,7 +26,8 @@ def test_same_second_calls_and_pipeline_stages_keep_distinct_records(tmp_path, m
     db = StockDB.open(root=tmp_path)
     try:
         assert len({rec.call_id for rec in records}) == 3
-        assert len(db.list_llm_analysis()) == 3
+        assert len(db.list_llm_analysis(include_archived=True)) == 3
+        assert db.list_llm_analysis() == []  # unverified briefs are audit-only
         assert db.conn.execute("SELECT count(*) FROM llm_runs").fetchone()[0] == 3
         assert db.conn.execute("SELECT count(*) FROM llm_outputs").fetchone()[0] == 3
         assert [r.call_id for r in logger.read()] == [r.call_id for r in records]

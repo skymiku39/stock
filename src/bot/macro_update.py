@@ -22,7 +22,7 @@ from bot.market_macro import (
     load_supply_chain,
     macro_to_dict,
 )
-from bot.utils import get_logger, log_root
+from bot.utils import get_logger, log_root, now_tw
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -78,23 +78,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     data = macro_to_dict(snap)
     sc = load_supply_chain(project_root)
-    raw, info = gemini_call(
-        "us_market_brief",
-        client=client,
-        metadata={"task": "us_market_brief", "source": "cli"},
+    variables = dict(
         asof_date=data.get("asof_date", ""),
         indices_json=json.dumps(data.get("indices", {}), ensure_ascii=False, indent=2),
         stocks_json=json.dumps(data.get("stocks", {}), ensure_ascii=False, indent=2),
         adr_premiums_json=json.dumps(data.get("adr_premiums", []), ensure_ascii=False, indent=2),
         supply_chain_json=json.dumps(sc.get("us_stocks", {}), ensure_ascii=False, indent=2),
     )
+    from bot.pipeline_brief import prepare_brief_metadata
+    metadata = prepare_brief_metadata(root=project_root, task="us_market_brief",
+        run_id="macro-cli:" + snap.fetched_at, variables=variables, macro_snapshot=data)
+    raw, info = gemini_call("us_market_brief", client=client, root=project_root,
+                            metadata=metadata, **variables)
     if not raw:
         logger.warning("LLM 無回應")
         return 1
 
-    out = project_root / "data" / "macro" / f"us_brief_{data.get('asof_date','today')}.md"
+    out = project_root / "data" / "macro" / f"us_brief_{data.get('asof_date','today')}_{now_tw():%H%M%S%f}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(raw, encoding="utf-8")
+    out.with_suffix(".provenance.json").write_text(json.dumps(info.get("input_provenance", metadata), ensure_ascii=False, indent=2), encoding="utf-8")
     mirror_file_to_cloud(out, root=project_root)
     logger.info("簡報已寫入 %s (prompt=%s v%s)", out, info.get("prompt_id"), info.get("prompt_version"))
     return 0

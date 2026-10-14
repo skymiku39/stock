@@ -253,6 +253,10 @@ def gemini_call(
         raise KeyError(f"Prompt 不存在: {prompt_id}")
 
     record_metadata = dict(metadata or {})
+    if prompt_id in {"daily_brief", "us_market_brief"}:
+        from bot.pipeline_brief import validate_brief_call
+        validate_brief_call(root=root or Path.cwd(), task=prompt_id,
+                            variables=vars, metadata=record_metadata)
     # 呼叫端常把 ticker 放在 prompt 變數而非 metadata；在 audit mirror
     # 前自動補上，避免分析歷史失去股票關聯。
     if not record_metadata.get("ticker"):
@@ -267,6 +271,8 @@ def gemini_call(
         "prompt_version": prompt.version,
         "model": client.model,
     }
+    if prompt_id in {"daily_brief", "us_market_brief"}:
+        info["input_provenance"] = record_metadata
 
     try:
         rendered = prompt.render(**vars)
@@ -323,6 +329,8 @@ def gemini_call(
         metadata=record_metadata,
     )
     info["analysis_id"] = analysis_record_id(record)
+    if "input_provenance" in info:
+        info["input_provenance"]["analysis_id"] = info["analysis_id"]
     return text, info
 
 

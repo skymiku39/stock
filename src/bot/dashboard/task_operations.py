@@ -192,9 +192,16 @@ def execute_task(kind, params, root, progress):
         settings = Settings(_env_file=str(root / ".env"))
         client = GeminiClient(settings=settings, model=settings.gemini_model, root=root)
         progress("等待 LLM 產出分析內容")
+        inputs = dict(params["inputs"])
+        metadata = {"task": kind, "source": "dashboard"}
+        if kind == "macro_brief":
+            from bot.pipeline_brief import prepare_brief_metadata
+            metadata = prepare_brief_metadata(root=root, task="us_market_brief",
+                run_id="dashboard:" + dt.datetime.now().isoformat(), variables=inputs,
+                macro_snapshot=params.get("macro_snapshot"))
         raw, info = gemini_call("us_market_brief" if kind == "macro_brief" else kind,
-                                client=client, registry=get_registry(root / "prompts"),
-                                metadata={"task": kind, "source": "dashboard"}, **params["inputs"])
+                                client=client, root=root, registry=get_registry(root / "prompts"),
+                                metadata=metadata, **inputs)
         if not raw:
             raise ValueError("LLM 未產出內容，請查看 LLM 呼叫紀錄")
         path = ""

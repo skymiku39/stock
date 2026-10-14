@@ -2813,6 +2813,12 @@ class StockDB:
         sql = "SELECT * FROM llm_analysis_history WHERE 1=1"
         if not include_archived:
             sql += " AND id NOT IN (SELECT record_id FROM historical_exclusions WHERE kind='analysis')"
+            # Briefs without an input gate receipt remain visible to explicit
+            # historical audits, but cannot enter normal analysis retrieval.
+            sql += (" AND (prompt_id NOT IN ('daily_brief','us_market_brief') OR (quality_status != 'invalid' AND EXISTS ("
+                    "SELECT 1 FROM llm_runs r WHERE json_valid(r.metadata_json) "
+                    "AND json_extract(r.metadata_json,'$.analysis_id')=llm_analysis_history.id "
+                    "AND json_extract(r.metadata_json,'$.input_gate_version')=2)))")
         args: List[Any] = []
         if ticker:
             sql += " AND ticker = ?"
@@ -2823,6 +2829,22 @@ class StockDB:
         sql += " ORDER BY ts DESC LIMIT ?"
         args.append(int(limit))
         rows = self.conn.execute(sql, args).fetchall()
+        if not include_archived:
+            from bot.pipeline_brief import validate_saved_brief
+            eligible = []
+            for row in rows:
+                if row["prompt_id"] in {"daily_brief", "us_market_brief"}:
+                    candidates = self.conn.execute(
+                        "SELECT metadata_json FROM llm_runs WHERE json_valid(metadata_json) "
+                        "AND json_extract(metadata_json,'$.analysis_id')=? AND status='ok'",
+                        (row["id"],),
+                    ).fetchall()
+                    metadata = [json.loads(r[0]) for r in candidates]
+                    if not any(validate_saved_brief(Path(md.get("project_root") or self.path.parent.parent),
+                            row["prompt_id"], md) for md in metadata):
+                        continue
+                eligible.append(row)
+            rows = eligible
         return [_row_to_dc(LlmAnalysisRow, r) for r in rows]
 
     def update_llm_analysis_evidence(

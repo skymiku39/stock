@@ -7411,7 +7411,7 @@ def page_macro() -> None:
             key="macro_brief",
             help=LLM_HINT_DIRECT,
         ):
-            submit_task("macro_brief", "macro_brief", "跨市場 LLM 簡報", "美股 / 跨市場", {"inputs": {
+            submit_task("macro_brief", "macro_brief", "跨市場 LLM 簡報", "美股 / 跨市場", {"macro_snapshot": data, "inputs": {
                 "asof_date": data.get("asof_date", ""),
                 "indices_json": json.dumps(data.get("indices", {}), ensure_ascii=False, indent=2),
                 "stocks_json": json.dumps(data.get("stocks", {}), ensure_ascii=False, indent=2),
@@ -7423,6 +7423,11 @@ def page_macro() -> None:
             st.session_state["us_brief"] = (finished_brief["markdown"], finished_brief["info"])
 
         brief = st.session_state.get("us_brief")
+        if brief:
+            from bot.pipeline_brief import validate_saved_brief
+            if not validate_saved_brief(PROJECT_ROOT, "us_market_brief", brief[1].get("input_provenance", {})):
+                st.info("此份舊簡報的來源證據尚未驗證，請重新產出簡報。")
+                brief = None
         if brief:
             md, info = brief
             st.caption(f"prompt: {info.get('prompt_id', '')} v{info.get('prompt_version','')} "

@@ -122,6 +122,7 @@ class PipelineRun:
     us_brief_md: str = ""
     us_brief_prompt_id: str = ""
     us_brief_prompt_version: str = ""
+    brief_input_metadata: Dict[str, Any] = field(default_factory=dict)
     macro_summary: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -745,6 +746,7 @@ def run_full_pipeline(
                 "us_market_brief", client=client, root=config.project_root,
                 metadata=brief_metadata, **brief_variables,
             )
+            run.brief_input_metadata["us_market_brief"] = info.get("input_provenance", brief_metadata)
             run.us_brief_md = raw or "(LLM 未產出內容)"
             run.us_brief_prompt_id = info.get("prompt_id", "")
             run.us_brief_prompt_version = info.get("prompt_version", "")
@@ -783,12 +785,16 @@ def run_full_pipeline(
             brief_metadata = prepare_brief_metadata(
                 root=config.project_root, task="daily_brief", run_id=run_id,
                 variables=brief_variables, macro_snapshot=macro_snap_dict,
+                latest=latest, previous=prev, chip_summaries=run.chip_summaries,
+                etf_meta=etf_meta, min_consensus=config.min_consensus_for_focus,
             )
-            run.warnings.append("daily_brief: input snapshot saved; upstream market evidence remains unverified")
+            if brief_metadata["excluded_inputs"]:
+                run.warnings.append(f"daily_brief: excluded {len(brief_metadata['excluded_inputs'])} unverifiable inputs; see input receipt")
             raw, info = gemini_call(
                 "daily_brief", client=client, root=config.project_root,
                 metadata=brief_metadata, **brief_variables,
             )
+            run.brief_input_metadata["daily_brief"] = info.get("input_provenance", brief_metadata)
             run.daily_brief_md = raw or "(LLM 未產出內容)"
             run.daily_brief_prompt_id = info.get("prompt_id", "")
             run.daily_brief_prompt_version = info.get("prompt_version", "")
@@ -906,13 +912,13 @@ def load_pipeline_run(root: Path, run_id: str) -> Optional[PipelineRun]:
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        # 缺欄位也能載入
-        for k in PipelineRun.__dataclass_fields__:
-            data.setdefault(k, [] if isinstance(
-                PipelineRun.__dataclass_fields__[k].default_factory(),  # type: ignore[misc]
-                (list, dict),
-            ) else "")
-        return PipelineRun(**{k: data.get(k) for k in PipelineRun.__dataclass_fields__})
+        run = PipelineRun(**{k: data[k] for k in PipelineRun.__dataclass_fields__ if k in data})
+        from bot.pipeline_brief import validate_saved_brief
+        for task, attr in (("daily_brief", "daily_brief_md"), ("us_market_brief", "us_brief_md")):
+            if getattr(run, attr) and not validate_saved_brief(root, task, run.brief_input_metadata.get(task, {})):
+                setattr(run, attr, "")
+                run.warnings.append(f"{task}: unverified historical brief excluded; original file retained")
+        return run
     except Exception:
         return None
 
