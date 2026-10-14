@@ -27,6 +27,7 @@ from bot.canonical_audit import audit_canonical_database
 from bot.research_audit import audit_research_database
 from bot.source_registry import is_source_document_replayable
 from bot.llm_provenance import evidence_ids as normalize_evidence_ids
+from bot.llm_evidence_review import review_plan
 
 
 _TRACKED_TABLES = (
@@ -742,6 +743,10 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
             "registered_content_paths": documents,
             "document_manifest": document_manifest,
             "source_runs_without_documents": source_runs_without_documents,
+            "source_runs_without_documents_by_status": {
+                status: sum(item["status"] == status for item in unresolved_source_runs)
+                for status in sorted({item["status"] for item in unresolved_source_runs})
+            },
             "unresolved_source_runs": unresolved_source_runs,
             "llm_analysis_without_evidence": llm_without_evidence,
             "llm_analysis_legacy_unresolved": llm_legacy_unresolved,
@@ -753,6 +758,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
             "llm_run_provenance": {
                 "counts": llm_provenance["counts"], "by_task": llm_provenance["by_task"],
             },
+            "llm_evidence_review": review_plan(conn),
             "llm_daily_reports_with_unresolved_evidence": daily_reports_with_unresolved_evidence,
             "llm_daily_report_unresolved_evidence_items": daily_report_unresolved_evidence_items,
             "llm_daily_reports_without_evidence": daily_reports_without_evidence,
@@ -1061,7 +1067,7 @@ def audit_project(root: Path) -> Dict[str, Any]:
         },
         "raw_archive": raw_archive,
         "unregistered_raw_files": unregistered_raw[:1000],
-        "known_limits": [
+        "known_limits": ([
             {
                 "code": "legacy_llm_without_provable_evidence",
                 "severity": "info",
@@ -1070,7 +1076,14 @@ def audit_project(root: Path) -> Dict[str, Any]:
                     "已明確標記 legacy_unresolved；保留原文但不冒充有證據鏈。"
                 ),
             }
-        ] if int(db_report.get("llm_analysis_legacy_unresolved") or 0) else [],
+        ] if int(db_report.get("llm_analysis_legacy_unresolved") or 0) else []) + ([{
+            "code": "reviewed_llm_evidence_unresolved",
+            "severity": "info",
+            "message": (
+                f"有 {db_report['llm_evidence_review']['marked']} 筆 LLM 紀錄已標記未驗證；"
+                "保留原文與執行狀態，缺少證據的輸出不可發布。標記不代表補回證據。"
+            ),
+        }] if (db_report.get("llm_evidence_review") or {}).get("marked") else []),
         "gap_count": len(gaps),
         "gaps": gaps,
     }

@@ -239,6 +239,8 @@ def test_auto_research_registers_evidence_and_links_llm_row(tmp_path: Path, monk
     assert rec.metadata["evidence_ids"] == [evidence["id"]]
     assert [item.evidence_id for item in db.list_llm_run_evidence(research_run_id(rec))] == [evidence["id"]]
     assert db.conn.execute("SELECT is_publishable FROM llm_outputs").fetchone()[0] == 0
+    from bot.llm_evidence_review import review_history
+    assert review_history(tmp_path)["unresolved"] == 0
     assert db.list_memory_items(memory_layer="long") == []
     db.close()
 
