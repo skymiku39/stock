@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from bot.llm_log import LlmCallLogger, LlmCallRecord
+from bot.llm_log import LlmCallLogger, LlmCallRecord, research_metadata, research_run_id
 from bot.stock_db import (
     ClaimEvidenceRow,
     ClaimRow,
@@ -95,14 +95,7 @@ def backfill_llm_provenance(
         report["unresolved_evidence"] += len(missing)
         if missing:
             report["unresolved_records"] += 1
-        run_id = str(
-            (record.metadata or {}).get("run_id")
-            or "llm:" + hashlib.sha256(
-                "|".join((record.ts, record.prompt_id,
-                           str((record.metadata or {}).get("task") or ""),
-                           record.input)).encode("utf-8")
-            ).hexdigest()[:24]
-        )
+        run_id = research_run_id(record)
         if not apply:
             continue
         database.upsert_llm_run(LlmRunRow(
@@ -118,7 +111,7 @@ def backfill_llm_provenance(
             output_hash=hashlib.sha256(record.output.encode("utf-8")).hexdigest(),
             error=record.error,
             trace_id=str((record.metadata or {}).get("trace_id") or ""),
-            metadata_json=json.dumps(record.metadata or {}, ensure_ascii=False, default=str),
+            metadata_json=json.dumps(research_metadata(record), ensure_ascii=False, default=str),
         ))
         report["runs_upserted"] += 1
         for ordinal, evidence_id in enumerate(ids):
@@ -167,6 +160,13 @@ def backfill_llm_provenance(
     # not discard those rows: represent them as explicitly unresolved legacy
     # runs, preserving raw_output without inventing evidence links.
     for row in database.list_llm_analysis(limit=limit):
+        # Current calls already have a canonical run; do not create a second
+        # legacy-analysis run for the same JSONL/history record.
+        if database.conn.execute(
+            "SELECT 1 FROM llm_runs WHERE json_valid(metadata_json) "
+            "AND json_extract(metadata_json, '$.analysis_id') = ? LIMIT 1", (row.id,),
+        ).fetchone():
+            continue
         report["legacy_records"] += 1
         run_id = f"legacy-analysis:{row.id}"
         try:

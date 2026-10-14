@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -40,13 +41,34 @@ class LlmCallRecord:
     success: bool = True
     error: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    call_id: str = ""
 
 
 def analysis_record_id(record: LlmCallRecord) -> str:
     """回傳與 ``llm_analysis_history.id`` 相同的穩定識別。"""
     metadata = record.metadata or {}
     ticker = str(metadata.get("ticker") or metadata.get("symbol") or "")
-    return f"{record.ts}_{record.prompt_id}_{ticker or 'NA'}"
+    return f"{record.call_id or record.ts}_{record.prompt_id}_{ticker or 'NA'}"
+
+
+def research_run_id(record: LlmCallRecord) -> str:
+    """New calls have their own identity; replay preserves historical IDs."""
+    if record.call_id:
+        return f"llm:{record.call_id}"
+    md = record.metadata or {}
+    return str(md.get("run_id") or "llm:" + hashlib.sha256(
+        "|".join((record.ts, record.prompt_id, str(md.get("task") or ""), record.input)).encode("utf-8")
+    ).hexdigest()[:24])
+
+
+def research_metadata(record: LlmCallRecord) -> Dict[str, Any]:
+    md = dict(record.metadata or {})
+    md["analysis_id"] = analysis_record_id(record)
+    if record.call_id:
+        md["call_id"] = record.call_id
+        if md.get("run_id"):
+            md["pipeline_run_id"] = md.pop("run_id")
+    return md
 
 
 class LlmCallLogger:
@@ -108,7 +130,8 @@ class LlmCallLogger:
             tokens_out=tokens_out,
             success=success,
             error=error,
-            metadata=metadata or {},
+            metadata=dict(metadata or {}),
+            call_id=uuid.uuid4().hex,
         )
         path = self._path_for(ts)
         try:
@@ -307,9 +330,7 @@ def _mirror_to_stock_db(
         rec=rec,
         parsed=parsed if isinstance(parsed, dict) else {},
         evidence_ids=row.evidence_json,
-        run_id=str(md.get("run_id") or "llm:" + hashlib.sha256(
-            "|".join((rec.ts, rec.prompt_id, str(md.get("task") or ""), rec.input)).encode("utf-8")
-        ).hexdigest()[:24]),
+        run_id=research_run_id(rec),
     )
     # 完整 prompt/output 另外落到短期記憶；失敗呼叫仍保存，但搜尋層會排除
     # failed/invalid，避免錯誤輸出污染長期研究上下文。
@@ -337,7 +358,7 @@ def _persist_research_llm_run(
     """
     from bot.stock_db import LlmOutputRow, LlmRunEvidenceRow, LlmRunRow
 
-    md = rec.metadata or {}
+    md = research_metadata(rec)
     status = "ok" if rec.success else "failed"
     finished = rec.ts
     db.upsert_llm_run(LlmRunRow(
@@ -414,4 +435,4 @@ def get_call_logger(
     return _logger_instance
 
 
-__all__ = ["LlmCallLogger", "LlmCallRecord", "analysis_record_id", "get_call_logger"]
+__all__ = ["LlmCallLogger", "LlmCallRecord", "analysis_record_id", "research_run_id", "get_call_logger"]
