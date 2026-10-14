@@ -46,9 +46,6 @@ def commit_registration(db: StockDB, receipt_id: str, row: SourceDocumentRow,
     A receipt acknowledges registration, not successful parsing or ingestion.
     """
     with db.transaction() as conn:
-        if conn.execute("SELECT 1 FROM source_registration_receipts WHERE receipt_id=?",
-                        (receipt_id,)).fetchone():
-            return
         existing = db.get_source_document(row.document_id)
         if existing and existing.content_hash != row.content_hash:
             raise ValueError("manifest hash conflict")
@@ -74,7 +71,7 @@ def commit_registration(db: StockDB, receipt_id: str, row: SourceDocumentRow,
                     ids.append(row.document_id)
                 conn.execute(f"UPDATE {table} SET {column}=? WHERE run_id=?",
                              (json.dumps(metadata, ensure_ascii=False), run_id))
-        conn.execute("INSERT INTO source_registration_receipts VALUES (?,?,?)",
+        conn.execute("INSERT OR IGNORE INTO source_registration_receipts VALUES (?,?,?)",
                      (receipt_id, row.document_id, row.ingestion_run_id))
 
 
@@ -90,6 +87,7 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
               "unresolved_raw": [], "policy": "exact_receipt_and_hash_only"}
     provable_paths: set[str] = set()
     candidates = []
+    absent_documents = set()
     try:
         for receipt in sorted((root / "data" / "source_registration_receipts").glob("*.json")):
             item = {"receipt_id": receipt.stem, "state": "unresolved"}
@@ -123,15 +121,26 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
                     raise ValueError("manifest hash conflict")
                 provable_paths.add(row.content_path.replace("\\", "/"))
                 item.update(document_id=row.document_id, ingestion_run_id=row.ingestion_run_id,
-                            state="registered" if receipt.stem in acknowledged else "recoverable")
+                            state="registered" if receipt.stem in acknowledged and existing else "recoverable")
                 if item["state"] == "recoverable":
                     candidates.append((item, row))
+                    if not existing:
+                        absent_documents.add(row.document_id)
             except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as exc:
                 item["reason"] = str(exc)
             report["receipts"].append(item)
     finally:
         if conn:
             conn.close()
+    # Multiple original attempts for an absent manifest cannot be ordered by
+    # filename/hash. Keep all receipts and require an explicit resolution.
+    ambiguous = {doc_id for doc_id in absent_documents
+                 if sum(row.document_id == doc_id for _, row in candidates) > 1}
+    for item, row in candidates:
+        if row.document_id in ambiguous:
+            item.update(state="unresolved", reason="multiple original registrations for absent manifest")
+            provable_paths.discard(row.content_path.replace("\\", "/"))
+    candidates = [(item, row) for item, row in candidates if item["state"] == "recoverable"]
     if apply and candidates:
         db = StockDB.open(root=root)
         try:

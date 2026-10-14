@@ -102,3 +102,30 @@ def test_replay_does_not_overwrite_newer_manifest(tmp_path, monkeypatch):
     assert recover_registrations(tmp_path, apply=True)["applied"] == 1
     assert db.get_source_document(doc.document_id).as_of == "2026-01-01"
     db.close()
+
+
+def test_receipt_failure_prevents_raw_publication(tmp_path, monkeypatch):
+    db = StockDB.open(root=tmp_path)
+    def fail(*args):
+        raise OSError("receipt disk full")
+    monkeypatch.setattr("bot.source_recovery.write_receipt", fail)
+    with pytest.raises(OSError):
+        SourceRegistry(tmp_path, db).register_document("fixture", b"raw")
+    assert not list((tmp_path / "data" / "raw").rglob("*.bin"))
+    assert db.list_source_documents() == []
+    db.close()
+
+
+def test_conflicting_pending_receipts_never_choose_a_date_by_hash_order(tmp_path, monkeypatch):
+    db = StockDB.open(root=tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "upsert_source_document", lambda row: (_ for _ in ()).throw(ValueError("fail")))
+        for date in ("2020-01-01", "2026-01-01"):
+            with pytest.raises(ValueError):
+                SourceRegistry(tmp_path, db).register_document("fixture", b"raw", as_of=date)
+    report = recover_registrations(tmp_path, apply=True)
+    assert report["applied"] == 0
+    assert len(report["unresolved_raw"]) == 1
+    assert all(row["state"] == "unresolved" for row in report["receipts"])
+    assert db.list_source_documents() == []
+    db.close()
