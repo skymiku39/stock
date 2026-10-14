@@ -145,7 +145,7 @@ def test_ticker_task_defaults_remain_local_only(monkeypatch, tmp_path):
 
 def test_ticker_job_persists_numpy_values_from_technical_calculations(monkeypatch, tmp_path):
     import numpy as np
-    from bot.dashboard.task_operations import restore_cards
+    from bot.dashboard.task_operations import execute_task, restore_cards
     from bot.ticker_view import TickerSnapshot
     from bot.technicals import TechnicalSnapshot
 
@@ -154,7 +154,7 @@ def test_ticker_job_persists_numpy_values_from_technical_calculations(monkeypatc
         technicals=TechnicalSnapshot(ticker="2330", candle_bias=np.bool_(True)),
     )
     monkeypatch.setattr("bot.ticker_view.build_snapshot", lambda *a, **k: snapshot)
-    worker = TaskService(tmp_path)
+    worker = TaskService(tmp_path, execute_task)
     try:
         task_id = worker.submit("ticker", "分析", "個股深入分析", {"tickers": ["2330"]})
         task = wait_for(worker, task_id)
@@ -182,11 +182,12 @@ def test_supervisor_accepts_result_from_reloaded_module(tmp_path):
     from types import FunctionType
 
     old_result = make_dataclass("TaskResult", ["data"])
-    old_globals = {**TaskService._run.__globals__, "TaskResult": old_result}
-    stale_run = FunctionType(TaskService._run.__code__, old_globals)
+    old_globals = {**TaskService._execute.__globals__, "TaskResult": old_result}
+    stale_execute = FunctionType(TaskService._execute.__code__, old_globals)
     service = TaskService(tmp_path, lambda *args: TaskResult({"price": 2540}), start=False)
     task_id = service.submit("ticker", "分析", "個股深入分析", {})
-    stale_run(service, service._claim())
+    task = service._claim()
+    service._finish(task, *stale_execute(service, task))
     row = service.get(task_id)
     assert row["state"] == "succeeded", row["error"]
     assert row["result"]["data"] == {"price": 2540}

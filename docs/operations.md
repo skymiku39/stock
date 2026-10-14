@@ -6,6 +6,15 @@ Windows 常駐排程與 Task Scheduler 設定請見 [automation-plan.md](automat
 逾時會終止該任務的子行程樹、釋放任務鎖並記錄 exit code 124；完成前已提交的資料不會自動回滾。
 盤中長駐 monitor 有獨立啟停生命週期，不套用這個單次任務上限。
 
+Dashboard 背景任務另由 `DASHBOARD_TASK_TIMEOUT_SECONDS` 限制，預設 3600 秒且必須大於 0。
+每個任務在獨立子程序執行；逾時會先終止該程序樹，再將任務標記 `timed_out` 並繼續佇列。
+可在任務中心查看原因及手動重試，不會自動重跑 LLM。服務正常關閉會終止執行中的工作並標記
+`interrupted`；服務意外退出時，工作程序透過父程序連線中斷停止，狀態由心跳租約恢復。
+已提交的資料不會回滾，外部服務可能已處理請求；重試前請先確認結果。
+各任務程序的輸出保存在 `logs/dashboard_tasks/<task-id>.log`。
+若無法確認程序終止，任務會標記 `termination_failed` 並阻擋後續執行，重新啟動也不會解除。
+此時先由維護者依錯誤中的 PID 確認程序樹已停止，再修復該任務狀態；不要直接重試或清空佇列。
+
 `data/scheduler_status.json` 的 `heartbeat_at` 只表示排程器存活。檢查實際成果請看
 `jobs.<任務>.state`、`exit_code`、`started_at`、`finished_at`、`last_success_at` 與 `log_path`。
 狀態分為 `running`、`succeeded`、`failed`、`timed_out`、`interrupted`、`dry_run`；

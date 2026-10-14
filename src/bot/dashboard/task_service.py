@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -31,11 +35,20 @@ class TaskResult:
 
 
 class TaskService:
-    def __init__(self, root: Path, execute: Callable | None = None, *, start: bool = True):
+    def __init__(self, root: Path, execute: Callable | None = None, *, start: bool = True,
+                 timeout_seconds: float | None = None):
         self.root = Path(root).resolve()
+        if timeout_seconds is None:
+            from bot.config import Settings
+            timeout_seconds = Settings(_env_file=str(self.root / ".env")).dashboard_task_timeout_seconds
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("Dashboard task timeout must be positive and finite")
+        self.timeout_seconds = timeout_seconds
         self.path = self.root / "data" / "dashboard_tasks.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.owner = uuid.uuid4().hex
+        # In-process execution is a test hook only. Production always uses the
+        # bounded worker process so timed-out code cannot continue writing.
         self.execute = execute
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -83,12 +96,12 @@ class TaskService:
             db.execute("BEGIN IMMEDIATE")
             self._recover(db, now)
             existing = db.execute(
-                "SELECT id FROM tasks WHERE fingerprint=? AND state IN ('queued','running')",
+                "SELECT id FROM tasks WHERE fingerprint=? AND state IN ('queued','running','termination_failed')",
                 (fingerprint,),
             ).fetchone()
             if existing:
                 return existing["id"]
-            if db.execute("SELECT count(*) FROM tasks WHERE state IN ('queued','running')").fetchone()[0] >= 20:
+            if db.execute("SELECT count(*) FROM tasks WHERE state IN ('queued','running','termination_failed')").fetchone()[0] >= 20:
                 raise ValueError("目前已有 20 個待處理任務，請等候完成再送出。")
             task_id = uuid.uuid4().hex
             db.execute(
@@ -145,7 +158,7 @@ class TaskService:
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
             self._recover(db, now)
-            if db.execute("SELECT 1 FROM tasks WHERE state='running'").fetchone():
+            if db.execute("SELECT 1 FROM tasks WHERE state IN ('running','termination_failed')").fetchone():
                 return None
             row = db.execute("SELECT * FROM tasks WHERE state='queued' ORDER BY created LIMIT 1").fetchone()
             if row is None:
@@ -164,6 +177,9 @@ class TaskService:
             )
 
     def _run(self, task: dict):
+        self._finish(task, *self._execute(task))
+
+    def _execute(self, task: dict):
         try:
             execute = self.execute
             if execute is None:
@@ -186,6 +202,9 @@ class TaskService:
         except Exception as exc:
             state, encoded = "failed", None
             message, error = "執行失敗，可查看原因後重試", f"{type(exc).__name__}: {exc}"
+        return state, encoded, message, error
+
+    def _finish(self, task, state, encoded, message, error):
         with self._connect() as db:
             db.execute(
                 "UPDATE tasks SET state=?,result=?,message=?,error=?,finished=?,progress=? "
@@ -194,6 +213,45 @@ class TaskService:
                  task["id"], self.owner),
             )
 
+    def _worker_command(self, task, result_path):
+        return [sys.executable, "-B", "-m", "bot.dashboard.task_worker",
+                "--root", str(self.root), "--task-id", task["id"],
+                "--owner", self.owner, "--result", str(result_path)]
+
+    def _run_process(self, task):
+        from bot.job_process import ProcessCancelled, ProcessTerminationError, run_with_deadline
+
+        log_dir = self.root / "logs" / "dashboard_tasks"
+        result_path = self.path.parent / f".task-result-{task['id']}-{self.owner}.json"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / f"{task['id']}.log").open("w", encoding="utf-8") as log:
+                code = run_with_deadline(
+                    self._worker_command(task, result_path), cwd=self.root,
+                    env={**os.environ, "PYTHONUTF8": "1"}, stdout=log,
+                    timeout=self.timeout_seconds, cancel_event=self._stop, guard_parent=True,
+                )
+            if code != 0:
+                raise RuntimeError(f"Worker exited with code {code}; see logs/dashboard_tasks/{task['id']}.log")
+            outcome = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(outcome, list) or len(outcome) != 4 or outcome[0] not in ("succeeded", "partial", "failed"):
+                raise ValueError("Invalid worker result")
+        except subprocess.TimeoutExpired:
+            outcome = ("timed_out", None, "任務逾時，請確認結果後手動重試",
+                       f"超過 {self.timeout_seconds:g} 秒執行上限；工作程序已終止，已提交資料未回滾")
+        except ProcessCancelled:
+            outcome = ("interrupted", None, "服務已停止，請確認結果後手動重試", "工作程序已終止，已提交資料未回滾")
+        except ProcessTerminationError as exc:
+            outcome = ("termination_failed", None, "無法確認工作程序已終止，佇列暫停，請人工處理", str(exc))
+        except Exception as exc:
+            outcome = ("failed", None, "執行失敗，可查看原因後重試", f"{type(exc).__name__}: {exc}")
+        finally:
+            try:
+                result_path.unlink(missing_ok=True)
+            except OSError:
+                pass  # A leftover result file must not hide the terminal state.
+        self._finish(task, *outcome)
+
     def _loop(self):
         worker = None
         task = None
@@ -201,27 +259,36 @@ class TaskService:
             try:
                 if worker is not None and worker.is_alive():
                     with self._connect() as db:
-                        db.execute(
+                        updated = db.execute(
                             "UPDATE tasks SET heartbeat=? WHERE id=? AND owner=? AND state='running'",
                             (time.time(), task["id"], self.owner),
-                        )
+                        ).rowcount
+                    if not updated:
+                        # Another owner recovered the lease. Stop our child
+                        # instead of letting a stale worker keep mutating data.
+                        current = self.get(task["id"])
+                        if current is None or current["owner"] != self.owner or current["state"] == "interrupted":
+                            self._stop.set()
                 else:
                     task = self._claim()
                     if task:
-                        worker = threading.Thread(target=self._run, args=(task,), daemon=True)
+                        target = self._run if self.execute is not None else self._run_process
+                        worker = threading.Thread(target=target, args=(task,), daemon=True)
                         worker.start()
             except sqlite3.Error:
                 # A transient lock must not silently kill the queue supervisor.
                 pass
             self._wake.wait(1)
             self._wake.clear()
+        if worker is not None:
+            worker.join(timeout=20 if self.execute is None else 3)
 
     def close(self):
-        """Stop the supervisor (tests / server shutdown); never pretend work was cancelled."""
+        """Stop owned work before releasing the queue; never retry it automatically."""
         self._stop.set()
         self._wake.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=22)
 
 
 @lru_cache(maxsize=None)

@@ -615,6 +615,14 @@ class GoogleSheetSync:
                 table, columns, repair_header=False,
             )
             remote_header, remote_raw = self._worksheet_to_rows(ws)
+            # Header lookup and data fetch are separate remote requests. Validate
+            # the schema of the rows we will actually merge before any writes.
+            if remote_header and remote_header != columns and not (
+                table == "watchlist" and remote_header == columns[:6]
+            ):
+                raise ValueError(f"worksheet {table} 欄位不符；為保護資料，拒絕同步")
+            if not remote_header and remote_raw:
+                raise ValueError(f"worksheet {table} 缺少欄位；為保護資料，拒絕同步")
             remote_rows = [_coerce_row(table, columns, row) for row in remote_raw]
             local_rows = self.db.fetch_all_rows(table)
             safe_remote_rows = _sanitize_remote_rows(table, local_rows, remote_rows)
