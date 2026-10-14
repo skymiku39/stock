@@ -37,6 +37,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1585,22 +1586,27 @@ class StockDB:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """簡單 BEGIN/COMMIT 包裝。"""
+        """Atomic writes; nested DAO calls use savepoints in the outer transaction."""
         # Keep connection creation inside the lock as well.  _connect() sets
         # journal_mode=WAL, which is itself a SQLite write-like operation and
         # can briefly contend with another connection during startup.
         with self._path_lock:
             c = self.conn
             began = False
+            savepoint = "dao_" + uuid.uuid4().hex if c.in_transaction else ""
             try:
-                c.execute("BEGIN")
+                c.execute(f"SAVEPOINT {savepoint}" if savepoint else "BEGIN")
                 began = True
                 yield c
-                c.execute("COMMIT")
+                c.execute(f"RELEASE SAVEPOINT {savepoint}" if savepoint else "COMMIT")
             except Exception:
                 if began:
                     try:
-                        c.execute("ROLLBACK")
+                        if savepoint:
+                            c.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                            c.execute(f"RELEASE SAVEPOINT {savepoint}")
+                        else:
+                            c.execute("ROLLBACK")
                     except sqlite3.Error:
                         pass
                 raise

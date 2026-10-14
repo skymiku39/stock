@@ -1009,75 +1009,73 @@ class AskEngine:
         """把通過驗證的回答、claims 與來源關聯寫入 relational layer。"""
         if not isinstance(payload, dict) or not verification.valid:
             return
-        now = now_tw().isoformat(timespec="seconds")
-        run_id = plan.trace_id
-        self.db.upsert_llm_run(LlmRunRow(
-            run_id=run_id,
-            task_type="ask_answer",
-            model=getattr(self.client, "model", "") if self.client else "",
-            prompt_id="ask_answer",
-            prompt_version="1.1",
-            started_at=now,
-            finished_at=now,
-            status="verified",
-            input_hash=hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
-            output_hash=hashlib.sha256(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            ).hexdigest(),
-            trace_id=plan.trace_id,
-            metadata_json=json.dumps({"plan_id": plan.plan_id}, ensure_ascii=False),
-        ))
-        for ordinal, evidence_id in enumerate(verification.cited_evidence_ids):
-            try:
+        if not verification.cited_evidence_ids:
+            raise ValueError("Verified answer has no cited evidence")
+        with self.db.transaction():
+            now = now_tw().isoformat(timespec="seconds")
+            run_id = plan.trace_id
+            self.db.upsert_llm_run(LlmRunRow(
+                run_id=run_id,
+                task_type="ask_answer",
+                model=getattr(self.client, "model", "") if self.client else "",
+                prompt_id="ask_answer",
+                prompt_version="1.1",
+                started_at=now,
+                finished_at=now,
+                status="verified",
+                input_hash=hashlib.sha256(plan.query.encode("utf-8")).hexdigest(),
+                output_hash=hashlib.sha256(
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+                trace_id=plan.trace_id,
+                metadata_json=json.dumps({"plan_id": plan.plan_id}, ensure_ascii=False),
+            ))
+            for ordinal, evidence_id in enumerate(verification.cited_evidence_ids):
                 self.db.link_llm_run_evidence(LlmRunEvidenceRow(
                     run_id=run_id, evidence_id=evidence_id, ordinal=ordinal,
                 ))
-            except Exception:
-                continue
-        self.db.upsert_llm_output(LlmOutputRow(
-            output_id=f"{run_id}:output",
-            run_id=run_id,
-            output_format="json",
-            structured_json=json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            markdown=str(payload.get("answer") or "")[:20_000],
-            confidence=float(payload.get("confidence") or 0.0),
-            limitation=str(payload.get("uncertainty") or "")[:4000],
-            is_publishable=1,
-        ))
-        claims = payload.get("claims") if isinstance(payload.get("claims"), list) else []
-        for index, claim in enumerate(claims):
-            if not isinstance(claim, dict):
-                continue
-            claim_id = f"{run_id}:claim:{index}"
-            try:
-                claim_confidence = float(
-                    claim.get("confidence") or payload.get("confidence") or 0.0
-                )
-            except (TypeError, ValueError):
-                claim_confidence = 0.0
-            claim_evidence_ids = claim.get("evidence_ids")
-            if not isinstance(claim_evidence_ids, list):
-                claim_evidence_ids = verification.cited_evidence_ids
-            self.db.upsert_claim(ClaimRow(
-                claim_id=claim_id,
+            self.db.upsert_llm_output(LlmOutputRow(
+                output_id=f"{run_id}:output",
                 run_id=run_id,
-                text=str(claim.get("text") or claim.get("statement") or ""),
-                claim_type=str(claim.get("type") or "fact"),
-                confidence=claim_confidence,
-                status="verified",
-                uncertainty=str(claim.get("uncertainty") or ""),
-                created_at=now,
-                updated_at=now,
+                output_format="json",
+                structured_json=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                markdown=str(payload.get("answer") or "")[:20_000],
+                confidence=float(payload.get("confidence") or 0.0),
+                limitation=str(payload.get("uncertainty") or "")[:4000],
+                is_publishable=1,
             ))
-            for ordinal, evidence_id in enumerate(claim_evidence_ids):
+            claims = payload.get("claims") if isinstance(payload.get("claims"), list) else []
+            for index, claim in enumerate(claims):
+                if not isinstance(claim, dict):
+                    continue
+                claim_id = f"{run_id}:claim:{index}"
                 try:
+                    claim_confidence = float(
+                        claim.get("confidence") or payload.get("confidence") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    claim_confidence = 0.0
+                claim_evidence_ids = claim.get("evidence_ids")
+                if not isinstance(claim_evidence_ids, list):
+                    claim_evidence_ids = verification.cited_evidence_ids
+                self.db.upsert_claim(ClaimRow(
+                    claim_id=claim_id,
+                    run_id=run_id,
+                    text=str(claim.get("text") or claim.get("statement") or ""),
+                    claim_type=str(claim.get("type") or "fact"),
+                    confidence=claim_confidence,
+                    status="verified",
+                    uncertainty=str(claim.get("uncertainty") or ""),
+                    created_at=now,
+                    updated_at=now,
+                ))
+                for ordinal, evidence_id in enumerate(claim_evidence_ids):
                     self.db.link_claim_evidence(ClaimEvidenceRow(
                         claim_id=claim_id,
                         evidence_id=str(evidence_id),
                         ordinal=ordinal,
                     ))
-                except Exception:
-                    continue
+
 
     def follow_up(self, trace_id: str) -> EvidencePack:
         """沿用原 trace 與 QueryPlan，再收集待取得來源。"""

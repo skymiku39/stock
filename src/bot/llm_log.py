@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from bot.utils import get_logger, mk_folder, now_tw
+from bot.llm_provenance import evidence_ids as normalize_evidence_ids, evidence_receipt
 
 
 @dataclass
@@ -220,6 +221,8 @@ def _mirror_to_stock_db(
     *,
     logger: logging.Logger,
     root: Optional[Path] = None,
+    db: Any = None,
+    mirror_memory: bool = True,
 ) -> None:
     """把單筆 LLM 呼叫鏡像到 stock_db.llm_analysis_history。
 
@@ -229,9 +232,6 @@ def _mirror_to_stock_db(
     try:
         from bot.stock_db import (
             LlmAnalysisRow,
-            LlmOutputRow,
-            LlmRunEvidenceRow,
-            LlmRunRow,
             get_db,
         )
     except Exception:
@@ -309,10 +309,7 @@ def _mirror_to_stock_db(
         error=str(rec.error or "")[:1000],
         source=str(md.get("task") or md.get("source") or "llm_call"),
         evidence_json=json.dumps(
-            list(dict.fromkeys(
-                str(value) for value in (md.get("evidence_ids") or [])
-                if str(value).strip()
-            )),
+            normalize_evidence_ids(md.get("evidence_ids")),
             ensure_ascii=False,
         ),
         source_record_id=str(
@@ -323,17 +320,18 @@ def _mirror_to_stock_db(
     mirror_root = root
     if mirror_root is None and metadata_root:
         mirror_root = Path(str(metadata_root))
-    db = get_db(root=mirror_root)
-    db.upsert_llm_analysis(row)
+    db = db if db is not None else get_db(root=mirror_root)
     _persist_research_llm_run(
         db,
         rec=rec,
         parsed=parsed if isinstance(parsed, dict) else {},
-        evidence_ids=row.evidence_json,
         run_id=research_run_id(rec),
+        analysis=row,
     )
     # 完整 prompt/output 另外落到短期記憶；失敗呼叫仍保存，但搜尋層會排除
     # failed/invalid，避免錯誤輸出污染長期研究上下文。
+    if not mirror_memory:
+        return
     try:
         from bot.memory_store import MemoryStore
 
@@ -347,8 +345,8 @@ def _persist_research_llm_run(
     *,
     rec: LlmCallRecord,
     parsed: Dict[str, Any],
-    evidence_ids: str,
     run_id: str,
+    analysis: Any = None,
 ) -> None:
     """Best-effort mirror into the relational research layer.
 
@@ -358,51 +356,54 @@ def _persist_research_llm_run(
     """
     from bot.stock_db import LlmOutputRow, LlmRunEvidenceRow, LlmRunRow
 
-    md = research_metadata(rec)
-    status = "ok" if rec.success else "failed"
-    finished = rec.ts
-    db.upsert_llm_run(LlmRunRow(
-        run_id=run_id,
-        task_type=str(md.get("task") or rec.prompt_id),
-        model=rec.model,
-        prompt_id=rec.prompt_id,
-        prompt_version=rec.prompt_version,
-        started_at=rec.ts,
-        finished_at=finished,
-        status=status,
-        input_hash=hashlib.sha256((rec.input or "").encode("utf-8")).hexdigest(),
-        output_hash=hashlib.sha256((rec.output or "").encode("utf-8")).hexdigest(),
-        error=str(rec.error or "")[:2000],
-        trace_id=str(md.get("trace_id") or ""),
-        metadata_json=json.dumps(md, ensure_ascii=False, default=str),
-    ))
-    try:
-        ids = json.loads(evidence_ids or "[]")
-    except Exception:
-        ids = []
-    for ordinal, evidence_id in enumerate(ids if isinstance(ids, list) else []):
-        try:
+    with db.transaction():
+        if analysis is not None:
+            existing = db.conn.execute("SELECT 1 FROM llm_analysis_history WHERE id = ?", (analysis.id,)).fetchone()
+            if rec.call_id or not existing:
+                db.upsert_llm_analysis(analysis)
+        md = research_metadata(rec)
+        receipt = evidence_receipt(db, md, rec.prompt_id)
+        md["input_evidence"] = receipt
+        status = "ok" if rec.success else "failed"
+        finished = rec.ts
+        db.upsert_llm_run(LlmRunRow(
+            run_id=run_id,
+            task_type=str(md.get("task") or rec.prompt_id),
+            model=rec.model,
+            prompt_id=rec.prompt_id,
+            prompt_version=rec.prompt_version,
+            started_at=rec.ts,
+            finished_at=finished,
+            status=status,
+            input_hash=hashlib.sha256((rec.input or "").encode("utf-8")).hexdigest(),
+            output_hash=hashlib.sha256((rec.output or "").encode("utf-8")).hexdigest(),
+            error=str(rec.error or "")[:2000],
+            trace_id=str(md.get("trace_id") or ""),
+            metadata_json=json.dumps(md, ensure_ascii=False, default=str),
+        ))
+        # Known missing IDs stay in the receipt. Unexpected write failures must
+        # abort the entire record, leaving the JSONL available for exact replay.
+        db.conn.execute("DELETE FROM llm_run_evidence WHERE run_id = ?", (run_id,))
+        for ordinal, evidence_id in enumerate(receipt["linked_ids"]):
             db.link_llm_run_evidence(LlmRunEvidenceRow(
-                run_id=run_id, evidence_id=str(evidence_id), ordinal=ordinal,
+                run_id=run_id, evidence_id=evidence_id, ordinal=ordinal,
             ))
-        except Exception:
-            # Keep the run auditable; unresolved evidence is handled by audit.
-            continue
-    structured = json.dumps(parsed, ensure_ascii=False, default=str)
-    try:
-        output_confidence = float(parsed.get("confidence") or 0.0) if parsed else 0.0
-    except (TypeError, ValueError):
-        output_confidence = 0.0
-    db.upsert_llm_output(LlmOutputRow(
-        output_id=f"{run_id}:output",
-        run_id=run_id,
-        output_format="json" if parsed else "text",
-        structured_json=structured,
-        markdown=str(parsed.get("answer") or parsed.get("summary") or rec.output or "")[:20_000],
-        confidence=output_confidence,
-        limitation=str(parsed.get("uncertainty") or parsed.get("limitation") or "")[:4000],
-        is_publishable=1 if rec.success and parsed else 0,
-    ))
+        structured = json.dumps(parsed, ensure_ascii=False, default=str)
+        try:
+            output_confidence = float(parsed.get("confidence") or 0.0) if parsed else 0.0
+        except (TypeError, ValueError):
+            output_confidence = 0.0
+        db.upsert_llm_output(LlmOutputRow(
+            output_id=f"{run_id}:output",
+            run_id=run_id,
+            output_format="json" if parsed else "text",
+            structured_json=structured,
+            markdown=str(parsed.get("answer") or parsed.get("summary") or rec.output or "")[:20_000],
+            confidence=output_confidence,
+            limitation=(str(parsed.get("uncertainty") or parsed.get("limitation") or "")
+                        + f"\nInput evidence: {receipt['state']}; output has not passed business verification.")[:4000],
+            is_publishable=0,
+        ))
 
 
 # ----------------------------------------------------------------------

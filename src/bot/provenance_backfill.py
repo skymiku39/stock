@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from bot.llm_log import LlmCallLogger, LlmCallRecord, research_metadata, research_run_id
+from bot.llm_log import LlmCallLogger, LlmCallRecord, _mirror_to_stock_db, research_run_id
+from bot.llm_provenance import evidence_ids as normalize_evidence_ids
 from bot.stock_db import (
     ClaimEvidenceRow,
     ClaimRow,
@@ -45,15 +47,8 @@ def _parse_output(text: str) -> Dict[str, Any]:
 
 
 def _evidence_ids(record: LlmCallRecord, parsed: Dict[str, Any]) -> list[str]:
-    values: list[Any] = []
-    md = record.metadata or {}
-    for value in (md.get("evidence_ids") or [], parsed.get("evidence_ids") or []):
-        values.extend([value] if isinstance(value, str) else value)
-    for claim in parsed.get("claims") or []:
-        if isinstance(claim, dict):
-            claim_values = claim.get("evidence_ids") or []
-            values.extend([claim_values] if isinstance(claim_values, str) else claim_values)
-    return list(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))
+    # Model output is not proof of which sources were supplied to the call.
+    return normalize_evidence_ids((record.metadata or {}).get("evidence_ids"))
 
 
 def _confidence(value: Any) -> float:
@@ -98,63 +93,33 @@ def backfill_llm_provenance(
         run_id = research_run_id(record)
         if not apply:
             continue
-        database.upsert_llm_run(LlmRunRow(
-            run_id=run_id,
-            task_type=str((record.metadata or {}).get("task") or record.prompt_id),
-            model=record.model,
-            prompt_id=record.prompt_id,
-            prompt_version=record.prompt_version,
-            started_at=record.ts,
-            finished_at=record.ts,
-            status="ok" if record.success else "failed",
-            input_hash=hashlib.sha256(record.input.encode("utf-8")).hexdigest(),
-            output_hash=hashlib.sha256(record.output.encode("utf-8")).hexdigest(),
-            error=record.error,
-            trace_id=str((record.metadata or {}).get("trace_id") or ""),
-            metadata_json=json.dumps(research_metadata(record), ensure_ascii=False, default=str),
-        ))
-        report["runs_upserted"] += 1
-        for ordinal, evidence_id in enumerate(ids):
-            if evidence_id in missing:
-                continue
-            database.link_llm_run_evidence(LlmRunEvidenceRow(
-                run_id=run_id, evidence_id=evidence_id, ordinal=ordinal,
-            ))
-            report["evidence_links"] += 1
-        database.upsert_llm_output(LlmOutputRow(
-            output_id=f"{run_id}:output",
-            run_id=run_id,
-            output_format="json" if parsed else "text",
-            structured_json=json.dumps(parsed, ensure_ascii=False),
-            markdown=str(parsed.get("answer") or parsed.get("summary") or record.output)[:20_000],
-            confidence=_confidence(parsed.get("confidence")),
-            limitation=str(parsed.get("uncertainty") or "")[:4000],
-            # 可發布至少要有一筆 JSONL 明確列出的、且可解析的 exact evidence。
-            is_publishable=1 if record.success and ids and not missing and parsed else 0,
-        ))
-        report["outputs_upserted"] += 1
-        claims = parsed.get("claims") if isinstance(parsed.get("claims"), list) else []
-        for claim_index, claim in enumerate(claims):
-            if not isinstance(claim, dict):
-                continue
-            claim_id = f"{run_id}:claim:{claim_index}"
-            claim_ids = [str(v) for v in claim.get("evidence_ids") or []]
-            database.upsert_claim(ClaimRow(
-                claim_id=claim_id,
-                run_id=run_id,
-                text=str(claim.get("text") or claim.get("statement") or ""),
-                claim_type=str(claim.get("type") or "fact"),
-                confidence=_confidence(claim.get("confidence") or parsed.get("confidence")),
-                status="verified" if claim_ids and not any(v in missing for v in claim_ids) else "unverified",
-                uncertainty=str(claim.get("uncertainty") or ""),
-            ))
-            report["claims_upserted"] += 1
-            for ordinal, evidence_id in enumerate(claim_ids):
-                if evidence_id in missing or database.get_evidence(evidence_id) is None:
+        with database.transaction():
+            _mirror_to_stock_db(record, logger=logging.getLogger(__name__), root=Path(root),
+                                db=database, mirror_memory=False)
+            claims = parsed.get("claims") if isinstance(parsed.get("claims"), list) else []
+            for claim_index, claim in enumerate(claims):
+                if not isinstance(claim, dict):
                     continue
-                database.link_claim_evidence(ClaimEvidenceRow(
-                    claim_id=claim_id, evidence_id=evidence_id, ordinal=ordinal,
+                claim_id = f"{run_id}:claim:{claim_index}"
+                claim_ids = normalize_evidence_ids(claim.get("evidence_ids"))
+                database.upsert_claim(ClaimRow(
+                    claim_id=claim_id, run_id=run_id,
+                    text=str(claim.get("text") or claim.get("statement") or ""),
+                    claim_type=str(claim.get("type") or "fact"),
+                    confidence=_confidence(claim.get("confidence") or parsed.get("confidence")),
+                    status="unverified",
+                    uncertainty=str(claim.get("uncertainty") or ""),
                 ))
+                database.conn.execute("DELETE FROM claim_evidence WHERE claim_id = ?", (claim_id,))
+                for ordinal, evidence_id in enumerate(claim_ids):
+                    if evidence_id in ids and evidence_id not in missing:
+                        database.link_claim_evidence(ClaimEvidenceRow(
+                            claim_id=claim_id, evidence_id=evidence_id, ordinal=ordinal,
+                        ))
+                report["claims_upserted"] += 1
+        report["runs_upserted"] += 1
+        report["outputs_upserted"] += 1
+        report["evidence_links"] += len(ids) - len(missing)
 
     # Some older deployments kept only llm_analysis_history and no JSONL.  Do
     # not discard those rows: represent them as explicitly unresolved legacy
@@ -180,38 +145,39 @@ def backfill_llm_provenance(
         if not apply:
             continue
         parsed = _parse_output(row.raw_output)
-        database.upsert_llm_run(LlmRunRow(
-            run_id=run_id,
-            task_type=row.prompt_id or "legacy_analysis",
-            model=row.model,
-            prompt_id=row.prompt_id,
-            prompt_version=row.prompt_version,
-            started_at=row.ts,
-            finished_at=row.ts,
-            status="legacy_unresolved" if (not ids or missing) else "legacy_linked",
-            input_hash="",
-            output_hash=hashlib.sha256((row.raw_output or "").encode("utf-8")).hexdigest(),
-            error="legacy record has no provable evidence" if (not ids or missing) else "",
-            trace_id=row.source_record_id,
-            metadata_json=json.dumps({"legacy_analysis_id": row.id}, ensure_ascii=False),
-        ))
-        report["legacy_runs_upserted"] += 1
-        for ordinal, evidence_id in enumerate(ids):
-            if evidence_id in missing:
-                continue
-            database.link_llm_run_evidence(LlmRunEvidenceRow(
-                run_id=run_id, evidence_id=evidence_id, ordinal=ordinal,
+        with database.transaction():
+            database.upsert_llm_run(LlmRunRow(
+                run_id=run_id,
+                task_type=row.prompt_id or "legacy_analysis",
+                model=row.model,
+                prompt_id=row.prompt_id,
+                prompt_version=row.prompt_version,
+                started_at=row.ts,
+                finished_at=row.ts,
+                status="legacy_unresolved" if (not ids or missing) else "legacy_linked",
+                input_hash="",
+                output_hash=hashlib.sha256((row.raw_output or "").encode("utf-8")).hexdigest(),
+                error="legacy record has no provable evidence" if (not ids or missing) else "",
+                trace_id=row.source_record_id,
+                metadata_json=json.dumps({"legacy_analysis_id": row.id}, ensure_ascii=False),
             ))
-        database.upsert_llm_output(LlmOutputRow(
-            output_id=f"{run_id}:output",
-            run_id=run_id,
-            output_format="json" if parsed else "text",
-            structured_json=json.dumps(parsed, ensure_ascii=False),
-            markdown=row.raw_output or row.summary,
-            confidence=_confidence(row.confidence),
-            limitation="legacy unresolved" if (not ids or missing) else "",
-            is_publishable=0,
-        ))
+            report["legacy_runs_upserted"] += 1
+            for ordinal, evidence_id in enumerate(ids):
+                if evidence_id in missing:
+                    continue
+                database.link_llm_run_evidence(LlmRunEvidenceRow(
+                    run_id=run_id, evidence_id=evidence_id, ordinal=ordinal,
+                ))
+            database.upsert_llm_output(LlmOutputRow(
+                output_id=f"{run_id}:output",
+                run_id=run_id,
+                output_format="json" if parsed else "text",
+                structured_json=json.dumps(parsed, ensure_ascii=False),
+                markdown=row.raw_output or row.summary,
+                confidence=_confidence(row.confidence),
+                limitation="legacy unresolved" if (not ids or missing) else "",
+                is_publishable=0,
+            ))
     return report
 
 

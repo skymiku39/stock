@@ -161,9 +161,10 @@ def test_apply_links_only_known_exact_ids_and_blocks_publish_when_missing(
         assert "ev:ghost" not in mixed_ids
         assert db.get_evidence("ev:ghost") is None
 
-        assert _output_publishable(db, "run:exact") == 1
+        # A resolvable input ID establishes linkage, not business verification.
+        assert _output_publishable(db, "run:exact") == 0
         assert _output_publishable(db, "run:mixed") == 0
-        assert db.get_claim("run:exact:claim:0").status == "verified"
+        assert db.get_claim("run:exact:claim:0").status == "unverified"
         assert db.get_claim("run:mixed:claim:0").status == "unverified"
     finally:
         db.close()
