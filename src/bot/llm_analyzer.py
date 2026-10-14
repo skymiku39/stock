@@ -446,6 +446,7 @@ def analyze_presentation(
     call_logger: Optional[LlmCallLogger] = None,
     root: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
+    evidence_ids: Optional[List[str]] = None,
 ) -> PresentationAnalysis:
     log = logger or get_logger("llm")
     if client is None or not client.enabled:
@@ -461,7 +462,10 @@ def analyze_presentation(
         registry=registry,
         call_logger=call_logger,
         root=root,
-        metadata={"ticker": ticker, "task": "analyze_presentation"},
+        metadata={
+            "ticker": ticker, "task": "analyze_presentation",
+            **({"evidence_ids": list(evidence_ids)} if evidence_ids is not None else {}),
+        },
         ticker=ticker or "Unknown",
         text=text,
     )
