@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import time
@@ -23,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
-from bot.source_registry import SourceRegistry
+from bot.source_registry import SourceRegistry, resolve_source_document_path
 from bot.utils import get_logger, mk_folder, now_tw
 
 
@@ -96,6 +97,8 @@ class ChipDailyRow:
     margin_balance: float = 0.0       # 融資餘額 (張)
     short_balance: float = 0.0        # 融券餘額 (張)
     borrow_balance: float = 0.0       # 借券賣出餘額 (張)
+    available_fields: List[str] = field(default_factory=list)
+    as_of: str = ""
 
 
 @dataclass
@@ -116,6 +119,8 @@ class ChipSummary:
     end_date: str = ""
     source_document_ids: List[str] = field(default_factory=list)
     source_date_status: str = "unknown"
+    metric_observation_days: Dict[str, int] = field(default_factory=dict)
+    metric_source_dates: Dict[str, List[str]] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------
@@ -215,23 +220,39 @@ def cached_chip_source_document_ids(
     *,
     root: Optional[Path] = None,
 ) -> List[str]:
-    """以 exact source/ref 對應已保存的籌碼 raw manifest。"""
+    """只連結 hash 正確且可重播為目前快取的 raw，不能只靠日期推定。"""
     if not dates:
         return []
     registry = SourceRegistry(root or Path.cwd())
     try:
-        date_text = {day.isoformat() for day in dates}
-        source_names = {
-            *(f"chips_twse_{name}" for name in _CACHE_ENDPOINT_NAMES[:4]),
-            *(f"chips_tpex_{name}" for name in _CACHE_ENDPOINT_NAMES[4:]),
-        }
-        rows = registry.db.list_source_documents(limit=5000)
-        ids = [
-            row.document_id
-            for row in rows
-            if row.source in source_names
-            and str(row.source_ref).rsplit(":", 1)[-1] in date_text
-        ]
+        ids = []
+        for day in sorted(set(dates)):
+            for name in _CACHE_ENDPOINT_NAMES:
+                path = _cache_path(name, day, root)
+                if not path.is_file():
+                    continue
+                try:
+                    cached = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                market = "tpex" if name.startswith("tpex_") else "twse"
+                candidates = registry.db.conn.execute(
+                    "SELECT document_id FROM source_documents WHERE source=? AND source_ref=?",
+                    (f"chips_{market}_{name}", f"{name}:{day.isoformat()}"),
+                ).fetchall()
+                for candidate in candidates:
+                    row = registry.db.get_source_document(candidate[0])
+                    try:
+                        raw = resolve_source_document_path(registry.root, row).read_bytes()
+                        if hashlib.sha256(raw).hexdigest() != row.content_hash:
+                            continue
+                        replay = json.loads(raw)
+                        if market == "tpex":
+                            replay = replay.get("tables", [])[0]
+                        if replay == cached:
+                            ids.append(row.document_id)
+                    except (OSError, ValueError, IndexError, AttributeError):
+                        continue
         return list(dict.fromkeys(ids))
     finally:
         registry.close()
@@ -261,11 +282,11 @@ def _capture_chip_response(
     name: str,
     root: Optional[Path],
     logger: logging.Logger,
-) -> None:
-    """保存籌碼 API 原始回應；provenance 失敗不阻斷既有快取流程。"""
+) -> bool:
+    """先完成 raw 登錄，失敗時不可發佈成已採集的快取。"""
     payload = content or b""
     if not payload:
-        return
+        return False
     try:
         SourceRegistry(root or Path.cwd()).capture_document(
             source,
@@ -279,8 +300,10 @@ def _capture_chip_response(
             as_of=date.isoformat(),
             metadata={"endpoint": name},
         )
+        return True
     except Exception:
-        logger.debug("%s raw provenance 寫入失敗", name, exc_info=True)
+        logger.warning("%s raw provenance 寫入失敗，拒絕快取", name, exc_info=True)
+        return False
 
 
 def _fetch_endpoint(
@@ -350,7 +373,7 @@ def _fetch_endpoint(
             if not ((isinstance(fields, list) and isinstance(rows, list) and fields and rows) or tables):
                 log.warning("%s 回應缺少 fields/data/tables，拒絕快取", name)
                 continue
-            _capture_chip_response(
+            if not _capture_chip_response(
                 source=f"chips_twse_{name}",
                 content=bytes(getattr(resp, "content", b"") or b""),
                 url=url,
@@ -358,7 +381,8 @@ def _fetch_endpoint(
                 name=name,
                 root=root,
                 logger=log,
-            )
+            ):
+                continue
             mk_folder(str(path.parent))
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             mirror_file_to_cloud(path, root=root)
@@ -395,7 +419,9 @@ def _parse_t86(data: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
     idx_name = col_idx("證券名稱")
     idx_foreign = col_idx("外資及陸資買賣超股數", "外陸資買賣超股數", "外資買賣超股數")
     idx_trust = col_idx("投信買賣超股數")
-    idx_dealer = col_idx("自營商買賣超股數")
+    idx_dealer = col_idx("自營商買賣超")
+    if min(idx_code, idx_foreign, idx_trust, idx_dealer) < 0:
+        return out
 
     for row in rows:
         if idx_code < 0 or idx_code >= len(row):
@@ -415,6 +441,7 @@ def _parse_t86(data: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
             foreign_net=foreign / 1000.0,  # 換成「張」
             investment_trust_net=trust / 1000.0,
             dealer_net=dealer / 1000.0,
+            available_fields=["foreign_net", "investment_trust_net", "dealer_net"],
         )
     return out
 
@@ -430,7 +457,15 @@ def _parse_margin(data: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
         for t in tables:
             f2 = t.get("fields") or []
             r2 = t.get("data") or []
-            if "融資餘額" in "".join(f2):
+            if "融資餘額" in "".join(f2) or (
+                "代號" in f2 and any(g.get("title") == "融資" for g in t.get("groups", []))
+            ):
+                # TWSE repeats 今日餘額 under separate 融資 / 融券 groups.
+                expanded = []
+                for group in t.get("groups", []):
+                    expanded.extend([group.get("title", "")] * int(group.get("span", 0)))
+                if len(expanded) == len(f2):
+                    f2 = [prefix + label for prefix, label in zip(expanded, f2)]
                 fields = f2
                 rows = r2
                 break
@@ -444,10 +479,10 @@ def _parse_margin(data: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
                     return i
         return -1
 
-    i_code = idx("股票代號", "證券代號")
+    i_code = idx("股票代號", "證券代號", "代號")
     i_margin = idx("融資今日餘額", "融資餘額")
     i_short = idx("融券今日餘額", "融券餘額")
-    if i_code < 0:
+    if min(i_code, i_margin, i_short) < 0:
         return out
     for row in rows:
         if i_code >= len(row):
@@ -558,10 +593,16 @@ def _fetch_tpex_chip(
         restore_file_from_cloud(path, root=root)
     if use_cache and path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            # An early empty response is not a permanent fact about this date.
+            if isinstance(cached, dict) and cached.get("data"):
+                return cached
         except Exception:
             pass
     if cache_only:
+        return None
+    cache_key = (name, date.isoformat(), str((root or Path.cwd()).resolve()), bool(use_cache), bool(cache_only))
+    if _process_failure_cache_active(cache_key):
         return None
     url = ENDPOINTS_TPEX[name].format(date_slash=date.strftime("%Y/%m/%d"))
     try:
@@ -580,7 +621,10 @@ def _fetch_tpex_chip(
         if not isinstance(table, dict) or not isinstance(table.get("fields"), list) or not isinstance(table.get("data"), list):
             log.warning("%s TPEx table schema 異常，拒絕快取", name)
             return None
-        _capture_chip_response(
+        if not table["data"]:
+            _remember_process_failure(cache_key)
+            return None
+        if not _capture_chip_response(
             source=f"chips_tpex_{name}",
             content=bytes(getattr(resp, "content", b"") or b""),
             url=url,
@@ -588,7 +632,8 @@ def _fetch_tpex_chip(
             name=name,
             root=root,
             logger=log,
-        )
+        ):
+            return None
         mk_folder(str(path.parent))
         path.write_text(json.dumps(table, ensure_ascii=False), encoding="utf-8")
         mirror_file_to_cloud(path, root=root)
@@ -613,9 +658,18 @@ def _parse_tpex_insti(table: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
 
     idx_code = find_index("代號", "代碼")
     idx_name = find_index("名稱")
-    idx_foreign = find_index("外資及陸資", "外陸資", "外資合計")
-    idx_trust = find_index("投信")
-    idx_dealer = find_index("自營商合計", "自營商")
+    # Official CSV supplies group labels omitted by the JSON API. Accept only
+    # the complete known 25-column shape, never arbitrary positional fallback.
+    grouped_fields = ["代號", "名稱"] + ["買進股數", "賣出股數", "買賣超股數"] * 7 + ["三大法人買賣超股數合計"]
+    if fields == grouped_fields:
+        idx_foreign, idx_trust, idx_dealer = 10, 13, 22
+    else:
+        def net_index(*prefixes: str) -> int:
+            return next((i for i, f in enumerate(fields)
+                         if any(f.startswith(p) for p in prefixes) and "買賣超" in f), -1)
+        idx_foreign = net_index("外資及陸資", "外陸資", "外資合計")
+        idx_trust = net_index("投信")
+        idx_dealer = net_index("自營商合計", "自營商")
     if min(idx_code, idx_foreign, idx_trust, idx_dealer) < 0:
         return out
     for row in rows:
@@ -630,6 +684,7 @@ def _parse_tpex_insti(table: Dict[str, Any]) -> Dict[str, ChipDailyRow]:
             foreign_net=_to_float(row[idx_foreign]) / 1000.0,
             investment_trust_net=_to_float(row[idx_trust]) / 1000.0,
             dealer_net=_to_float(row[idx_dealer]) / 1000.0,
+            available_fields=["foreign_net", "investment_trust_net", "dealer_net"],
         )
     return out
 
@@ -645,8 +700,9 @@ def _parse_tpex_margin(table: Dict[str, Any]) -> Dict[str, tuple[float, float]]:
                 return index
         return -1
     idx_code = find_index("代號", "代碼")
-    idx_margin = find_index("融資餘額")
-    idx_short = find_index("融券餘額")
+    # 前資餘額 / 前券餘額 are yesterday's values, not today's balance.
+    idx_margin = next((i for i, f in enumerate(fields) if f in {"融資餘額", "資餘額"}), -1)
+    idx_short = next((i for i, f in enumerate(fields) if f in {"融券餘額", "券餘額"}), -1)
     if min(idx_code, idx_margin, idx_short) < 0:
         return out
     for row in rows:
@@ -680,6 +736,8 @@ def fetch_daily_chips(
     """
     log = logger or get_logger("chips")
     sess = session or _new_session()
+    if cache_only and not any(_cache_path(name, date, root).is_file() for name in _CACHE_ENDPOINT_NAMES):
+        date = latest_cached_chip_date(date, root=root) or date
 
     t86 = _fetch_endpoint(
         "qfii_daily", date, session=sess, root=root,
@@ -702,9 +760,11 @@ def fetch_daily_chips(
         row = rows.setdefault(ticker, ChipDailyRow(ticker=ticker))
         row.margin_balance = m
         row.short_balance = s
+        row.available_fields.extend(["margin_balance", "short_balance"])
     for ticker, b in borrow_map.items():
         row = rows.setdefault(ticker, ChipDailyRow(ticker=ticker))
         row.borrow_balance = b
+        row.available_fields.append("borrow_balance")
 
     # ---- 上櫃 (TPEx) 合併 (代號不與上市重疊) ----
     tpex_insti = _fetch_tpex_chip(
@@ -722,12 +782,16 @@ def fetch_daily_chips(
             row.foreign_net = irow.foreign_net
             row.investment_trust_net = irow.investment_trust_net
             row.dealer_net = irow.dealer_net
+            row.available_fields.extend(irow.available_fields)
     if tpex_margin:
         for ticker, (m, s) in _parse_tpex_margin(tpex_margin).items():
             row = rows.setdefault(ticker, ChipDailyRow(ticker=ticker))
             row.margin_balance = m
             row.short_balance = s
+            row.available_fields.extend(["margin_balance", "short_balance"])
 
+    for row in rows.values():
+        row.as_of = date.isoformat()
     return rows
 
 
@@ -781,13 +845,18 @@ def build_chip_summary(
             foreign_total += row.foreign_net
             trust_total += row.investment_trust_net
             dealer_total += row.dealer_net
-            if first_margin is None:
-                first_margin = row.margin_balance
-                first_borrow = row.borrow_balance
-                first_short = row.short_balance
-            last_margin = row.margin_balance
-            last_borrow = row.borrow_balance
-            last_short = row.short_balance
+            if "margin_balance" in row.available_fields:
+                if first_margin is None:
+                    first_margin = row.margin_balance
+                last_margin = row.margin_balance
+            if "borrow_balance" in row.available_fields:
+                if first_borrow is None:
+                    first_borrow = row.borrow_balance
+                last_borrow = row.borrow_balance
+            if "short_balance" in row.available_fields:
+                if first_short is None:
+                    first_short = row.short_balance
+                last_short = row.short_balance
         block = _fetch_endpoint("block_trade", d, session=sess, root=root, logger=logger)
         if block:
             bmap = _parse_block(block)
@@ -814,9 +883,19 @@ def build_chip_summary(
             observed_dates, root=root,
         ),
         source_date_status=(
-            "aligned" if len({day.isoformat() for day in observed_dates}) <= 1
-            else ("mixed" if observed_dates else "unknown")
+            "unknown" if not observed_dates else
+            "aligned" if len(set(observed_dates)) == 1 else "mixed"
         ),
+        metric_observation_days={
+            metric: sum(metric in row.available_fields for row in rows)
+            for metric in ("foreign_net", "investment_trust_net", "dealer_net",
+                           "margin_balance", "short_balance", "borrow_balance")
+        },
+        metric_source_dates={
+            metric: [row.as_of for row in rows if metric in row.available_fields]
+            for metric in ("foreign_net", "investment_trust_net", "dealer_net",
+                           "margin_balance", "short_balance", "borrow_balance")
+        },
     )
 
 
@@ -830,12 +909,12 @@ def summary_to_chips_context(s: ChipSummary):
         margin_buy_change_pct=s.margin_buy_change_pct,
         short_borrow_change_pct=s.short_borrow_change_pct,
         block_trade_net=s.block_trade_net,
-        notes=f"基於最近 {s.days} 交易日資料 (共 {len(s.rows)} 筆)",
+        notes=f"最近 {s.days} 個候選平日中取得 {len(s.rows)} 筆；各欄觀測日數={s.metric_observation_days}。未觀測欄位的 0 不是實際零值。",
     )
 
 
 def summary_to_dict(s: ChipSummary) -> Dict[str, Any]:
-    return {
+    result = {
         "ticker": s.ticker,
         "days": s.days,
         "foreign_net": s.foreign_net,
@@ -848,8 +927,26 @@ def summary_to_dict(s: ChipSummary) -> Dict[str, Any]:
         "end_date": s.end_date,
         "source_document_ids": list(s.source_document_ids),
         "source_date_status": s.source_date_status,
+        "metric_observation_days": dict(s.metric_observation_days),
+        "metric_source_dates": dict(s.metric_source_dates),
         "rows": [asdict(r) for r in s.rows],
     }
+    for row in result["rows"]:
+        for metric in ("foreign_net", "investment_trust_net", "dealer_net",
+                       "margin_balance", "short_balance", "borrow_balance"):
+            if metric not in row["available_fields"]:
+                row[metric] = None
+    for output, metric, minimum in (
+        ("foreign_net", "foreign_net", 1),
+        ("investment_trust_net", "investment_trust_net", 1),
+        ("dealer_net", "dealer_net", 1),
+        ("margin_buy_change_pct", "margin_balance", 2),
+        ("short_sell_change_pct", "short_balance", 2),
+        ("short_borrow_change_pct", "borrow_balance", 2),
+    ):
+        if s.metric_observation_days.get(metric, 0) < minimum:
+            result[output] = None
+    return result
 
 
 # ----------------------------------------------------------------------
