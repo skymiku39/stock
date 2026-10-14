@@ -53,6 +53,7 @@ from bot.llm_analyzer import (
 from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
+from bot.pipeline_brief import prepare_brief_metadata
 
 
 # ----------------------------------------------------------------------
@@ -691,6 +692,7 @@ def run_full_pipeline(
 
             run.macro_summary = {
                 "asof_date": macro_snap.asof_date,
+                "source_document_id": macro_snap.source_document_id,
                 "usdtwd": macro_snap.usdtwd,
                 "indices_count": len(macro_snap.indices),
                 "stocks_count": len(macro_snap.stocks),
@@ -716,10 +718,7 @@ def run_full_pipeline(
             from bot.market_macro import load_supply_chain
 
             sc = load_supply_chain(config.project_root)
-            raw, info = gemini_call(
-                "us_market_brief",
-                client=client,
-                metadata={"task": "us_market_brief", "run_id": run_id},
+            brief_variables = dict(
                 asof_date=today.isoformat(),
                 indices_json=json.dumps(
                     macro_snap_dict.get("indices", {}),
@@ -737,6 +736,14 @@ def run_full_pipeline(
                     sc.get("us_stocks", {}),
                     ensure_ascii=False, indent=2,
                 ),
+            )
+            brief_metadata = prepare_brief_metadata(
+                root=config.project_root, task="us_market_brief", run_id=run_id,
+                variables=brief_variables, macro_snapshot=macro_snap_dict,
+            )
+            raw, info = gemini_call(
+                "us_market_brief", client=client, root=config.project_root,
+                metadata=brief_metadata, **brief_variables,
             )
             run.us_brief_md = raw or "(LLM 未產出內容)"
             run.us_brief_prompt_id = info.get("prompt_id", "")
@@ -757,10 +764,7 @@ def run_full_pipeline(
     if config.generate_brief and client.enabled:
         log.info("[6/6] 產出每日簡報 …")
         try:
-            raw, info = gemini_call(
-                "daily_brief",
-                client=client,
-                metadata={"task": "daily_brief", "run_id": run_id},
+            brief_variables = dict(
                 date=today.isoformat(),
                 consensus_signals_json=json.dumps({
                     "consensus_top": run.consensus_top[:20],
@@ -775,6 +779,15 @@ def run_full_pipeline(
                     ensure_ascii=False, indent=2,
                 ),
                 macro_summary=_pipeline_macro_text(macro_snap_dict),
+            )
+            brief_metadata = prepare_brief_metadata(
+                root=config.project_root, task="daily_brief", run_id=run_id,
+                variables=brief_variables, macro_snapshot=macro_snap_dict,
+            )
+            run.warnings.append("daily_brief: input snapshot saved; upstream market evidence remains unverified")
+            raw, info = gemini_call(
+                "daily_brief", client=client, root=config.project_root,
+                metadata=brief_metadata, **brief_variables,
             )
             run.daily_brief_md = raw or "(LLM 未產出內容)"
             run.daily_brief_prompt_id = info.get("prompt_id", "")
