@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from bot import gemini_smoke
+from bot.config import Settings
 from bot.llm_analyzer import DEFAULT_MODEL, GeminiClient, gemini_call
 from bot import llm_log
 from bot.llm_log import LlmCallLogger
@@ -11,13 +14,20 @@ from bot.prompt_registry import PromptRegistry
 from bot.stock_db import StockDB, reset_db_singleton
 
 
-def test_gemini_client_disabled_without_api_key() -> None:
-    client = GeminiClient(api_key="", model=DEFAULT_MODEL)
+@pytest.fixture
+def disabled_gemini_client() -> GeminiClient:
+    """Exercise the disabled Gemini path independently of local provider/key settings."""
+    settings = Settings(_env_file=None, llm_provider="gemini", gemini_api_key="")
+    return GeminiClient(model=DEFAULT_MODEL, settings=settings)
+
+
+def test_gemini_client_disabled_without_api_key(disabled_gemini_client) -> None:
+    client = disabled_gemini_client
 
     assert client.enabled is False
 
 
-def test_gemini_call_disabled_records_audit_log(tmp_path) -> None:
+def test_gemini_call_disabled_records_audit_log(tmp_path, disabled_gemini_client) -> None:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
     (prompts_dir / "smoke.yaml").write_text(
@@ -40,7 +50,7 @@ def test_gemini_call_disabled_records_audit_log(tmp_path) -> None:
 
     registry = PromptRegistry(prompts_dir=prompts_dir)
     call_logger = LlmCallLogger(log_dir=tmp_path / "llm_calls")
-    client = GeminiClient(api_key="", model=DEFAULT_MODEL)
+    client = disabled_gemini_client
 
     raw, info = gemini_call(
         "smoke",
@@ -67,7 +77,7 @@ def test_gemini_call_disabled_records_audit_log(tmp_path) -> None:
     assert record.metadata == {"test": "disabled-flow"}
 
 
-def test_gemini_call_loads_prompts_from_explicit_project_root(tmp_path) -> None:
+def test_gemini_call_loads_prompts_from_explicit_project_root(tmp_path, disabled_gemini_client) -> None:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
     (prompts_dir / "root_only.yaml").write_text(
@@ -86,7 +96,7 @@ def test_gemini_call_loads_prompts_from_explicit_project_root(tmp_path) -> None:
     logger = LlmCallLogger(log_dir=tmp_path / "llm_calls")
     raw, info = gemini_call(
         "root_only",
-        client=GeminiClient(api_key="", model=DEFAULT_MODEL),
+        client=disabled_gemini_client,
         call_logger=logger,
         root=tmp_path,
         value="OK",
@@ -137,7 +147,7 @@ def test_llm_mirror_keeps_evidence_ids_and_trace(tmp_path) -> None:
     assert row.source_record_id == "trace-evidence"
 
 
-def test_gemini_call_infers_ticker_and_mirrors_to_root_db(tmp_path) -> None:
+def test_gemini_call_infers_ticker_and_mirrors_to_root_db(tmp_path, disabled_gemini_client) -> None:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
     (prompts_dir / "ticker.yaml").write_text(
@@ -161,7 +171,7 @@ def test_gemini_call_infers_ticker_and_mirrors_to_root_db(tmp_path) -> None:
     try:
         raw, _info = gemini_call(
             "ticker",
-            client=GeminiClient(api_key="", model=DEFAULT_MODEL),
+            client=disabled_gemini_client,
             registry=registry,
             call_logger=logger,
             root=tmp_path,
