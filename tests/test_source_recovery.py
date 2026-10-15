@@ -129,3 +129,30 @@ def test_conflicting_pending_receipts_never_choose_a_date_by_hash_order(tmp_path
     assert all(row["state"] == "unresolved" for row in report["receipts"])
     assert db.list_source_documents() == []
     db.close()
+
+
+def test_registration_reserves_writer_before_reading_manifest(tmp_path, monkeypatch):
+    from bot.source_recovery import commit_registration
+    from bot.stock_db import SourceDocumentRow
+    db = StockDB.open(root=tmp_path)
+    other = sqlite3.connect(db.path, timeout=0.01)
+    original = db.get_source_document
+    blocked = []
+    def read(document_id):
+        # A concurrent process cannot commit between the manifest read and write.
+        try:
+            other.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            blocked.append(str(exc))
+        else:
+            other.rollback()
+        return original(document_id)
+    monkeypatch.setattr(db, "get_source_document", read)
+    try:
+        row = SourceDocumentRow(document_id="test-lock", source="fixture", content_hash="hash")
+        commit_registration(db, "receipt", row)
+        assert blocked and all("locked" in message for message in blocked)
+        assert original(row.document_id).content_hash == "hash"
+    finally:
+        other.close()
+        db.close()

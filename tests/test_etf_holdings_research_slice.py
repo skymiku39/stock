@@ -386,3 +386,26 @@ def test_etfinfo_nuxt_payload_excludes_explicit_derivative_rows(
     assert parsed is not None
     assert len(parsed[1]) == 1
     assert parsed[1][0].ticker == "2330"
+
+
+def test_raw_registration_failure_stops_before_canonical_or_model(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import sqlite3
+    from bot import etf_holdings_fetcher as fetcher
+    response = SimpleNamespace(content=b"<html>" + b"holdings " * 20 + b"</html>",
+        text="holdings " * 20, headers={"content-type": "text/html"},
+        apparent_encoding="utf-8", raise_for_status=lambda: None)
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(SourceRegistry, "capture_document", fail)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unregistered input must not be analyzed or saved")
+    monkeypatch.setattr(fetcher, "gemini_call", forbidden)
+    monkeypatch.setattr(fetcher, "save_holdings", forbidden)
+    result = fetch_and_save_holdings(
+        ActiveEtf(symbol="00998A", name="test", issuer="test", holdings_url="https://example.invalid"),
+        SimpleNamespace(enabled=True), root=tmp_path,
+        session=SimpleNamespace(get=lambda *a, **k: response))
+    assert not result.success
+    assert result.research_status == "failed"
+    assert "raw_registration_failed" in result.error

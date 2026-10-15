@@ -528,8 +528,12 @@ def fetch_and_save_holdings(
                     metadata={"etf_name": etf.name, "content_type": content_type},
                 )
                 result.source_document_id = document.document_id
-        except Exception:
-            log.debug("[%s] ETF raw provenance 寫入失敗", etf.symbol, exc_info=True)
+        except Exception as exc:
+            result.error = f"raw_registration_failed: {exc}"
+            result.research_status = "failed"
+            result.research_error = result.error
+            log.exception("[%s] ETF raw provenance 寫入失敗", etf.symbol)
+            return result
 
         if not raw_text or len(raw_text.strip()) < 50:
             result.error = "raw_text_too_short"

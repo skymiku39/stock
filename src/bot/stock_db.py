@@ -1613,7 +1613,7 @@ class StockDB:
         return c
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         """Atomic writes; nested DAO calls use savepoints in the outer transaction."""
         # Keep connection creation inside the lock as well.  _connect() sets
         # journal_mode=WAL, which is itself a SQLite write-like operation and
@@ -1623,7 +1623,7 @@ class StockDB:
             began = False
             savepoint = "dao_" + uuid.uuid4().hex if c.in_transaction else ""
             try:
-                c.execute(f"SAVEPOINT {savepoint}" if savepoint else "BEGIN")
+                c.execute(f"SAVEPOINT {savepoint}" if savepoint else ("BEGIN IMMEDIATE" if immediate else "BEGIN"))
                 began = True
                 yield c
                 c.execute(f"RELEASE SAVEPOINT {savepoint}" if savepoint else "COMMIT")

@@ -45,7 +45,9 @@ def commit_registration(db: StockDB, receipt_id: str, row: SourceDocumentRow,
     Replay preserves an existing manifest and all run statuses/errors/dates.
     A receipt acknowledges registration, not successful parsing or ingestion.
     """
-    with db.transaction() as conn:
+    # Reserve the writer before reading; WAL read-to-write upgrades can
+    # fail with SQLITE_BUSY_SNAPSHOT without honoring busy_timeout.
+    with db.transaction(immediate=True) as conn:
         existing = db.get_source_document(row.document_id)
         if existing and existing.content_hash != row.content_hash:
             raise ValueError("manifest hash conflict")
