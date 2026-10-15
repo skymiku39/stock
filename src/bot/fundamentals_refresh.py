@@ -49,6 +49,11 @@ def _normalize_symbol(symbol: str) -> str:
     return "".join(ch for ch in str(symbol).strip() if ch.isalnum())
 
 
+def _supported_symbol(symbol: str) -> bool:
+    # This collector only queries TWSE/MOPS, not foreign exchanges.
+    return symbol.isascii() and symbol.isdigit() and 4 <= len(symbol) <= 6 and not symbol.startswith("0")
+
+
 def _split_symbols(values: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
@@ -157,6 +162,8 @@ def seed_refresh_queue(
     added = 0
     items = load_refresh_queue(root)
     for symbol in _split_symbols(symbols):
+        if not _supported_symbol(symbol):
+            continue
         if not force and not _needs_refresh(symbol, root=root, stale_days=stale_days):
             continue
         if symbol not in items:
@@ -192,6 +199,8 @@ def _due_items(items: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     now = now_tw()
     due = []
     for item in items.values():
+        if not _supported_symbol(str(item.get("symbol") or "")):
+            continue
         next_attempt = _parse_time(item.get("next_attempt_at"))
         if next_attempt is None or next_attempt <= now:
             due.append(item)
@@ -211,6 +220,12 @@ def run_refresh_queue(
 ) -> Dict[str, int]:
     log = logger or get_logger("fundamentals-refresh")
     items = load_refresh_queue(root)
+    for item in items.values():
+        if not _supported_symbol(str(item.get("symbol") or "")):
+            item["status"] = "unsupported_instrument"
+            item["exclusion_reason"] = "Company fundamentals collector cannot verify foreign securities or ETFs"
+    if not dry_run:
+        save_refresh_queue(items, root=root)
     due = _due_items(items)
     stats = {
         "queued": len(items),
