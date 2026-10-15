@@ -62,3 +62,28 @@ def test_daily_pipeline_refuses_model_when_no_verified_inputs(tmp_path, monkeypa
     ))
     assert calls == []
     assert any("no verifiable evidence" in error for error in run.errors)
+
+
+def test_nan_quote_is_excluded_without_rejecting_other_verified_quotes(tmp_path):
+    snapshot = {"indices": {"SOX": {"price": 100, "source_date": "2026-10-14"}},
+                "stocks": {"META": {"price": float("nan"), "source_date": "2026-10-14"}},
+                "adr_premiums": []}
+    with SourceRegistry(tmp_path) as registry:
+        source = registry.capture_document("market_macro", json.dumps(snapshot), suffix="json")
+    variables = {key + "_json": json.dumps(value) for key, value in snapshot.items()}
+    metadata = prepare_brief_metadata(root=tmp_path, task="us_market_brief", run_id="nan",
+        variables=variables, macro_snapshot={**snapshot, "source_document_id": source.document_id})
+    assert json.loads(variables["stocks_json"]) == {}
+    assert json.loads(variables["indices_json"])["SOX"]["price"] == 100
+    assert any(e["component"] == "macro:META" for e in json.loads(variables["input_provenance_json"])["excluded"])
+    assert "NaN" not in json.dumps(variables)
+    assert metadata["evidence_ids"]
+
+
+def test_nan_cannot_mask_modified_quote(tmp_path):
+    snapshot = {"indices": {}, "stocks": {"META": {"price": float("nan")}}, "adr_premiums": []}
+    variables = {key + "_json": json.dumps(value) for key, value in snapshot.items()}
+    variables["stocks_json"] = '{"META": {"price": 42}}'
+    with pytest.raises(ValueError, match="differs"):
+        prepare_brief_metadata(root=tmp_path, task="us_market_brief", run_id="bad",
+            variables=variables, macro_snapshot=snapshot)

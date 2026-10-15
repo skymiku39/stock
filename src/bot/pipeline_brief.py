@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
-from bot.brief_sources import BriefSources
+from bot.brief_sources import BriefSources, same_json_value
 from bot.evidence import persist_evidence_items
 from bot.source_registry import SourceRegistry, resolve_source_document_path
 
@@ -19,7 +19,7 @@ def prepare_brief_metadata(*, root: Path, task: str, run_id: str, variables: dic
         verifier = BriefSources(root, registry.db)
         if task == "us_market_brief":
             for key in ("indices", "stocks", "adr_premiums"):
-                if json.loads(variables[key + "_json"]) != (macro_snapshot or {}).get(key):
+                if not same_json_value(json.loads(variables[key + "_json"]), (macro_snapshot or {}).get(key)):
                     raise ValueError(f"{key} differs from supplied macro snapshot")
         macro = verifier.macro(macro_snapshot)
         usable = bool(macro)

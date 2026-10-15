@@ -59,7 +59,7 @@ class BriefSources:
                 raise ValueError("wrong macro source type")
             raw = json.loads(content)
             for key in ("indices", "stocks", "adr_premiums"):
-                if raw.get(key) != snapshot.get(key):
+                if not same_json_value(raw.get(key), snapshot.get(key)):
                     raise ValueError(f"{key} differs from raw")
             result = {"indices": {}, "stocks": {}, "adr_premiums": []}
             for group in ("indices", "stocks"):
@@ -71,7 +71,8 @@ class BriefSources:
                         continue
                     # Role / Taiwan mapping comes from editable configuration.
                     result[group][symbol] = {k: v for k, v in quote.items()
-                        if k in {"symbol", "name", "price", "prev_close", "volume", "market_cap", "source_date", "source"}}
+                        if k in {"symbol", "name", "price", "prev_close", "volume", "market_cap", "source_date", "source"}
+                        and not (isinstance(v, float) and not math.isfinite(v))}
                     if positive(quote.get("prev_close")):
                         result[group][symbol]["pct_change"] = (quote["price"] / quote["prev_close"] - 1) * 100
             for adr in raw.get("adr_premiums", []):
@@ -225,3 +226,12 @@ def valid_date(value):
 
 def positive(value):
     return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+
+
+def same_json_value(left, right):
+    """Compare raw JSON including unavailable NaN values, never as valid facts.
+
+    Independent JSON decodes produce unequal NaNs. Compare their serialized
+    representation before the field-level finite-value gate excludes them.
+    """
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
