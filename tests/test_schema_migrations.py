@@ -47,3 +47,39 @@ def test_failed_migration_rolls_back_ddl_and_receipt(tmp_path, monkeypatch):
     with sqlite3.connect(path) as conn:
         assert [r[1] for r in conn.execute("PRAGMA table_info(watchlist)")] == ["symbol"]
         assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone()
+
+
+def test_schema_initialization_does_not_upgrade_stale_wal_snapshot(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+    from bot.stock_db import StockDB
+    path=tmp_path/'race.sqlite'
+    initial=StockDB.open(path=path)
+    initial.conn.execute('CREATE TABLE race_marker(value INTEGER)')
+    initial.close()
+    original=StockDB._record_schema_migrations
+    finished=threading.Event(); errors=[]; threads=[]
+    def writer():
+        try:
+            with sqlite3.connect(path,timeout=5) as conn:
+                conn.execute('INSERT INTO race_marker VALUES (1)')
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+    def interleave(conn):
+        thread=threading.Thread(target=writer);threads.append(thread);thread.start()
+        # Under BEGIN IMMEDIATE the writer waits; under a deferred transaction
+        # it commits here and invalidates the schema reader's WAL snapshot.
+        finished.wait(0.2)
+        original(conn)
+    monkeypatch.setattr(StockDB,'_record_schema_migrations',staticmethod(interleave))
+    reopened=None
+    try:
+        reopened=StockDB.open(path=path)
+    finally:
+        if reopened:reopened.close()
+        for thread in threads:thread.join(timeout=6)
+    assert finished.is_set() and not errors
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM race_marker').fetchone()[0]==1

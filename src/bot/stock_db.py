@@ -1652,7 +1652,11 @@ class StockDB:
         # sidecar lock handles the special case where several independent CLI
         # processes all try to run compatibility DDL during startup.
         with _schema_process_lock(self.path):
-            with self.transaction() as c:
+            # Compatibility checks read schema before writing migration rows.
+            # Reserve the writer first: upgrading a WAL read snapshot after
+            # another writer commits fails immediately with SQLITE_BUSY_SNAPSHOT,
+            # regardless of busy_timeout or the schema-only process lock.
+            with self.transaction(immediate=True) as c:
                 for ddl in _SCHEMA.values():
                     c.execute(ddl)
                 for ddl in _INTERNAL_SCHEMA.values():
