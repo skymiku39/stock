@@ -154,6 +154,15 @@ def _main(argv=None):
     if (out / 'status.json').exists():
         previous = json.loads((out / 'status.json').read_text(encoding='utf-8'))
         write_json(out / 'attempts' / (attempt_id + '-previous-status.json'), previous)
+    if (out / 'verification-summary.json').exists():
+        previous_summary = json.loads((out / 'verification-summary.json').read_text(encoding='utf-8'))
+        write_json(out / 'attempts' / (attempt_id + '-previous-verification.json'), previous_summary)
+    # A crash during collection must not leave yesterday's success as the
+    # current attempt's status. Prior accepted results remain in attempts/.
+    collecting = {'requested': len(tickers), 'complete': False, 'phase': 'collecting',
+                  'started_at': now_tw().isoformat(), 'results': {t: {'status': 'pending'} for t in tickers}}
+    write_json(out / 'status.json', collecting)
+    write_json(out / 'verification-summary.json', collecting)
     foreign = [t for t in tickers if ' ' in t]
     inputs, exclusions = collect(root, [t for t in tickers if t not in foreign])
     if foreign:

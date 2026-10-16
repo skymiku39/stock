@@ -167,3 +167,17 @@ def test_selected_ticker_exception_is_retryable_without_including_other_symbols(
     from bot.verified_research_batch import backlog
     assert backlog({'focus_tickers':['2330','2317'],'auto_research_batch':{
         'selected_tickers':['2330','2317']},'errors':['auto_research_2330: unavailable']})==['2330']
+
+
+def test_collection_crash_cannot_leave_previous_success_current(tmp_path, monkeypatch):
+    from bot import verified_research_batch as batch
+    out=tmp_path/'output';out.mkdir()
+    (out/'verification-summary.json').write_text('{"complete":true}',encoding='utf-8')
+    def crash(*args,**kwargs):raise RuntimeError('simulated collection crash')
+    monkeypatch.setattr(batch,'collect',crash)
+    with pytest.raises(RuntimeError,match='simulated collection crash'):
+        main(['--root',str(tmp_path),'--tickers','2330','--output-dir',str(out)])
+    status=json.loads((out/'verification-summary.json').read_text(encoding='utf-8'))
+    assert status['complete'] is False and status['phase']=='collecting'
+    archived=list((out/'attempts').glob('*-previous-verification.json'))
+    assert len(archived)==1 and json.loads(archived[0].read_text())['complete']
