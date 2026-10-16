@@ -209,3 +209,49 @@ def test_fundamentals_refresh_queue_success(tmp_path) -> None:
     assert stats["succeeded"] == 1
     assert "2330" not in load_refresh_queue(root=tmp_path)
     assert (tmp_path / "data" / "fundamentals" / "2330" / "snapshot.json").exists()
+
+
+def test_periodic_failure_retry_survives_restart_and_is_bounded(tmp_path, monkeypatch):
+    from bot.scheduler import Scheduler
+    clock = [dt.datetime(2026, 10, 16, 10, 0).timestamp()]
+    monkeypatch.setattr("bot.scheduler.time.time", lambda: clock[0])
+    monkeypatch.setattr("bot.scheduler.now_tw", lambda: dt.datetime.fromtimestamp(clock[0]))
+    results = iter([2, 124, 3, 0])
+    timeouts = []
+    def execute(*args, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return next(results)
+    monkeypatch.setattr("bot.scheduler.run_with_deadline", execute)
+    settings = _settings(scheduler_market_hours_only=False)
+    sch = Scheduler(settings, project_root=tmp_path)
+    job = next(j for j in sch.jobs if j.name == "research")
+    assert sch._run_job(job) == 2
+    sch = Scheduler(settings, project_root=tmp_path)
+    job = next(j for j in sch.jobs if j.name == "research")
+    assert job.consecutive_failures == 1
+    now = dt.datetime.fromtimestamp(clock[0])
+    assert not sch._job_eligible(job, now, once=False)
+    assert not sch._job_eligible(job, now, once=True)
+    for expected in [124, 3]:
+        clock[0] += 300
+        assert sch._job_eligible(job, now, once=False)
+        assert sch._run_job(job) == expected
+    clock[0] += 300
+    assert not sch._job_eligible(job, now, once=False)
+    clock[0] += 240 * 60
+    assert sch._job_eligible(job, now, once=False)
+    assert sch._run_job(job) == 0
+    assert job.consecutive_failures == 0
+    assert timeouts == [7200] * 4
+    status = json.loads(sch.status_path.read_text(encoding="utf-8"))
+    assert status["jobs"]["research"]["state"] == "succeeded"
+
+
+def test_retry_still_respects_market_window(tmp_path, monkeypatch):
+    from bot.scheduler import Scheduler
+    sch = Scheduler(_settings(), project_root=tmp_path)
+    job = next(j for j in sch.jobs if j.name == "research")
+    job.consecutive_failures = 1
+    job.last_run_epoch = 1
+    monkeypatch.setattr("bot.scheduler.time.time", lambda: 10000)
+    assert not sch._job_eligible(job, dt.datetime(2026, 10, 17, 10), once=False)

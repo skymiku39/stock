@@ -128,6 +128,7 @@ class Job:
     target_date_mode: str = ""
     last_run_epoch: float = 0.0
     last_run_key: str = ""
+    consecutive_failures: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def is_running(self) -> bool:
@@ -161,7 +162,23 @@ class Scheduler:
         self._stop = threading.Event()
         self._status_lock = threading.RLock()
         self.jobs: List[Job] = self._build_jobs()
+        self._restore_job_state()
         self._monitor_runner = None  # 延遲建立，避免無謂 import
+
+    def _restore_job_state(self) -> None:
+        try:
+            jobs = json.loads(self.status_path.read_text(encoding="utf-8")).get("jobs", {})
+        except (OSError, ValueError):
+            return
+        for job in self.jobs:
+            prior = jobs.get(job.name, {})
+            if prior.get("state") not in {"succeeded", "failed", "timed_out"}:
+                continue
+            try:
+                job.last_run_epoch = dt.datetime.fromisoformat(prior["finished_at"]).timestamp()
+                job.consecutive_failures = int(prior.get("consecutive_failures", 0))
+            except (KeyError, ValueError, TypeError):
+                continue
 
     def _write_status(self, state: str, **kwargs) -> None:
         # Heartbeat and concurrent job completions must not lose each other's updates.
@@ -221,6 +238,9 @@ class Scheduler:
                     entry["finished_at"] = heartbeat
                 if job_state == "succeeded":
                     entry["last_success_at"] = heartbeat
+                job = next((j for j in self.jobs if j.name == last_job), None)
+                if job is not None:
+                    entry["consecutive_failures"] = job.consecutive_failures
                 jobs[last_job] = entry
             payload["jobs"] = jobs
             # Use a process/thread-specific temporary file.  A fixed
@@ -427,7 +447,9 @@ class Scheduler:
                 job.last_run_epoch = time.time()
                 return False
         else:
-            if not once and (time.time() - job.last_run_epoch) < job.interval_min * 60:
+            retrying = 0 < job.consecutive_failures <= self.settings.scheduler_failure_max_retries
+            delay = self.settings.scheduler_failure_retry_seconds if retrying else job.interval_min * 60
+            if (not once or retrying) and (time.time() - job.last_run_epoch) < delay:
                 return False
             if job.window_start is not None and not self._job_in_window(job, now):
                 return False
@@ -483,6 +505,10 @@ class Scheduler:
             self._write_status("running", last_job=job.name, last_error="", job_state="dry_run", job_exit_code=0)
             return 0
 
+        if job.consecutive_failures > self.settings.scheduler_failure_max_retries:
+            job.consecutive_failures = 0
+        timeout = (self.settings.scheduler_research_timeout_seconds if job.name == "research"
+                   else self.settings.scheduler_job_timeout_seconds)
         env = _child_env(self.project_root)
         error = ""
         job_state = "failed"
@@ -492,7 +518,7 @@ class Scheduler:
                 fp.flush()
                 rc = run_with_deadline(
                     cmd, cwd=str(self.project_root), env=env,
-                    stdout=fp, timeout=self.settings.scheduler_job_timeout_seconds,
+                    stdout=fp, timeout=timeout,
                 )
                 fp.write(f"\n# ---\n# exit_code: {rc}\n")
             level = self.logger.info if rc == 0 else self.logger.warning
@@ -501,13 +527,14 @@ class Scheduler:
         except subprocess.TimeoutExpired:
             rc = 124
             job_state = "timed_out"
-            error = f"timeout after {self.settings.scheduler_job_timeout_seconds}s"
+            error = f"timeout after {timeout}s"
             self.logger.warning("任務 %s 逾時：%s", job.name, error)
         except Exception as exc:
             self.logger.exception("任務 %s 執行失敗", job.name)
             rc = -1
             error = f"{type(exc).__name__}: {exc}"
         finally:
+            job.consecutive_failures = job.consecutive_failures + 1 if rc != 0 else 0
             job.last_run_epoch = time.time()
             if job.run_once_per_day and rc == 0:
                 job.last_run_key = self._daily_run_key(job, scheduled_at)
@@ -640,6 +667,8 @@ class Scheduler:
             now = now_tw()
             for job in self.jobs:
                 if job.run_once_per_day:
+                    continue
+                if job.last_run_epoch and not self._job_eligible(job, now, once=False):
                     continue
                 if job.window_start is not None and not self._job_in_window(job, now):
                     continue

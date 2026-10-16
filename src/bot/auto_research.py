@@ -213,7 +213,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         ]
         if args.auto_research_limit is not None and args.auto_research_limit > 0:
             verified_args.append('--selected-only')
-        verified_result = run_verified_backlog(verified_args)
+        # Retry the same source run, so the rotating ticker cursor cannot skip
+        # failed symbols. Each attempt revalidates sources and reuses good reports.
+        import time
+        for attempt in range(3):
+            try:
+                verified_result = run_verified_backlog(verified_args)
+            except Exception:
+                logger.exception('官方來源補跑失敗 (attempt=%s)', attempt + 1)
+                verified_result = 2
+            if verified_result == 0 or attempt == 2:
+                break
+            logger.warning('官方來源補跑尚未完成，%s 秒後重試相同批次', 60 * (attempt + 1))
+            time.sleep(60 * (attempt + 1))
         logger.info('官方來源補跑完成，exit_code=%s（0=完成，2=失敗，3=部分排除）', verified_result)
     return 2 if run.errors else verified_result
 

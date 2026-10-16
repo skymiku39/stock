@@ -347,6 +347,9 @@ class Settings(BaseSettings):
     scheduler_fundamentals_args: str = "--limit 3 --stale-days 30 --delay-seconds 30"
     # 完整研究管線 (ETF/籌碼/基本面/法說 + LLM 簡報)；<=0 停用
     scheduler_research_interval_min: int = 240
+    scheduler_research_timeout_seconds: int = Field(default=7200, ge=1)
+    scheduler_failure_retry_seconds: int = Field(default=300, ge=1)
+    scheduler_failure_max_retries: int = Field(default=2, ge=0, le=5)
     # 每次排程最多對多少個過期/缺少快取的個股做完整 LLM 研究；<=0 不設上限。
     scheduler_research_max_tickers: int = 12
     # 公司基本資料 (名稱/產業/上市日) 補齊；靜態資料，預設一天一次；<=0 停用
