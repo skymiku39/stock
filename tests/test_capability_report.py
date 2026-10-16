@@ -56,11 +56,12 @@ def test_capability_report_preserves_page_and_prompt_inventory() -> None:
         "組態設定", "資料庫 / 雲端同步", "Prompt 管理", "LLM 呼叫紀錄", "記憶與證據管理",
         "日誌檢視", "通知測試", "策略與文件", "台股行事曆", "任務中心", "本次更新",
     }
-    assert len(prompts) == 15
+    assert len(prompts) == 16
     assert {p["id"] for p in prompts} >= {
         "query_plan",
         "ask_answer",
         "research_ticker",
+        "verified_research_batch",
     }
 
 
