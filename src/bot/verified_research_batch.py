@@ -118,6 +118,10 @@ def main(argv=None):
     original = json.loads((root / 'data/pipeline_runs' / args.source_run / 'run.json').read_text(encoding='utf-8'))
     tickers = backlog(original)
     out = root / 'data/verified_research_batches' / args.source_run
+    attempt_id = now_tw().strftime('%Y%m%d_%H%M%S_%f')
+    if (out / 'status.json').exists():
+        previous = json.loads((out / 'status.json').read_text(encoding='utf-8'))
+        write_json(out / 'attempts' / (attempt_id + '-previous-status.json'), previous)
     inputs, exclusions = collect(root, tickers)
     state = {'source_run': args.source_run, 'requested': len(tickers), 'started_at': now_tw().isoformat(),
              'scope': 'official financial and valuation rows only; model conclusions unverified',
@@ -158,12 +162,12 @@ def main(argv=None):
             variables = {'inputs_json': json.dumps(batch, ensure_ascii=False, allow_nan=False)}
             with SourceRegistry(root) as registry:
                 receipt = registry.capture_document('verified_research_input', json.dumps(variables, ensure_ascii=False),
-                    source_ref=args.source_run + ':' + batch_id, suffix='json', kind='llm_input_snapshot')
+                    source_ref=args.source_run + ':' + attempt_id + ':' + batch_id, suffix='json', kind='llm_input_snapshot')
             evidence_ids = [s['evidence_id'] for item in batch for s in item['sources']]
             raw, info = gemini_call('verified_research_batch', client=client, root=root,
                 metadata={'task': 'verified_research_batch', 'evidence_ids': evidence_ids,
                     'input_source_document_id': receipt.document_id}, **variables)
-            write_json(out / ('response-' + batch_id + '.json'), {'raw': raw, 'info': info})
+            write_json(out / ('response-' + attempt_id + '-' + batch_id + '.json'), {'raw': raw, 'info': info})
             parsed = extract_json(raw or '')
             reports = parsed.get('reports', []) if isinstance(parsed, dict) else []
             revalidate(root, batch)
