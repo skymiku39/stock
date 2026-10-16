@@ -88,3 +88,11 @@ def test_sec_replay_rejects_other_issuer_and_changed_value(tmp_path):
         entry['row']['val'] = 200
         with pytest.raises(ValueError, match='linked'):
             validate_entry(tmp_path, registry.db, 'AAA US', entry)
+
+
+def test_distinct_reporting_currencies_are_preserved_without_conversion():
+    record = {'end': '2026-06-30', 'filed': '2026-07-30', 'accn': 'a'}
+    facts = {'facts': {'ifrs-full': {'Assets': {'units': {
+        'TWD': [{**record, 'val': 3000}], 'USD': [{**record, 'val': 100}]}}}}}
+    selected = select_facts(facts, {'filings': {'recent': {'accessionNumber': ['a']}}}, '2026-10-16')
+    assert selected == [('ifrs-full', 'Assets', 'TWD', 0), ('ifrs-full', 'Assets', 'USD', 0)]

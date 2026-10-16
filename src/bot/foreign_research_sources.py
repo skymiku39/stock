@@ -119,8 +119,15 @@ def select_facts(facts, submissions, cutoff):
             latest = (best[4]['end'], best[4]['filed'], best[4].get('start', ''))
             tied = [c for c in candidates if (c[4]['end'], c[4]['filed'], c[4].get('start', '')) == latest]
             if len({(c[2], c[4]['val']) for c in tied}) != 1:
-                # Drop only the ambiguous metric, retaining independently
-                # verifiable metrics for this issuer.
+                # Different concepts/currencies are distinct facts, not a
+                # conversion or a conflict. Reject disagreement only within
+                # the same taxonomy, concept, unit and exact period.
+                groups = {}
+                for candidate in tied:
+                    groups.setdefault(candidate[:3], []).append(candidate)
+                for records in groups.values():
+                    if len({c[4]['val'] for c in records}) == 1:
+                        selected.append(records[0][:4])
                 continue
             selected.append(best[:4])
     return selected
