@@ -49,6 +49,7 @@ CLI_META: Dict[str, Tuple[str, str]] = {
     "stock-bot": ("trade", "依 RUN_MODE 啟動 trade／watch／report 策略生命週期"),
     "stock-dashboard": ("dashboard", "啟動 Streamlit 儀表板"),
     "stock-auto-research": ("research", "一鍵研究管線：ETF／籌碼／法說／LLM／每日簡報"),
+    "stock-verified-research": ("research", "官方來源自動發現、精確證據驗證、可續跑的限定財務研究"),
     "stock-macro-update": ("data", "抓取美股／台指期／ADR 等跨市場 macro 快照"),
     "stock-fundamentals-refresh": ("data", "處理基本面慢速補抓佇列"),
     "stock-intraday": ("research", "今日當沖戰情室管線（題材＋評分＋簡報）"),

@@ -68,6 +68,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-chips", action="store_true", help="跳過籌碼面抓取")
     parser.add_argument("--no-llm", action="store_true", help="跳過 LLM 法說分析")
     parser.add_argument("--no-brief", action="store_true", help="不產出每日簡報")
+    parser.add_argument("--no-verified-backlog", action="store_true", help="不執行官方來源驗證與剩餘個股補跑")
     parser.add_argument(
         "--no-calendar", action="store_true",
         help="不自動更新法說會行事曆 (預設會自動更新)",
@@ -203,7 +204,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         "failed" if run.errors else "partial" if run.warnings else "ok",
         len(run.focus_tickers), len(run.errors), len(run.warnings), run.output_dir,
     )
-    return 0 if not run.errors else 2
+    verified_result = 0
+    if (not args.no_verified_backlog and not args.no_auto_research and not args.no_llm
+            and settings.llm_enabled and not run.errors):
+        from bot.verified_research_batch import main as run_verified_backlog
+        verified_args = [
+            '--root', str(project_root), '--source-run', run.run_id, '--execute',
+        ]
+        if args.auto_research_limit is not None and args.auto_research_limit > 0:
+            verified_args.append('--selected-only')
+        verified_result = run_verified_backlog(verified_args)
+        logger.info('官方來源補跑完成，exit_code=%s（0=完成，2=失敗，3=部分排除）', verified_result)
+    return 2 if run.errors else verified_result
 
 
 if __name__ == "__main__":

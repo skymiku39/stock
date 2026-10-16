@@ -52,11 +52,21 @@ def validate_official_excerpt(root, db, ticker, entry, source, raw):
     identity_text = official_text(identity_raw, entry['identity_pdf'], entry.get('identity_page', 0))
     if code not in identity_text or name not in identity_text:
         raise ValueError('official ticker identity missing')
-    text = official_text(raw, entry['pdf'], entry.get('page', 0))
-    if not entry['row'] or any(not isinstance(v, str) or not v or v not in text for v in entry['row'].values()):
+    texts = {key: official_text(raw, entry['pdf'], entry.get('row_pages', {}).get(key, entry.get('page', 0)))
+             for key in entry['row']}
+    if not entry['row'] or any(not isinstance(v, str) or not v or v not in texts[key] for key, v in entry['row'].items()):
         raise ValueError('official excerpt cannot be replayed')
     if not {'financial_excerpt', 'period_excerpt', 'publication_excerpt'} <= entry['row'].keys():
         raise ValueError('financial period or publication context missing')
+    if entry.get('publication_date'):
+        from bot.official_release_discovery import publication
+        _, date = publication(entry['row']['publication_excerpt'])
+        if date.isoformat() != entry['publication_date'] or date > now_tw().date():
+            raise ValueError('invalid official publication date')
+    for document_id in entry.get('discovery_source_ids', []):
+        discovery, _ = read_source(root, db, document_id)
+        if discovery.source != 'foreign_official_index' or urlparse(discovery.url).hostname != host:
+            raise ValueError('invalid official discovery source')
 
 
 def read_source(root, db, document_id, expected_hash=None):
@@ -166,74 +176,88 @@ def validate_entry(root, db, ticker, entry):
         raise ValueError('unsupported foreign evidence format')
 
 
-def collect(root, tickers):
-    out = Path(root) / 'data/audits/foreign-research-20261016'
+def collect(root, tickers, *, refresh=False, cache_dir=None):
+    out = Path(cache_dir) if cache_dir else Path(root) / 'data/foreign_sources' / now_tw().date().isoformat()
     out.mkdir(parents=True, exist_ok=True)
     manifest_path = out / 'sec-downloads.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
     result = {ticker: [] for ticker in tickers}
     exclusions = []
-    agent = os.environ.get('SEC_USER_AGENT', '')
+    from dotenv import dotenv_values
+    agent = os.environ.get('SEC_USER_AGENT') or dotenv_values(Path(root) / '.env').get('SEC_USER_AGENT', '')
     session = requests.Session()
-    session.headers.update({'User-Agent': agent, 'Accept-Encoding': 'gzip, deflate'})
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    session.mount('https://', HTTPAdapter(max_retries=Retry(total=2, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])))
     cutoff = now_tw().date().isoformat()
 
     def fetch(url, source_name):
-        if url in manifest:
+        if url in manifest and not refresh:
             with SourceRegistry(root) as registry:
                 source, raw = read_source(root, registry.db, manifest[url])
-            return source, json.loads(raw)
-        if not agent:
+            if source.url != url or source.source != source_name:
+                raise ValueError('cache source identity mismatch')
+            return source, raw
+        is_sec = urlparse(url).hostname in {'www.sec.gov', 'data.sec.gov'}
+        if is_sec and not agent:
             raise ValueError('SEC_USER_AGENT with authorized contact is required')
         time.sleep(0.25)
-        response = session.get(url, timeout=45)
+        response = session.get(url, timeout=45, headers={'User-Agent': agent if is_sec else 'Mozilla/5.0'})
         response.raise_for_status()
-        payload = response.json()
+        if response.status_code != 200 or not response.content:
+            raise ValueError('empty or incomplete official response')
+        if urlparse(response.url).hostname != urlparse(url).hostname:
+            raise ValueError('official request redirected to another host')
+        if is_sec:
+            response.json()
         with SourceRegistry(root) as registry:
             source = registry.capture_document(source_name, response.content, source_url=url,
-                source_ref=url, suffix='json', kind='http_response')
+                source_ref=url, suffix='json' if is_sec else 'pdf' if response.content.startswith(b'%PDF') else 'html', kind='http_response')
         manifest[url] = source.document_id
         write_json(manifest_path, manifest)
-        return source, payload
+        return source, response.content
 
-    directory_path = out / 'directory.json'
-    if not directory_path.exists():
-        document, _ = fetch('https://www.sec.gov/files/company_tickers_exchange.json', 'sec_ticker_directory')
-        write_json(directory_path, {'source_document_id': document.document_id})
-    directory_id = json.loads(directory_path.read_text(encoding='utf-8'))['source_document_id']
-    with SourceRegistry(root) as registry:
-        directory_source, raw = read_source(root, registry.db, directory_id)
-        directory = json.loads(raw)
+    directory_error = None
+    if any(t.endswith(' US') for t in tickers):
+        try:
+            directory_source, raw = fetch('https://www.sec.gov/files/company_tickers_exchange.json', 'sec_ticker_directory')
+            directory_id, directory = directory_source.document_id, json.loads(raw)
+        except (ValueError, OSError, requests.RequestException) as exc:
+            directory_error = str(exc)
     for ticker in tickers:
         if not ticker.endswith(' US'):
-            approved = out / 'non-us-approved.json'
-            entries = json.loads(approved.read_text(encoding='utf-8')).get(ticker, []) if approved.exists() else []
             try:
-                if not entries:
-                    raise ValueError('no replayable official issuer financial source and identity pair')
+                from bot.official_release_discovery import collect_official
+                entries = [collect_official(ticker, fetch, cutoff)]
                 with SourceRegistry(root) as registry:
                     for entry in entries:
                         validate_entry(root, registry.db, ticker, entry)
+                        encoded = json.dumps(entry['row'], ensure_ascii=False, allow_nan=False)
+                        row_hash = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
                         packet = make_evidence('official_financial_excerpt', source='foreign_official_issuer',
-                            source_ref=entry['source_document_id'] + ':' + ticker,
+                            source_ref=entry['source_document_id'] + ':' + ticker + ':' + row_hash,
                             title=ticker + ' official financial excerpt', url=entry['url'],
-                            excerpt=json.dumps(entry['row'], ensure_ascii=False),
+                            excerpt=encoded,
                             source_document_id=entry['source_document_id'], quality_status='ok', provenance_status='composite_exact',
-                            metadata={'source_document_ids': [entry['source_document_id'], entry['identity_source_id']]})
+                            metadata={'row_sha256': row_hash, 'source_document_ids': [entry['source_document_id'], entry['identity_source_id'], *entry.get('discovery_source_ids', [])]})
                         entry['evidence_id'] = packet['id']
                         persist_evidence_items(registry.db, [packet])
                     result[ticker] = entries
-            except (ValueError, OSError, TypeError, KeyError) as exc:
+            except (ValueError, OSError, TypeError, KeyError, AttributeError, IndexError, requests.RequestException) as exc:
                 exclusions.append({'ticker': ticker, 'reason': str(exc)})
             continue
         try:
+            if directory_error:
+                raise ValueError(directory_error)
             matches = [dict(zip(directory['fields'], row)) for row in directory['data'] if dict(zip(directory['fields'], row)).get('ticker') == ticker[:-3]]
             if len(matches) != 1:
                 raise ValueError('missing or ambiguous directory identity')
             cik = int(matches[0]['cik'])
             submissions_source, submissions = fetch(f'https://data.sec.gov/submissions/CIK{cik:010d}.json', 'sec_submissions')
+            submissions = json.loads(submissions)
             identity = issuer_identity(directory, submissions, ticker)
             facts_source, facts = fetch(f'https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json', 'sec_companyfacts')
+            facts = json.loads(facts)
             if int(facts['cik']) != cik:
                 raise ValueError('companyfacts identity mismatch')
             pointers = select_facts(facts, submissions, cutoff)
@@ -259,7 +283,7 @@ def collect(root, tickers):
                     persist_evidence_items(registry.db, [packet])
                     result[ticker].append(entry)
             print(f'SEC {ticker}: {len(result[ticker])} verified facts', flush=True)
-        except (ValueError, OSError, TypeError, KeyError, requests.RequestException) as exc:
+        except (ValueError, OSError, TypeError, KeyError, AttributeError, IndexError, requests.RequestException) as exc:
             result[ticker] = []
             exclusions.append({'ticker': ticker, 'reason': str(exc)})
             print(f'SEC {ticker}: excluded ({type(exc).__name__})', flush=True)

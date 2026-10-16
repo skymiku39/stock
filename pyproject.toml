@@ -39,6 +39,7 @@ cloud = [
 stock-bot = "bot.main:main"
 stock-dashboard = "bot.dashboard:run"
 stock-auto-research = "bot.auto_research:main"
+stock-verified-research = "bot.verified_research_batch:main"
 stock-macro-update = "bot.macro_update:main"
 stock-fundamentals-refresh = "bot.fundamentals_refresh:main"
 stock-intraday = "bot.intraday_cli:main"

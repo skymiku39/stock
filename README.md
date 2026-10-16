@@ -592,6 +592,42 @@ uv run stock-auto-research --pdf 2330=tsmc.pdf   # 額外送一份法說會 PDF
 所有結果寫到 `data/pipeline_runs/<timestamp>/run.json` + `daily_brief.md`，
 並 append 一筆到 `data/pipeline_runs/manifest.jsonl`。
 
+### 可驗證來源的自動補跑
+
+完整的 `stock-auto-research` 結束後，預設會接續官方來源補跑；
+`--no-llm`、`--no-auto-research` 或 `--no-verified-backlog` 可停用。
+排程有 `--auto-research-limit` 時，只處理該輪選中的外國標的及未產出結果的個股，
+不突破該輪名單。`--llm-only` 仍是原本的研究入口，未改接此流程。
+
+也可以獨立執行（外國代碼與市場後綴需一起加引號）：
+
+```powershell
+uv run stock-verified-research --source-run 20261015_083029 --foreign --execute
+uv run stock-verified-research --tickers "AAPL US" "4062 JP" "IFX GY" --execute
+```
+
+移除 `--execute` 只採集與驗證，不呼叫模型。SEC 必須設定環境變數或本機 `.env`
+中的 `SEC_USER_AGENT`，包含應用程式名稱及已授權的聯絡 email；不要將真實聯絡資訊提交 Git。
+美國上市代碼由 SEC 目錄、發行人申報與 companyfacts 交叉核對；
+4062 JP、6857 JP、6981 JP、009150 KS、IFX GY 由官方財報索引自動發現文件。
+其他未支援代碼、來源格式改變、空白回應或身分不符均排除，不靠模型補猜。
+
+來源快取在 `data/foreign_sources/YYYY-MM-DD/`，每天重新採集；
+`--refresh-sources` 可於當天強制更新，失敗不退回舊資料冒充更新成功。
+報告保留原始財報期間及幣別；新抓到的歷史財報不代表最新季度。
+台股部分重放既有官方原始資料，需先由原採集／基本面更新流程取得資料。
+
+新輸出位於 `data/verified_research_batches/<run>/automated[-foreign]/YYYY-MM-DD/`，
+包含 `inputs.json`、`status.json`、`verification-summary.json`、原始模型回應與 `reports/`。
+這是限定財務範圍的補充研究，不會把模型結論標成已驗證，也不回填既有每日簡報。
+同日跨輪次只沿用輸入完全相同、原始檔雜湊及成功模型證據連結仍有效的報告。
+重跑前失效的報告移到 `attempts/`，不留在有效報告目錄。
+單一專案只允許一個補跑程序；中斷後重新執行同一命令可續跑。
+
+模型失敗或引用欄位不符預設最多嘗試 2 輪（`--max-attempts 1..3`），只補未完成項目。
+執行模式 exit code：`0` 全數完成、`2` 執行或最終驗證失敗、`3` 有來源排除、`4` 已有程序執行。
+採集模式的 `0` 只代表採集成功，須看摘要中的 `complete`，不能當成模型研究完成。
+
 ### ⚡ 今日當沖戰情室 (intraday_pipeline.py)
 
 **「先定主題 → 找股 → 排序」的盤前選股流程**。專為「今天當沖」設計：
