@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ from bot.cli_encoding import configure_console
 from bot.app_bootstrap import get_or_create_bus
 from bot.events import SmileAuditCompleted
 from bot.events.wiring import publish_if_bus
-from bot.smile_curve_backtest_analysis import DEFAULT_SCENARIOS, audit_symbols
+from bot.smile_curve_backtest_analysis import DEFAULT_SCENARIOS, COMPARISON_SCENARIOS, audit_symbols
 from bot.smile_curve_backtest_cli import _ensure_daily_data, _normalize_symbol, _resolve_dates
 from bot.stock_db import StockDB, default_db_path
 from bot.utils import get_logger, mk_folder, now_tw
@@ -54,6 +55,10 @@ def _print_audit(reports) -> None:
                 f"     未平倉={r.open_lots} 筆 | 成本={r.open_lots_cost_twd:,.0f} | "
                 f"期末浮動={r.open_lots_mtm_pnl_twd:+,.0f}",
             )
+        if r.portfolio:
+            p = r.portfolio
+            print(f"     共用帳戶總損益={p['net_pnl_twd']:,.0f} | "
+                  f"報酬={p['return_pct']:.2f}% | 最大日終回撤={p['max_drawdown_pct']:.2f}%")
         for note in r.notes:
             print(f"     ※ {note}")
 
@@ -66,6 +71,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--end", help="覆寫所有情境結束日（可選）")
     parser.add_argument("--fetch", action="store_true", help="缺日K時自動抓取")
     parser.add_argument("--json", action="store_true", help="輸出 JSON")
+    parser.add_argument("--include-legacy-comparison", action="store_true",
+                        help="另列含成交偏誤的歷史 OHLC 對照，不作績效證據")
     parser.add_argument("--output", help="匯出 JSON 路徑")
     parser.add_argument(
         "--trades-csv",
@@ -84,7 +91,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("請指定 --symbols")
         return 1
 
-    scenarios = list(DEFAULT_SCENARIOS)
+    scenarios = [replace(s) for s in (COMPARISON_SCENARIOS if args.include_legacy_comparison else DEFAULT_SCENARIOS)]
     if args.start or args.end:
         start, end = _resolve_dates(900, args.start, args.end)
         for sc in scenarios:

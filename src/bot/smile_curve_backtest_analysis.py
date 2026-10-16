@@ -9,11 +9,11 @@ from typing import List, Literal, Optional, Sequence
 
 from bot.config import Settings
 from bot.smile_curve import SmileCurveEngine, SmileRoundTrip
-from bot.smile_curve_backtest import SmileCurveBacktester, SmileSymbolResult
+from bot.smile_curve_backtest import SmileCurveBacktester, SmileBacktestSummary
 from bot.stock_db import StockDB
 from bot.trade_cost import buy_cash_required, net_pnl_pct, net_pnl_twd
 
-BacktestPriceMode = Literal["close", "ohlc"]
+BacktestPriceMode = Literal["next_open", "close", "ohlc"]
 
 
 @dataclass
@@ -25,7 +25,7 @@ class BacktestScenario:
     use_odd_lot: bool
     smile_buy_tiers: str
     smile_base_lot: int
-    price_mode: BacktestPriceMode = "close"
+    price_mode: BacktestPriceMode = "next_open"
 
 
 @dataclass
@@ -61,6 +61,7 @@ class ScenarioReport:
     round_trips: List[SmileRoundTrip] = field(default_factory=list)
     skip_reason: str = ""
     notes: List[str] = field(default_factory=list)
+    portfolio: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         s = self.trade_stats
@@ -84,6 +85,8 @@ class ScenarioReport:
             "open_lots": self.open_lots,
             "open_lots_mtm_pnl_twd": round(self.open_lots_mtm_pnl_twd, 0),
             "notes": self.notes,
+            "net_pnl_twd": s.total_pnl_twd + self.open_lots_mtm_pnl_twd,
+            "portfolio": self.portfolio,
         }
 
 
@@ -111,7 +114,7 @@ def _trade_stats(trips: Sequence[SmileRoundTrip]) -> TradeStats:
         avg_pnl_twd=statistics.mean(pnls),
         median_pnl_twd=statistics.median(pnls),
         max_win_twd=max(pnls),
-        max_loss_twd=min(pnls),
+        max_loss_twd=min(0.0, min(pnls)),
         avg_hold_days=statistics.mean(holds) if holds else 0.0,
         avg_pnl_pct=statistics.mean(pcts),
     )
@@ -124,6 +127,7 @@ def run_scenario(
     *,
     name: str = "",
     settings: Optional[Settings] = None,
+    portfolio_summary: Optional[SmileBacktestSummary] = None,
 ) -> ScenarioReport:
     bars = db.get_price_history(symbol, start=scenario.start, end=scenario.end, ascending=True)
     report = ScenarioReport(
@@ -152,6 +156,27 @@ def run_scenario(
         smile_base_lot=scenario.smile_base_lot,
         _env_file=None,
     )
+    if scenario.price_mode == "next_open":
+        summary = portfolio_summary or SmileCurveBacktester(bt_settings).run_many(
+            [symbol], db=db, start=scenario.start, end=scenario.end,
+        )
+        result = next(r for r in summary.results if r.symbol == symbol)
+        report.round_trips = result.round_trips
+        report.trade_stats = _trade_stats(result.round_trips)
+        report.cycle_count = result.cycle_count
+        report.open_lots = result.open_lots
+        report.open_lots_cost_twd = result.open_cost_twd
+        report.open_lots_mtm_pnl_twd = result.unrealized_pnl_twd
+        report.portfolio = dict(initial_cash=summary.initial_cash,
+                                net_pnl_twd=summary.net_pnl_twd,
+                                return_pct=summary.return_pct,
+                                max_drawdown_pct=summary.max_drawdown_pct,
+                                max_drawdown_twd=summary.max_drawdown_twd,
+                                symbols=[r.symbol for r in summary.results])
+        report.notes = [summary.settings_note, "portfolio 為共用帳戶指標，不可逐檔加總"]
+        return report
+    if scenario.price_mode not in ("close", "ohlc"):
+        raise ValueError(f"unsupported price mode: {scenario.price_mode}")
     engine = SmileCurveEngine(symbol, bt_settings)
     for bar in bars:
         trade_date = bar.date[:10]
@@ -184,24 +209,24 @@ def run_scenario(
         )
 
     if scenario.price_mode == "ohlc":
-        report.notes.append("OHLC：當日低點加碼、高點獲利了結（同日樂觀假設）")
+        report.notes.append("歷史偏誤對照 ONLY：當日低點加碼、高點獲利了結，不可作績效證據")
     else:
-        report.notes.append("收盤價：僅用日 K 收盤（較保守）")
+        report.notes.append("歷史偏誤對照 ONLY：收盤訊號同價成交，非次日成交模型")
     if report.open_lots > 0:
         report.notes.append(f"期末仍有 {report.open_lots} 筆未平倉")
     return report
 
 
-DEFAULT_SCENARIOS: List[BacktestScenario] = [
+COMPARISON_SCENARIOS: List[BacktestScenario] = [
     BacktestScenario(
-        label="長期整股標準",
+        label="長期整股次日開盤",
         start="2020-01-01",
         end="2026-06-12",
         max_fund=600_000,
         use_odd_lot=False,
         smile_buy_tiers="1:1,3:2,5:3,8:4",
         smile_base_lot=1,
-        price_mode="close",
+        price_mode="next_open",
     ),
     BacktestScenario(
         label="長期整股OHLC",
@@ -214,14 +239,14 @@ DEFAULT_SCENARIOS: List[BacktestScenario] = [
         price_mode="ohlc",
     ),
     BacktestScenario(
-        label="近期30萬配置收盤",
+        label="近期6萬配置次日開盤",
         start="2023-01-01",
         end="2026-06-12",
         max_fund=60_000,
         use_odd_lot=False,
         smile_buy_tiers="2:1,5:2,10:3",
         smile_base_lot=1,
-        price_mode="close",
+        price_mode="next_open",
     ),
     BacktestScenario(
         label="近期30萬配置OHLC",
@@ -245,6 +270,9 @@ DEFAULT_SCENARIOS: List[BacktestScenario] = [
     ),
 ]
 
+# Biased legacy fills are opt-in only; never present them as the default audit.
+DEFAULT_SCENARIOS = [s for s in COMPARISON_SCENARIOS if s.price_mode == "next_open"]
+
 
 def audit_symbols(
     db: StockDB,
@@ -255,9 +283,18 @@ def audit_symbols(
 ) -> List[ScenarioReport]:
     names = names or {}
     out: List[ScenarioReport] = []
-    for sym in symbols:
-        for sc in scenarios or DEFAULT_SCENARIOS:
-            out.append(run_scenario(db, sym, sc, name=names.get(sym, sym)))
+    for sc in scenarios or DEFAULT_SCENARIOS:
+        summary = None
+        if sc.price_mode == "next_open":
+            settings = Settings(max_fund=sc.max_fund, daily_fund_budget=0,
+                                use_odd_lot=sc.use_odd_lot, smile_buy_tiers=sc.smile_buy_tiers,
+                                smile_base_lot=sc.smile_base_lot, _env_file=None)
+            summary = SmileCurveBacktester(settings).run_many(
+                symbols, db=db, start=sc.start, end=sc.end,
+            )
+        for sym in symbols:
+            out.append(run_scenario(db, sym, sc, name=names.get(sym, sym),
+                                    portfolio_summary=summary))
     return out
 
 

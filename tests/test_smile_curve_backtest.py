@@ -20,7 +20,7 @@ def db(tmp_path: Path) -> StockDB:
 
 def _u_shape_bars(symbol: str = "2330") -> list[PriceBar]:
     """U 型：100 → 跌到 82 → 彈回 102。"""
-    closes = [100, 99, 97, 94, 90, 86, 83, 82, 84, 88, 93, 98, 102]
+    closes = [100, 99, 97, 94, 90, 86, 83, 82, 84, 88, 93, 98, 102, 103]
     bars: list[PriceBar] = []
     for i, c in enumerate(closes):
         d = f"2026-01-{i + 2:02d}"
@@ -83,7 +83,7 @@ class TestSmileCurveBacktest:
             _env_file=None,
         )
         result = SmileCurveBacktester(settings).run_symbol(
-            db, "2330", start="2026-01-02", end="2026-01-14",
+            db, "2330", start="2026-01-02", end="2026-01-15",
         )
         assert result.bar_count >= 10
         assert result.trade_count >= 1

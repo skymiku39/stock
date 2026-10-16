@@ -84,8 +84,10 @@ def _print_summary(summary: SmileBacktestSummary) -> None:
     if summary.start:
         print(f"區間: {summary.start} ~ {summary.end}")
     print(f"回合數: {len(summary.all_round_trips)}")
-    print(f"總淨利: {summary.total_pnl_twd:,.0f} 元")
-    print(f"勝率: {summary.win_rate:.1f}%")
+    print(f"已實現: {summary.total_pnl_twd:,.0f} 元 | 未實現(含出清成本): {summary.unrealized_pnl_twd:,.0f} 元")
+    print(f"總損益: {summary.net_pnl_twd:,.0f} 元 | 本金報酬: {summary.return_pct:.2f}%")
+    print(f"最大日終回撤: {summary.max_drawdown_pct:.2f}% / {summary.max_drawdown_twd:,.0f} 元")
+    print(f"已平倉勝率: {summary.win_rate:.1f}%（只賣獲利單，不代表總報酬）")
     print()
     for r in summary.results:
         if r.skip_reason:
@@ -93,7 +95,7 @@ def _print_summary(summary: SmileBacktestSummary) -> None:
             continue
         print(
             f"  {r.symbol}: {r.trade_count} 筆 | "
-            f"淨利 {r.total_pnl_twd:,.0f} | 勝率 {r.win_rate:.1f}% | "
+            f"已實現 {r.total_pnl_twd:,.0f} | 未實現 {r.unrealized_pnl_twd:,.0f} | "
             f"週期 {r.cycle_count} | 未平倉 lot {r.open_lots}",
         )
 
@@ -151,6 +153,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         overrides["smile_base_lot"] = args.base_lot
     if args.max_fund is not None:
         overrides["max_fund"] = args.max_fund
+        overrides["daily_fund_budget"] = 0
     if args.reference:
         parts = args.reference.split(":")
         if len(parts) == 2:
@@ -170,26 +173,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         summary.end = end
 
         if args.json:
-            payload = {
-                "settings_note": summary.settings_note,
-                "start": start,
-                "end": end,
-                "total_pnl_twd": summary.total_pnl_twd,
-                "win_rate": summary.win_rate,
-                "trade_count": len(summary.all_round_trips),
-                "symbols": [
-                    {
-                        "symbol": r.symbol,
-                        "trade_count": r.trade_count,
-                        "total_pnl_twd": r.total_pnl_twd,
-                        "win_rate": r.win_rate,
-                        "cycle_count": r.cycle_count,
-                        "open_lots": r.open_lots,
-                        "skip_reason": r.skip_reason,
-                    }
-                    for r in summary.results
-                ],
-            }
+            payload = summary.to_dict()
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             _print_summary(summary)

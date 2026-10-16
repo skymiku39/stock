@@ -228,8 +228,8 @@ def _composite_score(
     score += min(metrics.ann_vol_pct, 60.0) * 0.4
     score += min(metrics.dip_5pct_days / 25.0, 20.0)
     score += min(backtest.trade_count * 2.5, 25.0)
-    if backtest.total_pnl_twd > 0:
-        score += min(backtest.total_pnl_twd / 5000.0, 10.0)
+    if backtest.net_pnl_twd > 0:
+        score += min(backtest.net_pnl_twd / 5000.0, 10.0)
     if affordable:
         score += 12.0
     elif use_odd_lot and metrics.odd_shares_per_budget >= 5:
@@ -370,7 +370,7 @@ def screen_smile_candidates(
             ann_vol_pct=metrics.ann_vol_pct,
             dip_5pct_days=metrics.dip_5pct_days,
             trade_count=bt.trade_count,
-            backtest_pnl_twd=bt.total_pnl_twd,
+            backtest_pnl_twd=bt.net_pnl_twd,
             backtest_win_rate=bt.win_rate,
             open_lots=bt.open_lots,
             composite_score=score,
