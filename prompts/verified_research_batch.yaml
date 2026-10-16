@@ -1,5 +1,5 @@
 id: verified_research_batch
-version: "1.0"
+version: "1.1"
 description: 僅依可重放官方原始資料進行批次個股研究
 max_output_tokens: 12000
 temperature: 0.1
@@ -17,6 +17,10 @@ template: |
   每檔輸出 summary（最多200字）、limitations、observations。
   observations 為1至4個物件，每個包含 evidence_id、field、value，三者必須
   逐字複製自該 ticker 的同一筆 source.row，value 保留原始JSON型別。
+  SEC 資料的數值欄位名稱是 val，concept 是會計項目名稱的值，不是欄位名稱。
+  例如 row={{"concept":"Assets","val":100,"unit":"USD"}}，數值觀察應輸出
+  field="val", value=100；不得輸出 field="Assets"。數值解釋須保留該列 concept、unit、start/end。
+  official_excerpt 資料請逐字引用 financial_excerpt；不要將摘錄拆成不存在的數值欄位。
   summary 必須以 observations 支持，不得添加未提供的數值、事件或產業背景。
   回傳且只回傳 JSON：{{"reports":[{{"ticker":"代碼","summary":"研究摘要",
   "limitations":["資料限制"],"observations":[{{"evidence_id":"id","field":"欄位","value":"原值"}}]}}]}}

@@ -95,6 +95,10 @@ def revalidate(root, items):
     with SourceRegistry(root) as registry:
         for item in items:
             for entry in item['sources']:
+                if entry.get('format'):
+                    from bot.foreign_research_sources import validate_entry
+                    validate_entry(root, registry.db, item['ticker'], entry)
+                    continue
                 source = registry.db.get_source_document(entry['source_document_id'])
                 if source is None or source.quality_status not in {'ok', 'partial'}:
                     raise ValueError('source became unavailable')
@@ -110,6 +114,7 @@ def main(argv=None):
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--source-run', required=True)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--foreign', action='store_true', help='Research the exact previously excluded foreign backlog')
     parser.add_argument('--batch-size', type=int, default=8)
     args = parser.parse_args(argv)
     root = args.root.resolve()
@@ -118,11 +123,19 @@ def main(argv=None):
     original = json.loads((root / 'data/pipeline_runs' / args.source_run / 'run.json').read_text(encoding='utf-8'))
     tickers = backlog(original)
     out = root / 'data/verified_research_batches' / args.source_run
+    if args.foreign:
+        original_summary = json.loads((out / 'verification-summary.json').read_text(encoding='utf-8'))
+        tickers = original_summary['excluded_tickers']
+        out = out / 'foreign'
     attempt_id = now_tw().strftime('%Y%m%d_%H%M%S_%f')
     if (out / 'status.json').exists():
         previous = json.loads((out / 'status.json').read_text(encoding='utf-8'))
         write_json(out / 'attempts' / (attempt_id + '-previous-status.json'), previous)
-    inputs, exclusions = collect(root, tickers)
+    if args.foreign:
+        from bot.foreign_research_sources import collect as collect_foreign
+        inputs, exclusions = collect_foreign(root, tickers)
+    else:
+        inputs, exclusions = collect(root, tickers)
     state = {'source_run': args.source_run, 'requested': len(tickers), 'started_at': now_tw().isoformat(),
              'scope': 'official financial and valuation rows only; model conclusions unverified',
              'source_exclusions': exclusions, 'results': {}}
