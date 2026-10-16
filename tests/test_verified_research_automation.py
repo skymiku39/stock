@@ -161,3 +161,9 @@ def test_long_official_rows_do_not_overwrite_each_others_evidence(tmp_path, monk
     with SourceRegistry(tmp_path) as registry:
         assert 'one' in registry.db.get_evidence(old_id).excerpt
         assert 'two' in registry.db.get_evidence(new_id).excerpt
+
+
+def test_selected_ticker_exception_is_retryable_without_including_other_symbols():
+    from bot.verified_research_batch import backlog
+    assert backlog({'focus_tickers':['2330','2317'],'auto_research_batch':{
+        'selected_tickers':['2330','2317']},'errors':['auto_research_2330: unavailable']})==['2330']

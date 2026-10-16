@@ -100,6 +100,7 @@ def summarize(root, out, state):
                'raw_source_documents': len(documents), 'model_input_receipts': len(receipts),
                'exact_evidence_entries': len(evidence), 'scope': state['scope'],
                'excluded_tickers': [t for t,r in state['results'].items() if r['status']=='excluded'],
+               'source_exclusions': state.get('source_exclusions', []),
                'results': state['results'], 'periods': details}
     write_json(out / 'verification-summary.json', summary)
     write_json(out / 'status.json', state)

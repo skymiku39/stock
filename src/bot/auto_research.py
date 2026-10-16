@@ -206,7 +206,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     verified_result = 0
     if (not args.no_verified_backlog and not args.no_auto_research and not args.no_llm
-            and settings.llm_enabled and not run.errors):
+            and settings.llm_enabled):
         from bot.verified_research_batch import main as run_verified_backlog
         verified_args = [
             '--root', str(project_root), '--source-run', run.run_id, '--execute',

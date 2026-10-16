@@ -39,3 +39,17 @@ def test_verified_backlog_respects_opt_out_and_scheduler_budget(tmp_path, monkey
     monkeypatch.setattr(verified_research_batch,'main',lambda args:calls.append(args) or 3)
     assert auto_research.main(['--root',str(tmp_path),*flags]) == (3 if expected else 0)
     assert (calls and calls[0][-1]==expected) if expected else not calls
+
+
+def test_pipeline_errors_do_not_suppress_verified_recovery_or_become_success(tmp_path, monkeypatch):
+    from bot import auto_research, verified_research_batch
+    from bot.config import Settings
+    settings=Settings(_env_file=None, gemini_api_key='fixture', llm_provider='gemini')
+    monkeypatch.setattr(auto_research,'Settings',lambda **kw:settings)
+    monkeypatch.setattr(auto_research,'get_or_create_bus',lambda **kw:None)
+    monkeypatch.setattr(auto_research,'run_full_pipeline',lambda *a,**kw:SimpleNamespace(
+        run_id='fixture',errors=['upstream failure'],warnings=[],focus_tickers=[],output_dir=str(tmp_path)))
+    calls=[]
+    monkeypatch.setattr(verified_research_batch,'main',lambda args:calls.append(args) or 0)
+    assert auto_research.main(['--root',str(tmp_path)])==2
+    assert len(calls)==1

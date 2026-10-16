@@ -20,6 +20,7 @@ def write_json(path, value):
 def backlog(run):
     batch = run.get('auto_research_batch', {})
     selected = set(batch.get('selected_tickers', [])) - set(batch.get('no_result_tickers', []))
+    selected = {t for t in selected if not any(str(error).startswith(f'auto_research_{t}:') for error in run.get('errors', []))}
     return list(dict.fromkeys(t for t in run['focus_tickers'] if t not in selected))
 
 
@@ -137,7 +138,7 @@ def _main(argv=None):
         tickers = list(dict.fromkeys(tickers + [t for t in original['focus_tickers'] if ' ' in t]))
         if args.selected_only:
             batch = original.get('auto_research_batch', {})
-            missing = set(batch.get('no_result_tickers', []))
+            missing = set(backlog(original))
             tickers = [t for t in batch.get('selected_tickers', []) if ' ' in t or t in missing]
     else:
         parser.error('provide --source-run or --tickers')
