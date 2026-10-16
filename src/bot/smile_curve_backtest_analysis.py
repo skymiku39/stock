@@ -168,6 +168,7 @@ def run_scenario(
         report.open_lots_cost_twd = result.open_cost_twd
         report.open_lots_mtm_pnl_twd = result.unrealized_pnl_twd
         report.portfolio = dict(initial_cash=summary.initial_cash,
+                                execution=summary.execution,
                                 net_pnl_twd=summary.net_pnl_twd,
                                 return_pct=summary.return_pct,
                                 max_drawdown_pct=summary.max_drawdown_pct,

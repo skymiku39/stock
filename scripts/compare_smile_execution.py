@@ -14,6 +14,7 @@ from pathlib import Path
 import sqlite3
 
 from bot.config import Settings
+from bot.smile_execution import SmileExecution
 from bot.smile_curve import SmileCurveEngine
 from bot.smile_curve_backtest import SmileCurveBacktester
 from bot.stock_db import PriceBar
@@ -134,9 +135,9 @@ def main():
                           reference="first_close_then_reset",odd_lot=False),
                           coverage={s:dict(start=b[0].date,end=b[-1].date,count=len(b)) for s,b in hist.items()},
                           legacy_close=legacy(hist,settings,"close"),legacy_ohlc=legacy(hist,settings,"ohlc"),
-                          next_open_independent={s:SmileCurveBacktester(settings).run_histories({s:b}).to_dict()
+                          next_open_independent={s:SmileCurveBacktester(settings, execution=SmileExecution.ideal()).run_histories({s:b}).to_dict()
                                                  for s,b in hist.items()},
-                          next_open_shared=SmileCurveBacktester(settings).run_histories(hist).to_dict()))
+                          next_open_shared=SmileCurveBacktester(settings, execution=SmileExecution.ideal()).run_histories(hist).to_dict()))
     inputs={s:[asdict(b) for b in rows] for s,rows in histories.items()}
     encoded=json.dumps(inputs,ensure_ascii=False,sort_keys=True).encode("utf-8")
     args.output.mkdir(parents=True,exist_ok=True)

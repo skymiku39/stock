@@ -1,5 +1,7 @@
 # 微笑曲線回測
 
+> 2026-10-16 後續修正：預設已加入每邊 10 bps 滑價、價格跳動單位、前日成交量 0.1% 上限及開盤漲跌停代理防護。詳見 [成交限制驗證](../reports/smile-friction-validation.md)。以下較早「無滑價」描述僅適用理想成交基線。
+
 ## 指令
 
 ```bash
@@ -14,6 +16,9 @@ uv run stock-smile-backtest --symbols "2330" --tiers "1:1,3:2,5:3,10:5" --max-fu
 
 # 匯出明細 CSV
 uv run stock-smile-backtest --symbols "2330" --reference 2330:1000 --output data/reports/smile_2330.csv
+
+# 成交限制參數（只支援一般台股現股，ETF 須另有對應價格規則）
+uv run stock-smile-backtest --symbols "2330,2303" --slippage-bps 10 --participation 0.001
 ```
 
 ## 現行回測：收盤訊號、次日開盤成交（2026-10-16 修正）

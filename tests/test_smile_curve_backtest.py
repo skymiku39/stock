@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from bot.config import Settings
+from bot.smile_execution import SmileExecution
 from bot.smile_curve import SmileCurveEngine, parse_smile_buy_tiers
 from bot.smile_curve_backtest import SmileCurveBacktester
 from bot.stock_db import PriceBar, StockDB
@@ -82,7 +83,7 @@ class TestSmileCurveBacktest:
             max_lot_per_symbol=8,
             _env_file=None,
         )
-        result = SmileCurveBacktester(settings).run_symbol(
+        result = SmileCurveBacktester(settings, execution=SmileExecution.ideal()).run_symbol(
             db, "2330", start="2026-01-02", end="2026-01-15",
         )
         assert result.bar_count >= 10
@@ -105,7 +106,7 @@ class TestSmileCurveBacktest:
             max_fund=500_000,
             _env_file=None,
         )
-        result = SmileCurveBacktester(settings).run_symbol(db, "0050")
+        result = SmileCurveBacktester(settings, execution=SmileExecution.ideal()).run_symbol(db, "0050")
         for trip in result.round_trips:
             assert net_pnl_pct(
                 trip.entry_price, trip.exit_price,

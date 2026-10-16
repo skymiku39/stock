@@ -12,6 +12,7 @@ from bot.smile_curve import SmileCurveEngine, SmileRoundTrip, SmileLot
 from bot.models import qty_multiplier
 from bot.trade_cost import buy_cash_required, sell_cash_received, net_pnl_twd, max_affordable_qty
 from bot.stock_db import StockDB, default_db_path
+from bot.smile_execution import SmileExecution
 
 
 @dataclass
@@ -62,6 +63,7 @@ class SmileBacktestSummary:
     orders: list[dict] = field(default_factory=list)
     max_drawdown_twd: float = 0.0
     max_drawdown_pct: float = 0.0
+    execution: dict = field(default_factory=dict)
 
     @property
     def unrealized_pnl_twd(self) -> float:
@@ -113,8 +115,9 @@ class SmileBacktestSummary:
 class SmileCurveBacktester:
     """日 K 微笑曲線回測。"""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Optional[Settings] = None, *, execution: Optional[SmileExecution] = None):
         self.settings = settings or Settings()
+        self.execution = execution or SmileExecution()
 
     def run_symbol(
         self,
@@ -154,6 +157,10 @@ class SmileCurveBacktester:
         Valuation is net liquidation value (including estimated exit fees/tax).
         """
         cap = float(self.settings.effective_fund_cap())
+        if not self.execution.is_ideal:
+            unsupported = [s for s in histories if s.isdigit() and (len(s) != 4 or s.startswith("0"))]
+            if unsupported:
+                raise ValueError(f"execution model supports ordinary TW equities only, not {unsupported}")
         if not math.isfinite(cap) or cap <= 0:
             raise ValueError("fund cap must be finite and positive")
         engines = {s: SmileCurveEngine(s, self.settings) for s in sorted(histories)}
@@ -166,7 +173,7 @@ class SmileCurveBacktester:
                     raise ValueError(f"duplicate daily bar: {sym} {date}")
                 calendar[date][sym] = bar
         out = SmileBacktestSummary(list(results.values()), start=start, end=end,
-                                  initial_cash=cap, cash=cap,
+                                  initial_cash=cap, cash=cap, execution=self.execution.to_dict(),
                                   settings_note=(f"fund_cap={cap:.0f}; tiers={self.settings.smile_buy_tiers}; "
                                                  f"base_lot={self.settings.smile_base_lot}; "
                                                  f"max_lot_per_symbol={self.settings.max_lot_per_symbol}; "
@@ -176,9 +183,10 @@ class SmileCurveBacktester:
                                                  f"fee_discount={self.settings.broker_fee_discount}; "
                                                  f"min_fee={self.settings.broker_min_fee}; "
                                                  "收盤訊號→次日開盤；多檔共用現金；同日賣款不供開盤買單；"
-                                                 "代號排序分配；權益含預估出清費稅；無滑價/流動性模型"))
+                                                 "代號排序分配；權益含出清滑價與費稅；成交假設見 execution"))
         pending: dict[str, list[dict]] = {s: [] for s in engines}
         marks: dict[str, float] = {}
+        previous_volumes: dict[str, float] = {}
         peak = cap
 
         def valid(value):
@@ -194,6 +202,7 @@ class SmileCurveBacktester:
             opening_budget = min(out.cash, max(0.0, cap - exposure()))
             for sym in sorted(today):
                 e, bar = engines[sym], today[sym]
+                available_shares = self.execution.capacity(previous_volumes.get(sym))
                 orders, pending[sym] = pending[sym], []
                 for order in orders:
                     log = {k: v for k, v in order.items() if k != "lot"}
@@ -202,10 +211,21 @@ class SmileCurveBacktester:
                     if not valid(bar.open):
                         log["reason"] = "invalid_open"
                         continue
-                    px = float(bar.open)
+                    prior_volume = previous_volumes.get(sym)
+                    log.update(open_price=float(bar.open), previous_close=marks.get(sym),
+                               previous_volume_lots=prior_volume if prior_volume is not None and math.isfinite(prior_volume) else None,
+                               available_shares=None if math.isinf(available_shares) else available_shares)
+                    px, blocked = self.execution.quote(float(bar.open), order["side"], marks.get(sym))
+                    if blocked:
+                        log["reason"] = blocked
+                        continue
                     log["execution_price"] = px
                     if order["side"] == "sell":
                         lot = order["lot"]
+                        shares = lot.quantity * qty_multiplier(lot.unit)
+                        if shares > available_shares:
+                            log["reason"] = "volume_limit_whole_lot_sell"
+                            continue
                         if not e._is_profitable_sell(lot, px):
                             log["reason"] = "unprofitable_open"
                             continue
@@ -214,6 +234,7 @@ class SmileCurveBacktester:
                         out.cash += sell_cash_received(px, lot.quantity, lot.unit,
                                                       settings=self.settings, sell_tax_rate=e.sell_tax)
                         log.update(status="filled", filled_quantity=lot.quantity)
+                        available_shares -= shares
                         if not e.open_lots:
                             e._reset_cycle(px, date)
                         else:
@@ -222,6 +243,11 @@ class SmileCurveBacktester:
                     else:
                         unit = "share" if self.settings.use_odd_lot else "lot"
                         want = order["quantity"]
+                        if not math.isinf(available_shares):
+                            want = min(want, int(available_shares // qty_multiplier(unit)))
+                        if want <= 0:
+                            log["reason"] = "volume_limit"
+                            continue
                         # Apply the same share-equivalent cap in both quantity modes.
                         limit = self.settings.max_lot_per_symbol * 1000
                         held = sum(l.quantity * qty_multiplier(l.unit) for l in e.open_lots)
@@ -237,6 +263,7 @@ class SmileCurveBacktester:
                         e._cash_used += paid
                         out.cash -= paid
                         opening_budget -= paid
+                        available_shares -= qty * qty_multiplier(unit)
                         if order["tier"] is not None:
                             e.state.tiers_done.add(order["tier"])
                         log.update(status="filled", filled_quantity=qty)
@@ -244,6 +271,7 @@ class SmileCurveBacktester:
             # Only now is today's close available to the strategy.
             for sym in sorted(today):
                 e, bar = engines[sym], today[sym]
+                previous_volumes[sym] = float(bar.volume) if bar.volume is not None else 0.0
                 if not valid(bar.close):
                     continue
                 close = float(bar.close)
@@ -266,7 +294,7 @@ class SmileCurveBacktester:
                         pending[sym].append(dict(side="buy", signal_date=date, tier=None,
                                                 quantity=e.base_lot, label="bottom_dca"))
             realized = sum(e.realized_pnl_twd for e in engines.values())
-            unrealized = sum(net_pnl_twd(l.entry_price, marks[s], l.quantity, l.unit,
+            unrealized = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[s], "sell"), l.quantity, l.unit,
                                         settings=self.settings, sell_tax_rate=e.sell_tax)
                              for s, e in engines.items() for l in e.open_lots)
             equity = cap + realized + unrealized
@@ -286,7 +314,7 @@ class SmileCurveBacktester:
             r.cycle_count = e.state.cycle_index
             r.open_lots = len(e.open_lots)
             r.open_cost_twd = sum(cost(l) for l in e.open_lots)
-            r.unrealized_pnl_twd = sum(net_pnl_twd(l.entry_price, marks[sym], l.quantity, l.unit,
+            r.unrealized_pnl_twd = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[sym], "sell"), l.quantity, l.unit,
                                                 settings=self.settings, sell_tax_rate=e.sell_tax)
                                        for l in e.open_lots)
             r.pending_orders = len(pending[sym])

@@ -19,6 +19,7 @@ from typing import List, Optional
 
 from bot.cli_encoding import configure_console
 from bot.config import Settings
+from bot.smile_execution import SmileExecution
 from bot.smile_curve_backtest import SmileBacktestSummary, SmileCurveBacktester
 from bot.stock_db import StockDB, default_db_path
 from bot.utils import get_logger, mk_folder, now_tw
@@ -129,6 +130,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--base-lot", type=int, help="每階基礎張數")
     parser.add_argument("--reference", help="固定標準價 SYMBOL:PRICE，例 2330:580")
     parser.add_argument("--max-fund", type=int, help="資金上限")
+    parser.add_argument("--slippage-bps", type=float, default=10, help="每邊滑價 bps，10 = 0.1%%")
+    parser.add_argument("--participation", type=float, default=.001, help="前一日成交股數參與率，.001 = 0.1%%")
     parser.add_argument("--fetch", action="store_true", help="缺日K時自動抓取")
     parser.add_argument("--output", help="匯出 CSV 路徑")
     parser.add_argument("--json", action="store_true", help="輸出 JSON 摘要")
@@ -166,7 +169,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.fetch:
             _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
 
-        summary = SmileCurveBacktester(settings).run_many(
+        execution = SmileExecution(slippage_bps=args.slippage_bps, participation=args.participation)
+        summary = SmileCurveBacktester(settings, execution=execution).run_many(
             symbols, root=root, start=start, end=end, db=db,
         )
         summary.start = start

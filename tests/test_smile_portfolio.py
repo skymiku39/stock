@@ -4,13 +4,14 @@ import math
 import pytest
 
 from bot.config import Settings
+from bot.smile_execution import SmileExecution
 from bot.smile_curve_backtest import SmileCurveBacktester
 from bot.stock_db import PriceBar
 
 
 def bars(symbol, prices):
     return [PriceBar(symbol, f"2026-01-{i+1:02d}", open=o, high=max(o,c)+20,
-                     low=min(o,c)-20, close=c) for i, (o,c) in enumerate(prices)]
+                     low=min(o,c)-20, close=c, volume=100000) for i, (o,c) in enumerate(prices)]
 
 
 def run(histories, **overrides):
@@ -19,7 +20,7 @@ def run(histories, **overrides):
                   max_lot_per_symbol=1, broker_fee_discount=0, broker_min_fee=0,
                   smile_regular_tax_rate=0)
     values.update(overrides)
-    return SmileCurveBacktester(Settings(**values)).run_histories(histories)
+    return SmileCurveBacktester(Settings(**values), execution=SmileExecution.ideal()).run_histories(histories)
 
 
 def test_signal_then_next_open_and_no_extreme_fills():
