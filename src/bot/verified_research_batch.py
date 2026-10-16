@@ -118,6 +118,7 @@ def _main(argv=None):
     parser.add_argument('--tickers', nargs='+', help='Explicit ticker list; quote foreign symbols with market suffix')
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--refresh-sources', action='store_true')
+    parser.add_argument('--require-collected-today', action='store_true')
     parser.add_argument('--selected-only', action='store_true', help='Respect the daily scheduler ticker budget')
     parser.add_argument('--max-attempts', type=int, default=2)
     parser.add_argument('--execute', action='store_true')
@@ -170,6 +171,24 @@ def _main(argv=None):
         foreign_inputs, foreign_exclusions = collect_foreign(root, foreign, refresh=args.refresh_sources)
         inputs.update(foreign_inputs)
         exclusions.extend(foreign_exclusions)
+    if args.require_collected_today:
+        from datetime import datetime
+        with SourceRegistry(root) as registry:
+            for ticker, entries in inputs.items():
+                fresh = []
+                for entry in entries:
+                    source = registry.db.get_source_document(entry['source_document_id'])
+                    try:
+                        retrieved = datetime.fromisoformat(source.retrieved_at)
+                        if retrieved.tzinfo is None:
+                            raise ValueError('retrieval timezone missing')
+                        if retrieved.astimezone(now_tw().tzinfo).date() != now_tw().date():
+                            raise ValueError('not collected today')
+                        fresh.append(entry)
+                    except (ValueError, AttributeError, TypeError) as exc:
+                        exclusions.append({'ticker': ticker, 'reason': str(exc),
+                                           'source_document_id': entry['source_document_id']})
+                inputs[ticker] = fresh
     state = {'source_run': args.source_run, 'requested': len(tickers), 'started_at': now_tw().isoformat(),
              'scope': 'official financial and valuation rows only; model conclusions unverified',
              'source_exclusions': exclusions, 'results': {}}

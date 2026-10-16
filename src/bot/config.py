@@ -346,6 +346,8 @@ class Settings(BaseSettings):
     scheduler_fundamentals_interval_min: int = 360
     scheduler_fundamentals_args: str = "--limit 3 --stale-days 30 --delay-seconds 30"
     # 完整研究管線 (ETF/籌碼/基本面/法說 + LLM 簡報)；<=0 停用
+    scheduler_daily_all_enabled: bool = False
+    scheduler_daily_all_interval_min: int = Field(default=30, ge=5)
     scheduler_research_interval_min: int = 240
     scheduler_research_timeout_seconds: int = Field(default=7200, ge=1)
     scheduler_failure_retry_seconds: int = Field(default=300, ge=1)

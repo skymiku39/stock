@@ -293,7 +293,12 @@ class Scheduler:
                 market_hours_only=s.scheduler_market_hours_only,
                 extra_args=extra,
             ))
-        if s.scheduler_research_interval_min > 0:
+        if s.scheduler_daily_all_enabled:
+            jobs.append(Job(name="research", console_script="stock-daily-research",
+                            module="bot.daily_research",
+                            interval_min=s.scheduler_daily_all_interval_min,
+                            market_hours_only=False))
+        elif s.scheduler_research_interval_min > 0:
             extra = [a for a in str(s.scheduler_research_args).split() if a]
             if not any(
                 arg == "--auto-research-limit"

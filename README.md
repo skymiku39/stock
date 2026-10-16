@@ -770,6 +770,11 @@ Windows Task Scheduler 範例：每天 06:30 跑一次 `uv run stock-macro-updat
 
 ### 持續自動更新 + 盤中監測 (stock-scheduler)
 
+現機已啟用每日全追蹤模式：`SCHEDULER_DAILY_ALL_ENABLED=true`，每 30 分鐘自動檢查
+當日全部追蹤標的（包含週末），成功報告驗證後沿用，失敗自動補跑，來源無法驗證則排除。
+進度見 `data/daily_research/YYYY-MM-DD/status.json`；詳細規則見
+[每日全追蹤模式](docs/automation-plan.md)。此模式取代下述每輪 12 檔的舊 research 設定。
+
 讓資料更新與盤中監測**持續在背景自動跑**，不必開著儀表板：
 
 ```bash
