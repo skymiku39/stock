@@ -143,9 +143,11 @@ def main(argv=None):
                                             'evidence_count': len(item['sources'])}
             except (OSError, ValueError, TypeError, AttributeError):
                 pending.append(item)
-    write_json(out / 'inputs.json', pending)
+    write_json(out / 'inputs.json', [{'ticker': t, 'sources': inputs[t]} for t in tickers if inputs[t]])
     write_json(out / 'status.json', state)
-    print(f'Requested {len(tickers)}; eligible {len(pending)}; excluded {len(tickers)-len(pending)}', flush=True)
+    reused = sum(r['status'] == 'completed' for r in state['results'].values())
+    excluded_count = sum(r['status'] == 'excluded' for r in state['results'].values())
+    print(f'Requested {len(tickers)}; pending {len(pending)}; reused {reused}; excluded {excluded_count}', flush=True)
     if not args.execute:
         return 0
     from bot.config import Settings
