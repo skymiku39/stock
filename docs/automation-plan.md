@@ -206,3 +206,14 @@ uv run python -m bot.daily_research --root C:\skymiku\stock
 ```
 
 Windows 仍採登入後常駐模式；電腦必須開機且已登入，不能在關機期間執行。
+
+
+### C:\start_server 啟動入口
+
+雙擊 `C:\start_server\啟動_股票每日採集與分析.cmd` 可啟動既有模型服務與每日排程；
+已執行的工作會沿用。`台股研究與微笑曲線` 子目錄另有狀態查詢、手動補跑、今日進度、
+日誌入口及 `每日採集與分析_使用說明.txt`。背景排程不會隨啟動視窗關閉而停止。
+
+這些入口都呼叫本專案的 `scripts/start_stock_research.ps1`，不另複製程式、設定或資料。
+需重新安裝入口時執行 `powershell -ExecutionPolicy Bypass -File scripts/install_stock_research_launchers.ps1`；
+相同內容不重寫，更新既有同名檔案前會備份，原有儀表板與回測入口保留。
