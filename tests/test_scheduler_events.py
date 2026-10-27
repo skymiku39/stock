@@ -30,7 +30,7 @@ def _settings(**overrides):
 
 
 class TestSchedulerEvents:
-    def test_run_publishes_started_and_job_completed(self) -> None:
+    def test_run_publishes_started_and_job_completed(self, tmp_path) -> None:
         bus = create_event_bus(enable_logging=False)
         received: list[str] = []
 
@@ -51,6 +51,7 @@ class TestSchedulerEvents:
             ),
             dry_run=True,
             publisher=bus,
+            project_root=tmp_path,
         )
         sch.run(once=True)
 
