@@ -1,0 +1,2960 @@
+{
+  "date": "2026-10-27",
+  "baseline_completed": 357,
+  "original_gaps": 127,
+  "recovered": 80,
+  "completed_after_recovery": 437,
+  "remaining": 47,
+  "requested": 484,
+  "scope": "官方資料與引用可重播；不代表模型結論經獨立驗證，也不代表完整研究管線全部通過。",
+  "root_cause_counts": {
+    "issuer_adapter_missing": 11,
+    "etf_not_company": 1,
+    "market_adapter_missing": 36,
+    "issuer_adapter_added": 7,
+    "vendor_symbol_alias": 2,
+    "bare_us_routing": 69,
+    "sec_no_tagged_accounting_facts": 1
+  },
+  "audit_directory": "data/audits/research-gaps-20261027_125005",
+  "before_state_sha256": "b432676767944882ad7c70db170ee08851ca44904660ed93f2ca73f430db0b14",
+  "after_state_sha256": "d6938b7c2f295d57a53b6cd3539b3790d27f0d4cb55d1c1fae17e07fc34c1d9d",
+  "items": [
+    {
+      "ticker": "000810 KS",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "三星火災海上保險有限公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 000810 KS",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "0050",
+      "origins": [
+        {
+          "source": "configured watch symbol"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "etf_not_company",
+      "handling": "ETF 沒有公司財報列；加入 TWSE 基金基本資料與歷史日 K，明確限制為基金研究。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:03:58.148103+08:00",
+        "report_sha256": "95cc4525b3bf8b9b5b50da656e056b64ee3bab35757b2da45ca84db8a7ae2fdb",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:twse_fund_profile:af342134355ff907beca500fc72715b7f82dd3855d13a1dc5f78785f0277c0a8",
+          "source-doc:twse_stock_day:12fbbbb0519103da7cbf391c15ce48dfc20ac1da3ea60eb8e0d67d8a99a0d0f8"
+        ],
+        "official_urls": [
+          "https://openapi.twse.com.tw/v1/opendata/t187ap47_L",
+          "https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=20261001&stockNo=0050"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "105560 KS",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "韓國國民銀行金融集團公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 105560 KS",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "300757 CH",
+      "origins": [
+        {
+          "fund": "00988A",
+          "as_of": "2026-10-21",
+          "name": "ROBOTECHNIK INTELLIGENT TE-A"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market CH",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "600183 CH",
+      "origins": [
+        {
+          "fund": "00988A",
+          "as_of": "2026-10-21",
+          "name": "Shengyi Technology Co Ltd-A.600183 ch"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market CH",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "6098 JP",
+      "origins": [
+        {
+          "fund": "00990A",
+          "as_of": "2026-10-21",
+          "name": "RECRUIT HOLDINGS CO LTD"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:22:48.554286+08:00",
+        "report_sha256": "a12b69ef96b7064d10e3558b0073d8b2c49370b58e333687966902385c14eaf6",
+        "input_receipt": "source-doc:verified_research_input:10dd056e7e02bdccdd1854dfd489a3630b0a2056c7dbfd35681c05517300e5ca",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:b8aa5480691ad7df2c21694eba64fae6c7c305c72f9efc6e08a2a944635a8972"
+        ],
+        "official_urls": [
+          "https://recruit-holdings.com/en/ir/library/upload/recruit_202703Q1_earnings_en/"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "6762 JP",
+      "origins": [
+        {
+          "fund": "00988A",
+          "as_of": "2026-10-21",
+          "name": "TDK CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 6762 JP",
+      "source_probe": {
+        "url": "https://www.tdk.com/en/ir/ir_library/financial/index.html",
+        "result": "實際讀取官方 IR 入口回傳 HTTP 403；未繞過限制，尚無可重播的官方財報介接。",
+        "date": "2026-10-27"
+      }
+    },
+    {
+      "ticker": "6787 JP",
+      "origins": [
+        {
+          "fund": "00988A",
+          "as_of": "2026-10-21",
+          "name": "MEIKO ELECTRONICS CO LTD"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:23:27.823906+08:00",
+        "report_sha256": "eeefbca5d091602b8fca056dee7173f78e24b6e682f3e460f8d577ef60a3a708",
+        "input_receipt": "source-doc:verified_research_input:c284a93689e41127aaccaa78830efa46267a5868ec2569ce0378dd312bf34cfa",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:69bb636efba803bb6700e832cfa8dca64db19013e078dcadda850ba618bfda54"
+        ],
+        "official_urls": [
+          "https://www.meiko-elec.com/english/pdf/ir/statements/2027/Q1.pdf"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "6981 JT",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "村田製作所有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "vendor_symbol_alias",
+      "handling": "持股來源市場尾碼未受支援；加入有限的精確代碼對照，仍核對官方公司名稱、代碼或 SEC 交易所。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:03:59.191485+08:00",
+        "report_sha256": "16f5ff03ed1d4e2767d44968322834b2d595dc9da538650cd9fe2593135e989a",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:c633398fe10279f12e30c60f806ba3391553048a2d791ee10a623a465ff1c397"
+        ],
+        "official_urls": [
+          "https://corporate.murata.com/-/media/corporate/about/newsroom/news/irnews/irnews/2026/0731/26q1-e-fls.ashx?la=en&cvid=20260731015630000000"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "7167 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Mebuki金融集團公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:22:50.539462+08:00",
+        "report_sha256": "c18f19e260b6f11ae99fa6259945b1175ea03bacb9660d29e74e4c00617c5aea",
+        "input_receipt": "source-doc:verified_research_input:10dd056e7e02bdccdd1854dfd489a3630b0a2056c7dbfd35681c05517300e5ca",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:a202f2352487d74bbbfcdd8ced30123ca72249bc47073e6c883346cb63ae1db5"
+        ],
+        "official_urls": [
+          "https://www.mebuki-fg.co.jp/eng/pdf/release/20260805.pdf"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "8306 JT",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "三菱UFJ金融集團公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:22:52.051790+08:00",
+        "report_sha256": "5432b468036d8154af2049f297a2b23df3bbd8062b4052af2866f6ca14253569",
+        "input_receipt": "source-doc:verified_research_input:10dd056e7e02bdccdd1854dfd489a3630b0a2056c7dbfd35681c05517300e5ca",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:5fb5e14b1b93fa24bdf45c1af44e7429e399f44fce6cb3be72712b1793a11ede"
+        ],
+        "official_urls": [
+          "https://www.mufg.jp/dam/ir/fs/2026/pdf/summary2606_en.pdf"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "8308 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Resona控股公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 8308 JP",
+      "source_probe": {
+        "url": "https://www.resona-gr.co.jp/holdings/english/investors/ir/presentation/",
+        "result": "實際讀取官方 IR 入口回傳 HTTP 403；未繞過限制，尚無可重播的官方財報介接。",
+        "date": "2026-10-27"
+      }
+    },
+    {
+      "ticker": "8309 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "三井住友信託集團公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:23:26.178365+08:00",
+        "report_sha256": "f4abdbe6285120e8823f15df33747f87b0363a22fbc1e5c81eaca98a3acae94a",
+        "input_receipt": "source-doc:verified_research_input:c284a93689e41127aaccaa78830efa46267a5868ec2569ce0378dd312bf34cfa",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:447fde3435d094dc880545c4971b566793a02618554d0cdc693bb589b0bfae57"
+        ],
+        "official_urls": [
+          "https://www.smtg.jp/english/-/media/tg/english/investors/fs/2606/E2606_01.pdf"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "8331 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "千葉銀行有限公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 8331 JP",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "8377 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "北北金融集團公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 8377 JP",
+      "source_probe": {
+        "url": "https://www.hokuhoku-fg.co.jp/english/ir/library/kessan/",
+        "result": "官方入口可取得，財報清單由外部 IRPocket 載入；尚未建立可重播的官方入口至報告來源鏈。",
+        "date": "2026-10-27"
+      }
+    },
+    {
+      "ticker": "8411 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "瑞穗金融集團"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 8411 JP",
+      "source_probe": {
+        "url": "https://www.mizuhogroup.com/investors/financial-information",
+        "result": "官方入口與其連結的 PDF 均可取得，但 PDF 文字層重複字元；需處理官方跨主機連結與可靠文字擷取後才能驗收。",
+        "date": "2026-10-27"
+      }
+    },
+    {
+      "ticker": "8725 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "MS&AD保險集團控股公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for 8725 JP",
+      "source_probe": {
+        "url": "https://www.ms-ad-hd.com/en/ir/library/earnings.html",
+        "result": "實際讀取官方 IR 入口回傳 HTTP 403；未繞過限制，尚無可重播的官方財報介接。",
+        "date": "2026-10-27"
+      }
+    },
+    {
+      "ticker": "8750 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "第一生命集團公司"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:23:29.213442+08:00",
+        "report_sha256": "14495de1fbfd911a8f3d3f5f5072b5ba38e1050f2de92e756aab46710c49dba4",
+        "input_receipt": "source-doc:verified_research_input:c284a93689e41127aaccaa78830efa46267a5868ec2569ce0378dd312bf34cfa",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:e65866f20a4bcfa110f8e5cbb2a3855ff2437ccbc8364b87ac6c20d9165c7abe"
+        ],
+        "official_urls": [
+          "https://www.daiichilife-group.com/en/investor/library/earning/pdf/2026/2026_quarter_001.pdf"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "8766 JP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "東京海上控股"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_added",
+      "handling": "原缺少公司專用官方財報介接（8306 JT 另有尾碼限制）；加入官方入口、精確身分與可重播財報摘錄。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:23:31.388231+08:00",
+        "report_sha256": "81af4c542c0b0dd716ffd7d9da49d24da872d569bfac75fc7b0453c7ac02a6d4",
+        "input_receipt": "source-doc:verified_research_input:c284a93689e41127aaccaa78830efa46267a5868ec2569ce0378dd312bf34cfa",
+        "source_document_ids": [
+          "source-doc:foreign_official_issuer:dc3e766a71575922a8df1df1ee0c0b2e5fac6459e02d9477ff946deb79491537"
+        ],
+        "official_urls": [
+          "https://www.tokiomarinehd.com/en/ir/event/presentation/2026/f5hrqd000000a3c1-att/1Q_FY2026_Summary_Report_e.pdf"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "992 HK",
+      "origins": [
+        {
+          "fund": "00988A",
+          "as_of": "2026-10-21",
+          "name": "LENOVO GROUP LTD"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market HK",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "ABN NA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "荷蘭銀行公眾有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market NA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "ACN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ACCENTURE PLC-CL A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:04:00.481076+08:00",
+        "report_sha256": "ff2438cadf34ea048d80216123555442484618a0471e73bbf509f39fa49d6cb1",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:83258e85f0e5ef6d55fe62cb43365d5bb764c3eb0786f05c13c57becd99d5fd8"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001467373.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ADBE",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ADOBE INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:04:01.606961+08:00",
+        "report_sha256": "4f3cd455aa0abb056bdce3114b0dd0f5a3ff6b6bcd3923a7ea27c18f69803ce8",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:86a5689aa9aa7b0f9e95be21b48b0305376e014c8dbf3b8bb3b4b131f1b6a0c4"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000796343.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ADI",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ANALOG DEVICES INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:04:02.762386+08:00",
+        "report_sha256": "b15d3b2d3cfea9bcc5558ebb7c041f4e8e191729b272666dc04cf9321a304848",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:f468425da29412efbec29798ecd0f9cc719edd5766d734c5c3fc1092a3fe237c"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000006281.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ADM LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Admiral集團公開有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "AGN NA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "荷蘭保險公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market NA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "AGS BB",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Ageas"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market BB",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "ALAB",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ASTERA LABS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:04:03.906173+08:00",
+        "report_sha256": "d03cba7d7bb820360cf8d4ea3490781025ead82a312878a89f27e5c5a20047aa",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:2efb6a6e035970ca24ce4f04e2fcadd1f30fee9646b46e5d97c6ed652376663b"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001736297.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ALGM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ALLEGRO MICROSYSTEMS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:04:04.975487+08:00",
+        "report_sha256": "52fbaed00aa6d84605e201dfe0345963e67733356431b50f1ef800cd60ef2113",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:4e3211445cc196522d92341cf1c20bb66166f7d759ba2cb056a9c2d85303dc09"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000866291.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "AMD",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ADVANCED MICRO DEVICES"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:04:06.172039+08:00",
+        "report_sha256": "2eb07895b1c7b796e9ae34de2f8a15ff350b6972fc2976b730e193fafc165b62",
+        "input_receipt": "source-doc:verified_research_input:b50e94cc28ee1e2e43a01f596ca61ec0100009bb809d20b54079ed9cd530fb05",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:21a29c75076d90fced568785d855fc427a15c7458bc0bb153a9dedd88ad3349e"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000002488.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "AMUN FP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "東方匯理資產管理有限責任公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market FP",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "AMZN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "AMAZON.COM INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:25.570166+08:00",
+        "report_sha256": "bb80f676d365b8bcbcb0e7d233474632504073a42326dd8d9ae71c1d70f19ea1",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:7549fb68446eee40e1f50a166fa06b2d2ee6349e07c8553a4828757e032d3cd4"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001018724.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ASML",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ASML HOLDING NV-NY REG SHS"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:27.041519+08:00",
+        "report_sha256": "1ed7075b8bea1ece23e1eb5f593f1b765e67933aaaf9b89bed695fcc76b2008f",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:28be6fd0f5608350ec396ae5d5097e45da95f4f29ad3fbd19aac328a15cce3d4"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000937966.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ASML NA",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "艾司摩爾控股公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market NA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "ASRNL NA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "ASR荷蘭公眾有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market NA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "AV/ LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "英傑華保險"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。 原代碼含斜線，也不得直接作為報告檔名；未擅自改寫代碼。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "AVGO",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "BROADCOM INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:28.382685+08:00",
+        "report_sha256": "53e5f84d56aab90a06d926e533c4e2562389666ac41865943de84516ae45b785",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:3bdb6644c12addf1e63c4dc861008d7804fbf3d3f5aa6eb9b97f72c0e89a7adf"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001730168.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "BBVA SM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "畢爾巴鄂比斯開銀行"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market SM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "BE",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "BLOOM ENERGY CORP- A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:29.684398+08:00",
+        "report_sha256": "28a4066a8bc7819f07cfd907b21627576c1a63a9ae4110eca25f98a45ca170cc",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:7680d329aec9de53ab3ee6c1cf50ee373d586c21d9e719244bc1a6c00ccf6bf9"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001664703.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "BKT SM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "西班牙洲際銀行有限責任公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market SM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "BMPS IM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "義大利西恩那銀行股份公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market IM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "BNP FP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "法國巴黎銀行股份有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market FP",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "BOCHGR GA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "賽普勒斯銀行控股公開有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market GA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "CABK SM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "凱克薩銀行有限責任公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market SM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "CBRS",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CEREBRAS SYSTEMS INC - A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:31.064437+08:00",
+        "report_sha256": "013c41b0f8f562420d9b73cad9ae893175a9006f3e39a417a9ea2e957c331aac",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:23e69d648e7317ce4beebc3c32167fcd7e9b20e86c06be4fe87ac8ecbfd4c459"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0002021728.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "CDNS",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CADENCE DESIGN SYS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:32.291381+08:00",
+        "report_sha256": "d3622f48a6df4702d1624f57b43c5207e171cc19ef3c7b35fc8f5812061d0cc2",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:0bfb80dcfb082f1368b0f19c256ca5b35585e20bda411cea2163627b55f0955b"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000813672.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "CIEN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CIENA CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:33.475281+08:00",
+        "report_sha256": "18d13ef85d2d473353c3725d671a3d0435d19964fdaf103268d7b7c925f10f54",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:c95eb9e60c5c9006bfad60dd19c37339ec735221282656ac782c5f4a04daef05"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000936395.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "CRDO",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CREDO TECHNOLOGY GROUP HOLDI"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:05:34.992556+08:00",
+        "report_sha256": "2dd9139700a54aafce5ed74d647598079207b1736b98891c23889a6f4248b170",
+        "input_receipt": "source-doc:verified_research_input:1eb8e8fff871ef56292e27b8ae23e86ad6d5ec7f56575b37fd058f8d97fdb2e9",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:42718952361414c81add8e89adf6803dd1fb6d1f511cc66b62b3e62484045323"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001807794.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "CRM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SALESFORCE INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:16.066248+08:00",
+        "report_sha256": "947c086b1560257c4bcfcfc4c0c64e6cd7d84b6a05905310662022b0cc4300ac",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:c36bddafd22061dfe573fa22199074d882196f6667cf641eb30c8cec5a340ae5"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001108524.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "CRWD",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CROWDSTRIKE HOLDINGS INC - A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:17.755375+08:00",
+        "report_sha256": "03056e8c2ee7dde99bacf6200e2764cc308155fbeb8637f511b498d97298e6d9",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:a71a92f1f11bd3032271ca55be7a7770a96a846ec809f925829ef952fd5f3fa1"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001535527.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "CS FP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "安盛有限責任公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market FP",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "DB1 GY",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "德意志證交所"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for DB1 GY",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "DBK GY",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "德意志銀行"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for DBK GY",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "DDOG",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "DATADOG INC - CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:18.810326+08:00",
+        "report_sha256": "86166c150acf977f24cdcec61138a0d9c39a47d11a771fe302d10b31cf5a74fa",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:d3c4561fd839e25b1cde245ff3ca1f821b2a70e70d34688c5ede40bbc0f600a2"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001561550.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "DOCN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "DIGITALOCEAN HOLDINGS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:20.585885+08:00",
+        "report_sha256": "2346b5a4141175162c714899416f1c2cd6740846f97fcda7299953da35d45b85",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:cbae5588721eb18060635ccf5eb27dbb15631381b42230571d26eaf5d000aa2b"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001582961.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ENR GY",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "Siemens Energy AG"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "issuer_adapter_missing",
+      "handling": "市場尾碼已識別，但缺少此公司的已驗證官方財報介接；不代表該公司沒有公開財報。",
+      "result": "pending",
+      "remaining_reason": "official issuer release adapter not configured for ENR GY",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "ENTG",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ENTEGRIS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:22.159095+08:00",
+        "report_sha256": "b99e7c2479319ec2c6628c96f2d3c21c893d583d6c17bae5462004ca1f3196c6",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:074a1d9523d775e969d02f6a41172c72b9f30a7a625edf6699be52956536a2c8"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001101302.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ENX FP",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "泛歐交易所"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market FP",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "ESTC",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ELASTIC NV"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:24.107005+08:00",
+        "report_sha256": "910c08a7de9a067bc9a0708dfc805d11e11ebffc1d002e0766ff3c4b54dacb66",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:bf67dc8bc9dd23758c9e2dc067477dca9ae9f8041beaa79a7143ad61919b1e29"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001707753.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ETE GA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "希臘國家銀行"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market GA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "EUROB GA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Eurobank SA"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market GA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "G IM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "忠意保險股份公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market IM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "GENB",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "GENERATE BIOMEDICINES INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:25.528773+08:00",
+        "report_sha256": "03ea423179784e0422d4e739868cecd37f0dcfa93c9d8c510458f03cb4f555a0",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:0647e33cde5cc9016708a26803d360d182d3fd88f8d38e7c35ea9be33fdb92df"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0002100782.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "GLEN LN",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "嘉能可公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "GLW",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CORNING INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:07:27.206901+08:00",
+        "report_sha256": "8c6747b4402200ce9e1353a152f96eda4720cbb6fb7b8ba5734ad7817d76a1cd",
+        "input_receipt": "source-doc:verified_research_input:8b5d6fe8997510bbd3e6be585cb2d0dd9011f458213acb894878c7fea3630dfa",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:487d70eef80b3fbb401d95db03a770afb80c6f733c3b509579fb070899792d39"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000024741.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "GOOG",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ALPHABET INC-CL C"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:28.600667+08:00",
+        "report_sha256": "5c8d0d31a5c80b8f4a8fa01c315277917b85cc7ed8931d838623d63aaeca7cbc",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:a017f26ee88cb4a639d1c1ddb06d53b4afe22f0ac89cabec7cd67c88919fe1c5"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001652044.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "GWRE",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "GUIDEWIRE SOFTWARE INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:29.878605+08:00",
+        "report_sha256": "8a877ca853f9f076829f611251e1dba5cb0c08cf8171b524c87225a7ab9442e5",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:1bcfe0669ef1e428cae9f4f40ded456766c027e1e669ce68608dc5b0e725e4b3"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001528396.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "HOOD",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ROBINHOOD MARKETS INC - A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:31.083319+08:00",
+        "report_sha256": "687f66cb86543c3f8b5e02377ef88f7f65f0605bfa7805d3a1b73125b2c7d52b",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:febaef3cd85df21b8c59dedc7a2b782497ad7a062a105bffddca8f5b863a5ef1"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001783879.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "HSBA LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "匯豐控股有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "HUBS",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "HUBSPOT INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:32.229158+08:00",
+        "report_sha256": "f10a9070284fd2651f63cb23f2d87d53cf6819d0f7ae3e5b3faf4422e7e6937e",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:f259532687f784b291938882beaab403caf24b2abd0c2792ac0940e95a34353d"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001404655.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ILMN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ILLUMINA INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:33.338884+08:00",
+        "report_sha256": "408c484d51170aaf99498921c57d14534e1e3178bd75f270a37f74081251398d",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:82178ff1416d5bfc93713c949da8e5c1b5f3abae2f34a3db4e98a04b87f82592"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001110803.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "INGA NA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "荷蘭國際集團"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market NA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "INTC",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "INTEL CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:34.460426+08:00",
+        "report_sha256": "4942fe9b306cc471b471c5a3395e4be79cc1d48b69025d8c2bd1e87160f6a9c3",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:70056711b8b04d3a27e4a42b6d86e26f85ddaa3d59e480039d66ccfb353eb0b8"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000050863.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "LGEN LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "法通保險集團公開有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "LITE",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "LUMENTUM HOLDINGS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:35.629366+08:00",
+        "report_sha256": "b5928be9079db947ed9755e1afa360d19f0bf6310fc682dcc5fdafb52fc3234f",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:e1b6f9e259e9e5fbb29258d09373474f8948b47ea2ab1e562c1e3eaee4d406f9"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001633978.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "LLOY LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "勞埃德銀行集團"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "LMND",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "LEMONADE INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:08:36.791599+08:00",
+        "report_sha256": "5b3996ac4a7273b0bdd9a0c8036a6fa0cd23d0701703da26d1df0c7baec3c269",
+        "input_receipt": "source-doc:verified_research_input:1db49d2aa390df8571c268041f50294b3451e88001dd9fd81ef695f0cc061e08",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:60a176fc224d0fae7ad3ad86ddc18cc75d5b23d47baa4d5df4c9c51f4c36ca50"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001691421.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "LRCX",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "LAM RESEARCH CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:19.881254+08:00",
+        "report_sha256": "0e25f4a8b429bed15d786fd05721a96e2e73769912a90c6d704627ef25d783f8",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:46289dd93caeb9cf61ad8a0884f51999549c8179f17ad7b0ef9bdadfe9aff626"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000707549.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "MDB",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "MONGODB INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:21.011613+08:00",
+        "report_sha256": "1b683054a132e0d6fe627e1d3f19491407dfc1864786d8d855569db91bb41550",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:8947052d6912d9ac6b35470f5e331ef6fe1f4b4cf782fab20822c9cb66738997"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001441816.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "META",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "META PLATFORMS INC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:22.213319+08:00",
+        "report_sha256": "cf3ce6f80f4e199a183a30720f1af13dca2e0321594e7d85f439dd50d984185f",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:52f806ebd7961834d5ac8073e516361e60e800a52ada0ed7f46fb5f615b6050d"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001326801.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "MNG LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "M&G公開有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "MPWR",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "MONOLITHIC POWER SYSTEMS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:23.298701+08:00",
+        "report_sha256": "bd9e3991d5465348cb1a8bc5cb832bd4615c7efbc120738b4445140d4249e9a9",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:d113f0b9ecf74dfae04a49933d00e71a4eafe0e40dfc94318f978ceace1d4e92"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001280452.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "MICROSOFT CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:24.492448+08:00",
+        "report_sha256": "3e9c2e12f04471a3d5cca74b19dc30e0f30c40462c5b65517c5c5f2a0784f7e2",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:dd0308149a8e96497989ed7c690b5a49a00bef9ceafbb24638bda41e8ae938dd"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "MTSI",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "MACOM TECHNOLOGY SOLUTIONS H"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:25.881864+08:00",
+        "report_sha256": "8dbb8bc6256cf9c9f40bae3f5a0ca29c1c7f25499afceb4a4c9475429f8314ff",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:e4f4065041043102748813b8b7a415b132b7a24890aeeb3c7b06d8ae7e59d376"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001493594.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "MU",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "MICRON TECHNOLOGY INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:27.143080+08:00",
+        "report_sha256": "7aa491fbab072a3547dabdcdd18df66a859dd4f526c39ef923f334a7ece33410",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:162439f31208eaf4cd1a33939d80fd40479a559735b9488d32ac43d5516ff7bf"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000723125.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "NBIS UW",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "尼比厄斯集團公眾有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "vendor_symbol_alias",
+      "handling": "持股來源市場尾碼未受支援；加入有限的精確代碼對照，仍核對官方公司名稱、代碼或 SEC 交易所。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:09:28.377758+08:00",
+        "report_sha256": "d960116899231dcecd00a00568484539834f836fe4f098e996d041ee09e35390",
+        "input_receipt": "source-doc:verified_research_input:dbec5b82b39bc548dee4f7a2e4cf014735c9fbfd1910667d6e408fc8ef17be13",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:7e21951ecf0fed0fb2a26b5e2464c7b15d69bcdd1928d8cda52a875a29ca04f7"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001513845.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "NET",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "CLOUDFLARE INC - CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:44.729630+08:00",
+        "report_sha256": "c9cd1e77414dc4045aa0a83f2351273b99cfcfb89ba6f441a845def86521e324",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:04cc636210456fc5163996c546c38dd049e53b5f9ce59b8f824f1725b06afe11"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001477333.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "NOW",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SERVICENOW INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:45.878542+08:00",
+        "report_sha256": "b9deb7d8b9319c8b458f9e8c7f11ff0adc6b0966362b675188e14dcdfa8214ad",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:1131b67e8d2d6cd6415cafa82c8874cb2139016e4c8d7e04b1728837a8bbec2c"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001373715.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "NU",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "NU HOLDINGS LTD/CAYMAN ISL-A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:47.106860+08:00",
+        "report_sha256": "e98dff634ae1f84cf4771c90333f81d4398112b5396443c40909fbf10c125620",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:34ff78d0287b628207dc0708e33f6af7eb0e71688a3a6c80f50844f1b03cef45"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001691493.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "NVDA",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "NVIDIA CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:48.238826+08:00",
+        "report_sha256": "7a02b76901a20c0aef6255b76c4e47a13aef2714b15c3010f420b96025e7631e",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:19ef503a5770f5660964b3c3aea6937579d9b359da344afe6a9adf59c63d26ff"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001045810.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "NWG LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "國民西敏集團公開有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "OKTA",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "OKTA INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:49.508912+08:00",
+        "report_sha256": "e2fdab86e381b9406678d298cb92f53001bdf5ee8c49dd615320d6b35abef94e",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:ce9d8dc684e7e95b8ab313f731115188cc90b20d383e32a0725832de18cef1d7"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001660134.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "PANW",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "PALO ALTO NETWORKS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:50.738726+08:00",
+        "report_sha256": "f2fb3ce3a4d8d4dafb05ea4973cd85efbf207b8edaeae51d96dab6fec784eb46",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:0fce8129e237331262a97979fde517a19797896a44f4d4eeab2a0767aaa6029f"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001327567.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "PLTR",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "PALANTIR TECHNOLOGIES INC-A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:52.082041+08:00",
+        "report_sha256": "31b42e5ffea517ec3d603a1a4bf55ca611fe418a61c0ad700c1afb1b2dcf9186",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:43014a2e04fa2784dd669d337a65c9eac9374ea638dacb292ecf19905408651f"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001321655.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "RIVN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "RIVIAN AUTOMOTIVE INC-A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:10:53.363555+08:00",
+        "report_sha256": "5f8fb7c9b5539db7d61b2f9c1722874c9008f5c3d5511a096eab399e3ae28fc9",
+        "input_receipt": "source-doc:verified_research_input:4f28196c96934b89e6ad33a35f08be8cb0c07939ab7750fe603242e7bd7d4493",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:43ea11fc419dd2c41ae0726647c54b33910d0354d64aa4a3bbb47b554be26896"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001874178.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ROK",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ROCKWELL AUTOMATION INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:48.550009+08:00",
+        "report_sha256": "27332be453495a094d939cac039c4404c66b3f34b150f24d6c6b8bf973499c74",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:3a514cb5eea60c9984f6597cd4eafdc6500a57af0307461f00d4f2dccfaa1446"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001024478.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "SDLF LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "標準人壽公開有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "SHOP",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SHOPIFY INC - CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:49.795490+08:00",
+        "report_sha256": "9cb2bb4eae72a84f524de9b140cbf03d51a916bac39b1686f74e3e4d0f7d4602",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:6015c8703f4aaa9dfa8b13e2717e015862616ee9afa7aaf87348563c0ed74a52"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001594805.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "SKHY US",
+      "origins": [
+        {
+          "fund": "00402A",
+          "as_of": "2026-10-20",
+          "name": "SK hynix Inc"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "sec_no_tagged_accounting_facts",
+      "handling": "重新擷取仍只有申報費用標籤；改從 SEC submissions 的真實申報連結擷取 6-K 初步財務結果，保留期間、單位及初步結果限制。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:22:47.386661+08:00",
+        "report_sha256": "6f35298d8d75074ce355ba6c461339eca0e3bc66d5676d7ca7565f19ceb9a933",
+        "input_receipt": "source-doc:verified_research_input:10dd056e7e02bdccdd1854dfd489a3630b0a2056c7dbfd35681c05517300e5ca",
+        "source_document_ids": [
+          "source-doc:sec_financial_filing:58d15f84e981790d09803f0ec73cca0aa28e76197cdca2112a4cbdaae636c4cb"
+        ],
+        "official_urls": [
+          "https://www.sec.gov/Archives/edgar/data/2120882/000119312526321989/d115239d6k.htm"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "SNDK",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SANDISK CORP-W/I"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:50.855835+08:00",
+        "report_sha256": "d910a2f4aa4b15fbf78ced7691b3a53955679986754e6009fd5135eb38b6b9b8",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:96c6fe93ade97c3b7eb718b4acdc2a49b3859c5ddad97f7e7875873a67da4e61"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0002023554.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "SNOW",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SNOWFLAKE INC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:51.971976+08:00",
+        "report_sha256": "adef204c9f92dda2f47f9cc62e588a9b59fb9e2c4fa41a7e2fe96af4215c154f",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:9d2289f4d9810ef19dfd4f5eef8c90b406db14947ca4b6fcb36dca6c41383144"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001640147.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "SPCX",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SPACE EXPLORATION TECHN-CL A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:53.194302+08:00",
+        "report_sha256": "f07223c7555f4b8d5d5abb1f4a0463981636582524b58ed1483ec4741aa1cd92",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:286ce06020ae7184141be501b7106afaefae456380f804d56d1ff6466eb5a89a"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001181412.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "STAN LN",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "渣打集團有限公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market LN",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "SU FP",
+      "origins": [
+        {
+          "fund": "00986A",
+          "as_of": "2026-10-21",
+          "name": "施奈德電機公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market FP",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "SWKS",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SKYWORKS SOLUTIONS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:54.382297+08:00",
+        "report_sha256": "a1c6f91ff30dbe709d059448ad8c08c7b6bdced94970f690613f5d89d800b12d",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:fe97017d523d23be63ebcc6d002d596ff7e1e00e89944976731ca27b8303c1b8"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000004127.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "SYM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "SYMBOTIC INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:55.813984+08:00",
+        "report_sha256": "eb505dc6a97d1d50d7e50cd2cd2de89bf022e88e1ee0c536fb0bc30f95e36ea7",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:5648ab3914a0987f9b9dfe46bc2079b23ddaa29316269e42339989bb2db0641b"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001837240.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TEAM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ATLASSIAN CORP PLC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:12:57.183679+08:00",
+        "report_sha256": "5514baa43f15f261b72c5986ba00dcf574bdf6f9ddd15210dd525bc91f70b456",
+        "input_receipt": "source-doc:verified_research_input:b56a71e722c3e4e094917726aff62c62b174a28311b8b9a7b686c8959d8e2c0b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:c14317cfb962edcb56f97b718ecf5c45a401b764749242c40f3d505cd1b5e05c"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001650372.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TEM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TEMPUS AI INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:19.136349+08:00",
+        "report_sha256": "e5953f24a71fb424a4e3693ed5eb74df8a80db4f6c3ef52512e406c831e61aff",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:ff4c427aa528a3a5d2e60b2f8d5f49fa45ba6c291f8c47c0789a98289048887b"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001717115.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TPEIR GA",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Piraeus Bank SA"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market GA",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "TSLA",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TESLA INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:20.568552+08:00",
+        "report_sha256": "98b57a34af91859376d71faf9875f0e95ea118d1b8f4315b91d95d5b6a22bea2",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:c951e0ae2402dd8cf8f39319928adccc4196b997941fe40b0d4d6b8060802db1"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001318605.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TSM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TAIWAN SEMICONDUCTOR-SP ADR"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:22.199518+08:00",
+        "report_sha256": "b5c8d75f15f997a3eb9c77ba9c350ea65e3334f731e1212341965e21cb05081c",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:d3ebb91e3ad78c9482e238c4db36df60b295a3b49ca137774706f4f5e526044a"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001046179.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TTMI",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TTM TECHNOLOGIES"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:23.531807+08:00",
+        "report_sha256": "9da65cb88dc88d35e4df5aa56556c4b9079fffa8f0ce61b306f44f8e37b5beee",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:443aeab7d284d13556b731dc5dfece0422f61146112bfd874720ec2ff132df1e"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001116942.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TTWO",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TAKE-TWO INTERACTIVE SOFTWRE"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:25.073385+08:00",
+        "report_sha256": "8ba466b790872d00896f4927638b0ce279604e78e53d6746c6b5a40bd523a95e",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:e3358efb285aba62ca9e2c073849ca6411f9a0c04599048a118dde0ab2bb0e07"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000946581.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TWLO",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TWILIO INC - A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:26.475658+08:00",
+        "report_sha256": "5d45f480dd534171dd9cade3bd58b884f43c148abf114ea93a55179c44cfacac",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:61ef874218b461f099507924f15d0cfb100d48d667ab102906a8622cf007c76d"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001447669.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TWST",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TWIST BIOSCIENCE CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:28.035965+08:00",
+        "report_sha256": "8941815f09770dd32dbd3fbb2f1408b9bde07294b2defbebf9bb2bbb846afd2b",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:ab4d6e344a91d7c2894dc8c0601b52f05230299434ff75bf5209b39897d81702"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001581280.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TXG",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "10X GENOMICS INC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:14:29.366406+08:00",
+        "report_sha256": "0ba66319c861f7b8379aa56965bac9fd67a0ee5adebb0f97607ac653e597667a",
+        "input_receipt": "source-doc:verified_research_input:92cc897a6594ba2c326610962d2ab3c1ec263cc93c361d771d797ff0ddd03d97",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:2f61e04b1626c1c2d1f4d43810aa79e5651a901f79993ed49ad3870c17a80e07"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001770787.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "TXN",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "TEXAS INSTRUMENTS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:42.293083+08:00",
+        "report_sha256": "7464b9aaf1418c310ff2f549dc849b0c8e7855fa227ef8a7bc5e3828765909c8",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:f5f87fc75d7eef5b72be589283af333e1ef176f4fcce61f9efd9e7f40bc83ae4"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000097476.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "U",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "UNITY SOFTWARE INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:43.556803+08:00",
+        "report_sha256": "093dfd9f81a9615188cd99746526a3e92fc32b6f988970632e7aee70f66a4d2d",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:0067bd85fdf907cde034de5e84b9a15e3a0de11f9786a86dd6f7b71555b06273"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001810806.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "UCG IM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "裕信銀行"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market IM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "UNI IM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Unipol保險股份公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market IM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "UNIAXA IM",
+      "origins": [
+        {
+          "fund": "00998A",
+          "as_of": "2026-10-21",
+          "name": "Unipol保險股份公司"
+        }
+      ],
+      "before_reason": "unrecognized ticker identity",
+      "root_cause": "market_adapter_missing",
+      "handling": "市場來源介接尚未建立；保留原代碼及未完成狀態，不以相似美股或 ADR 代替。",
+      "result": "pending",
+      "remaining_reason": "official source adapter not configured for market IM",
+      "source_probe": {
+        "result": "本輪未對此標的完成個別官方入口驗證；已確認的缺口是程式未建立來源介接，不能推論外部資料不存在。"
+      }
+    },
+    {
+      "ticker": "VEEV",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "VEEVA SYSTEMS INC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:44.792648+08:00",
+        "report_sha256": "7abc6ebdfd8ed3015d18b3188c921b611edc83e92f3cabf1f6eba05c33b9b426",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:c2624d24b7f8e7939be966eb22c27d2d0b6f1b361bf51656bff51b88a4588804"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001393052.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "VICR",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "VICOR CORP"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:46.107844+08:00",
+        "report_sha256": "ffe7360740c7eb8c14e672e2822a19387e871e3abd53b3838298bc85049c01ad",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:bad8130e672ea59c7b2ddf75953fb75ac7293a6bccdb759e5dbfb381507fcfb5"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0000751978.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "WDAY",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "WORKDAY INC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:47.413489+08:00",
+        "report_sha256": "3c49b734fe1c036aa69f0ba5875bbf8fe907d0f725a8dfe9f223ffaebd0c7608",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:c953cbd3b65fdf9bab67f221d23190f77a9e8df6e1e14f38dce8c1d02380a71b"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001327811.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "WRBY",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "WARBY PARKER INC-CLASS A"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:48.744245+08:00",
+        "report_sha256": "f15417b97be3b6bf817d3f31427c72b5b5394f434ce405cb1fde89a7edc62064",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:2284bf740abbb63b5ddcf89442b4980b37b58a81a21b2332980d429dcf32e5af"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001504776.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "XYZ",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "BLOCK INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:49.967865+08:00",
+        "report_sha256": "1e1a1580e4f07bd15895c23b2ba5c15ea09c96c3db511d1efe537f3cc498788f",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:3f7fc57b09ca4de7d85161afc54a58352968e1f998d5c8facce2547ab8b65d0e"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001512673.json"
+        ],
+        "conclusions_verified": false
+      }
+    },
+    {
+      "ticker": "ZM",
+      "origins": [
+        {
+          "fund": "00989A",
+          "as_of": "2026-10-21",
+          "name": "ZOOM COMMUNICATIONS INC"
+        }
+      ],
+      "before_reason": "no verifiable official company row; no model call",
+      "root_cause": "bare_us_routing",
+      "handling": "無市場尾碼的美股被當作台股查詢；改用 SEC 精確代碼、CIK、交易所與申報鏈核對。",
+      "result": "recovered",
+      "evidence": {
+        "generated_at": "2026-10-27T13:15:51.356108+08:00",
+        "report_sha256": "185d892742ca889c6f6d304a5172bf547ea6925b7cf1a33c50fdefbdff64cf78",
+        "input_receipt": "source-doc:verified_research_input:985740e17f454d458264158cfda4f374cc158d2a3c49c6b723de990061ce562b",
+        "source_document_ids": [
+          "source-doc:sec_companyfacts:ad2eab8404fea67663702347fccfe5b5fc1e16d37aa8150c8807465e7e92c42d"
+        ],
+        "official_urls": [
+          "https://data.sec.gov/api/xbrl/companyfacts/CIK0001585521.json"
+        ],
+        "conclusions_verified": false
+      }
+    }
+  ]
+}

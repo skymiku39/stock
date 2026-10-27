@@ -44,3 +44,38 @@ def test_output_cannot_substitute_other_company_or_numeric_value():
     report['observations'][0].update(evidence_id='other', value='100')
     with pytest.raises(ValueError):
         validate_report(report, item)
+
+
+def test_official_csv_replays_exact_strings_and_rejects_changed_value(tmp_path):
+    raw = '\ufeff"出表日期","公司代號","現金股利"\n"1151026","1240","3.00000000"\n'
+    with SourceRegistry(tmp_path) as registry:
+        registry.capture_document('dividend_tpex', raw.encode('utf-8'),
+            source_url='https://mopsfin.twse.com.tw/opendata/t187ap45_O.csv',
+            suffix='csv', mime_type='text/csv')
+    inputs, excluded = collect(tmp_path, ['1240', '124'])
+    assert not excluded and not inputs['124']
+    assert inputs['1240'][0]['row'] == {'出表日期': '1151026', '公司代號': '1240', '現金股利': '3.00000000'}
+    item = {'ticker': '1240', 'sources': inputs['1240']}
+    revalidate(tmp_path, [item])
+    item['sources'][0]['row']['現金股利'] = '3'
+    with pytest.raises(ValueError, match='changed'):
+        revalidate(tmp_path, [item])
+
+
+def test_bare_us_symbols_use_foreign_collector_and_keep_specific_gap(tmp_path, monkeypatch):
+    from bot import verified_research_batch as batch, foreign_research_sources as foreign
+    domestic_calls, foreign_calls = [], []
+    def domestic(root, tickers):
+        domestic_calls.append(tickers)
+        return {t: [] for t in tickers}, []
+    def external(root, tickers, **kwargs):
+        foreign_calls.append(tickers)
+        return {t: [] for t in tickers}, [{'ticker': t, 'reason': 'fixture identity missing'} for t in tickers]
+    monkeypatch.setattr(batch, 'collect', domestic)
+    monkeypatch.setattr(foreign, 'collect', external)
+    out = tmp_path / 'out'
+    assert batch.main(['--root', str(tmp_path), '--tickers', '2330', 'NVDA', 'NBIS UW',
+                       '--output-dir', str(out)]) == 3
+    assert domestic_calls == [['2330']] and foreign_calls == [['NVDA', 'NBIS UW']]
+    result = json.loads((out / 'verification-summary.json').read_text())
+    assert result['results']['NVDA']['reason'] == 'fixture identity missing'

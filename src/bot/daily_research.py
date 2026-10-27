@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 from bot.config import Settings
 from bot.daily_collection import collect_daily_inputs, write_daily_summary
 from bot.utils import now_tw
 from bot.verified_research_batch import write_json
+from bot.research_symbols import supported_ticker, unsupported_reason
 
 
 def tracked_tickers(root, settings):
@@ -85,8 +85,8 @@ def run_daily(root):
     state.update(tickers=tickers, requested=len(tickers), phase="analysing")
     write_json(path, state)
     # Never infer identities for unrecognized source symbols.
-    valid = [t for t in tickers if re.fullmatch(r"[A-Za-z0-9.^-]+(?: (?:US|JP|KS|GY))?", t)]
-    unsupported = {t: {"status": "excluded", "reason": "unrecognized ticker identity"}
+    valid = [t for t in tickers if supported_ticker(t)]
+    unsupported = {t: {"status": "excluded", "reason": unsupported_reason(t)}
                    for t in tickers if t not in valid}
     if not settings.llm_enabled:
         state.update(phase="failed", error="LLM disabled; no analysis executed")

@@ -14,6 +14,13 @@ INDEXES = {
     '6981 JP': ('https://corporate.murata.com/en-global/ir/library/results', r'(\d{2})q([1-4])-e-fls\.ashx'),
     '009150 KS': ('https://www.samsungsem.com/global/about-us/investor-relations/earnings-release.do', r'([1-4])Q(\d{2})_Earnings_Release_eng\.pdf'),
     'IFX GY': ('https://www.infineon.com/about/investor/reports-presentations/financial-results', r'inf(?:pr|xx)(20\d{2})(\d{2})-\d+e\.pdf'),
+    '6098 JP': ('https://recruit-holdings.com/en/ir/financials/', r'recruit_(20\d{2})03Q([1-4])_earnings_en/$'),
+    '7167 JP': ('https://www.mebuki-fg.co.jp/eng/', r'/(20\d{2})(\d{2})\d{2}(?:_\d+)?\.pdf'),
+    '8306 JT': ('https://www.mufg.jp/english/ir/index.html', r'summary(\d{2})(\d{2})_en\.pdf'),
+    '8309 JP': ('https://www.smtg.jp/english/investors/report/fs', r'E(\d{2})(\d{2})_01\.pdf'),
+    '6787 JP': ('https://www.meiko-elec.com/english/ir/library/presentations.html', r'/statements/(20\d{2})/Q([1-4])\.pdf'),
+    '8750 JP': ('https://www.daiichilife-group.com/en/investor/library/download/', r'/earning/pdf/(20\d{2})/(?:20\d{2}_quarter_00([1-3])|index_005)\.pdf'),
+    '8766 JP': ('https://www.tokiomarinehd.com/en/ir/download/', r'/presentation/(20\d{2})/[^/]+/([1-4])Q_FY\d{4}_Summary_Report_e\.pdf'),
 }
 
 
@@ -21,6 +28,8 @@ def release_links(html, base, ticker):
     pattern = INDEXES[ticker][1]
     found = {}
     for a in BeautifulSoup(html, 'html.parser').select('a[href]'):
+        if ticker == '7167 JP' and not a.get_text(' ', strip=True).startswith('Financial Results for'):
+            continue
         url = urljoin(base, a['href'])
         match = re.search(pattern, url, re.I)
         if match and urlparse(url).hostname == urlparse(INDEXES[ticker][0]).hostname:
@@ -33,7 +42,7 @@ def release_links(html, base, ticker):
 
 def publication(text):
     months = 'January February March April May June July August September October November December'.split()
-    pattern = r'\b(?:' + '|'.join(months) + r')\.?\s+\d{1,2}[,.]?\s+20\d{2}\b|\b\d{1,2}\s+(?:' + '|'.join(months) + r')\s+20\d{2}\b'
+    pattern = r'\b(?:' + '|'.join(months) + r')[.,]?\s+\d{1,2}[,.]?\s+20\d{2}\b|\b\d{1,2}\s+(?:' + '|'.join(months) + r')\s+20\d{2}\b'
     match = re.search(pattern, text)
     if not match:
         raise ValueError('publication date not recognized')
@@ -49,7 +58,13 @@ def publication(text):
 
 def collect_official(ticker, fetch, cutoff):
     # Imports here keep source replay usable without a discovery/network dependency.
-    from bot.foreign_research_sources import official_text, OFFICIAL_IDENTITIES
+    from bot.foreign_research_sources import official_text, OFFICIAL_IDENTITIES, OFFICIAL_ALIASES
+    ticker = OFFICIAL_ALIASES.get(ticker, ticker)
+    if ticker in {'6098 JP', '7167 JP', '8306 JT', '8309 JP', '6787 JP', '8750 JP', '8766 JP'}:
+        from bot.extended_issuer_releases import collect_release
+        return collect_release(ticker, fetch, cutoff)
+    if ticker not in INDEXES:
+        raise ValueError(f'official issuer release adapter not configured for {ticker}')
     index_url, _ = INDEXES[ticker]
     index_source, index_raw = fetch(index_url, 'foreign_official_index')
     discovery_ids = [index_source.document_id]

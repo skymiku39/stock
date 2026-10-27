@@ -1,6 +1,8 @@
 """Resumable, serial research of an exact backlog using replayed official rows."""
 import argparse
+import csv
 import hashlib
+import io
 import json
 from pathlib import Path
 from urllib.parse import urlparse
@@ -8,6 +10,7 @@ from urllib.parse import urlparse
 from bot.evidence import make_evidence, persist_evidence_items
 from bot.source_registry import SourceRegistry, resolve_source_document_path
 from bot.utils import now_tw
+from bot.research_symbols import sec_symbol, supported_ticker
 
 
 def write_json(path, value):
@@ -30,6 +33,18 @@ def matching_rows(raw, ticker):
     keys = ('公司代號', '證券代號', 'Code')
     return [r for r in raw if isinstance(r, dict) and
             any(str(r.get(k, '')).strip() == ticker for k in keys)]
+
+
+def company_rows(source, content):
+    if source.source == 'dividend_tpex' and source.mime_type == 'text/csv':
+        reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')), strict=True)
+        if not reader.fieldnames or '公司代號' not in reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames):
+            raise ValueError('invalid official dividend CSV headers')
+        rows = list(reader)
+        if any(None in row or any(v is None for v in row.values()) for row in rows):
+            raise ValueError('invalid official dividend CSV row width')
+        return rows
+    return json.loads(content)
 
 
 def collect(root, tickers):
@@ -55,7 +70,7 @@ def collect(root, tickers):
                 content = resolve_source_document_path(root, source).read_bytes()
                 if hashlib.sha256(content).hexdigest() != source.content_hash:
                     raise ValueError('raw hash mismatch')
-                raw = json.loads(content)
+                raw = company_rows(source, content)
                 for ticker in tickers:
                     for record in matching_rows(raw, ticker):
                         # Keep the exact original values and their original period labels.
@@ -70,7 +85,7 @@ def collect(root, tickers):
                         result[ticker].append({'evidence_id': packet['id'], 'source_document_id': source.document_id,
                             'sha256': source.content_hash, 'url': source.url, 'retrieved_at': source.retrieved_at,
                             'row': record})
-            except (ValueError, OSError, TypeError) as exc:
+            except (ValueError, OSError, TypeError, csv.Error) as exc:
                 excluded.append({'source_document_id': source.document_id, 'reason': str(exc)})
     return result, excluded
 
@@ -107,7 +122,7 @@ def revalidate(root, items):
                 raw = resolve_source_document_path(root, source).read_bytes()
                 if hashlib.sha256(raw).hexdigest() != entry['sha256'] or source.content_hash != entry['sha256']:
                     raise ValueError('source changed before model call')
-                if entry['row'] not in matching_rows(json.loads(raw), item['ticker']):
+                if entry['row'] not in matching_rows(company_rows(source, raw), item['ticker']):
                     raise ValueError('company row changed before model call')
 
 
@@ -143,11 +158,10 @@ def _main(argv=None):
             tickers = [t for t in batch.get('selected_tickers', []) if ' ' in t or t in missing]
     else:
         parser.error('provide --source-run or --tickers')
-    import re
-    if any(not re.fullmatch(r'[A-Za-z0-9.^-]+(?: (?:US|JP|KS|GY))?', t) for t in tickers):
+    if any(not supported_ticker(t) for t in tickers):
         parser.error('invalid ticker or market suffix')
     if args.foreign:
-        tickers = [t for t in tickers if ' ' in t]
+        tickers = [t for t in tickers if ' ' in t or sec_symbol(t)]
     out = args.output_dir or root / 'data/verified_research_batches' / (args.source_run or 'explicit') / ('automated-foreign' if args.foreign else 'automated') / now_tw().date().isoformat()
     if not out.is_absolute():
         out = root / out
@@ -164,8 +178,14 @@ def _main(argv=None):
                   'started_at': now_tw().isoformat(), 'results': {t: {'status': 'pending'} for t in tickers}}
     write_json(out / 'status.json', collecting)
     write_json(out / 'verification-summary.json', collecting)
-    foreign = [t for t in tickers if ' ' in t]
+    foreign = [t for t in tickers if ' ' in t or sec_symbol(t)]
     inputs, exclusions = collect(root, [t for t in tickers if t not in foreign])
+    funds = [t for t in tickers if t.startswith('00') and t.isdigit() and not inputs.get(t)]
+    if funds:
+        from bot.etf_research_sources import collect as collect_funds
+        fund_inputs, fund_exclusions = collect_funds(root, funds)
+        inputs.update(fund_inputs)
+        exclusions.extend(fund_exclusions)
     if foreign:
         from bot.foreign_research_sources import collect as collect_foreign
         foreign_inputs, foreign_exclusions = collect_foreign(root, foreign, refresh=args.refresh_sources)
@@ -190,16 +210,20 @@ def _main(argv=None):
                                            'source_document_id': entry['source_document_id']})
                 inputs[ticker] = fresh
     state = {'source_run': args.source_run, 'requested': len(tickers), 'started_at': now_tw().isoformat(),
-             'scope': 'official financial and valuation rows only; model conclusions unverified',
+             'scope': 'official financial and valuation rows; ETF fund profiles and historical daily prices are not company financial statements; model conclusions unverified',
              'source_exclusions': exclusions, 'results': {}}
     from bot.verified_research_audit import verify_saved, summarize
     cache = root / 'data/verified_research_cache' / now_tw().date().isoformat()
     pending = []
     for ticker in tickers:
         item = {'ticker': ticker, 'sources': inputs[ticker]}
+        if ticker in funds:
+            item['asset_class'] = 'ETF; fund profile and historical price only, no corporate financial statements'
         saved = out / 'reports' / (ticker + '.json')
         if not item['sources']:
-            state['results'][ticker] = {'status': 'excluded', 'reason': 'no verifiable official company row; no model call'}
+            reasons = list(dict.fromkeys(e['reason'] for e in exclusions if e.get('ticker') == ticker))
+            state['results'][ticker] = {'status': 'excluded',
+                'reason': '; '.join(reasons) if reasons else 'no verifiable official company row; no model call'}
         else:
             try:
                 candidate = saved if saved.exists() else cache / (ticker + '.json')
@@ -217,7 +241,7 @@ def _main(argv=None):
             archived = out / 'attempts' / attempt_id / 'reports' / saved.name
             archived.parent.mkdir(parents=True, exist_ok=True)
             saved.replace(archived)
-    write_json(out / 'inputs.json', [{'ticker': t, 'sources': inputs[t]} for t in tickers if inputs[t]])
+    write_json(out / 'inputs.json', [dict(ticker=t, sources=inputs[t], **({'asset_class': 'ETF; fund profile and historical price only, no corporate financial statements'} if t in funds else {})) for t in tickers if inputs[t]])
     write_json(out / 'status.json', state)
     summarize(root, out, state)
     reused = sum(r['status'] == 'completed' for r in state['results'].values())

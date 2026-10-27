@@ -7,12 +7,22 @@ def test_identity_requires_exact_ticker_cik_and_exchange():
     directory = {'fields': ['cik', 'name', 'ticker', 'exchange'], 'data': [[1, 'Issuer', 'AAA', 'Nasdaq']]}
     submissions = {'cik': '1', 'tickers': ['AAA'], 'exchanges': ['Nasdaq']}
     assert issuer_identity(directory, submissions, 'AAA US')['cik'] == 1
+    assert issuer_identity(directory, submissions, 'AAA')['cik'] == 1
+    assert issuer_identity(directory, submissions, 'AAA UW')['cik'] == 1
     for bad in [{**submissions, 'cik': '2'}, {**submissions, 'tickers': ['AAB']},
                 {**submissions, 'exchanges': ['NYSE']}]:
         with pytest.raises(ValueError):
             issuer_identity(directory, bad, 'AAA US')
     with pytest.raises(ValueError):
         issuer_identity(directory, submissions, 'AAA GY')
+    with pytest.raises(ValueError, match='identity'):
+        issuer_identity(directory, submissions, 'AA')
+    duplicated = {**directory, 'data': directory['data'] * 2}
+    with pytest.raises(ValueError, match='ambiguous'):
+        issuer_identity(duplicated, submissions, 'AAA')
+    nyse = {**directory, 'data': [[1, 'Issuer', 'AAA', 'NYSE']]}
+    with pytest.raises(ValueError, match='Nasdaq'):
+        issuer_identity(nyse, {**submissions, 'exchanges': ['NYSE']}, 'AAA UW')
 
 
 def test_facts_preserve_units_periods_and_reject_future_or_unlinked_values():

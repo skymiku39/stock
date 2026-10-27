@@ -14,6 +14,7 @@ from bot.evidence import make_evidence, persist_evidence_items
 from bot.source_registry import SourceRegistry, resolve_source_document_path
 from bot.utils import now_tw
 from bot.verified_research_batch import write_json
+from bot.research_symbols import sec_symbol
 
 
 CONCEPTS = (
@@ -30,7 +31,18 @@ OFFICIAL_IDENTITIES = {
     '6981 JP': ('corporate.murata.com', '6981', 'Murata Manufacturing Co., Ltd.'),
     '009150 KS': ('www.samsungsem.com', 'A009150', '삼성전기'),
     'IFX GY': ('www.infineon.com', 'ticker symbol: IFX', 'Infineon'),
+    '6098 JP': ('recruit-holdings.com', '6098', 'Recruit Holdings Co., Ltd.'),
+    '7167 JP': ('www.mebuki-fg.co.jp', '7167', 'Mebuki Financial Group, Inc.'),
+    '8306 JT': ('www.mufg.jp', '8306', 'Mitsubishi UFJ Financial Group, Inc.'),
+    '8309 JP': ('www.smtg.jp', '8309', 'Sumitomo Mitsui Trust Group, Inc.'),
+    '6787 JP': ('www.meiko-elec.com', '6787', 'Meiko Electronics Co., Ltd.'),
+    '8750 JP': ('www.daiichilife-group.com', '8750', 'Daiichi Life Group, Inc.'),
+    '8766 JP': ('www.tokiomarinehd.com', '8766', 'Tokio Marine Holdings, Inc.'),
 }
+
+# The holding source uses JT for this Tokyo-listed issuer. Its code and name
+# must still be present in the same official release during replay.
+OFFICIAL_ALIASES = {'6981 JT': '6981 JP'}
 
 
 def official_text(raw, pdf, page=0):
@@ -44,7 +56,7 @@ def official_text(raw, pdf, page=0):
 
 
 def validate_official_excerpt(root, db, ticker, entry, source, raw):
-    host, code, name = OFFICIAL_IDENTITIES[ticker]
+    host, code, name = OFFICIAL_IDENTITIES[OFFICIAL_ALIASES.get(ticker, ticker)]
     identity, identity_raw = read_source(root, db, entry['identity_source_id'], entry['identity_sha256'])
     for document in (source, identity):
         if document.source != 'foreign_official_issuer' or urlparse(document.url).hostname != host:
@@ -81,13 +93,15 @@ def read_source(root, db, document_id, expected_hash=None):
 
 
 def issuer_identity(directory, submissions, ticker):
-    if not ticker.endswith(' US'):
-        raise ValueError('SEC mapping requires explicit US market suffix')
-    symbol = ticker[:-3]
+    symbol = sec_symbol(ticker)
+    if symbol is None:
+        raise ValueError('SEC mapping requires a US ticker candidate')
     matches = [dict(zip(directory['fields'], r)) for r in directory['data'] if dict(zip(directory['fields'], r)).get('ticker') == symbol]
     if len(matches) != 1:
         raise ValueError('missing or ambiguous SEC ticker identity')
     identity = matches[0]
+    if ticker.endswith(' UW') and str(identity['exchange']).casefold() != 'nasdaq':
+        raise ValueError('UW market does not match the SEC Nasdaq identity')
     if int(submissions['cik']) != int(identity['cik']):
         raise ValueError('submission CIK mismatch')
     symbols, exchanges = submissions.get('tickers', []), submissions.get('exchanges', [])
@@ -144,6 +158,12 @@ def select_facts(facts, submissions, cutoff):
 
 
 def validate_entry(root, db, ticker, entry):
+    if entry.get('format') == 'sec_filing_excerpt':
+        from bot.sec_financial_releases import validate_entry as validate_release
+        return validate_release(root, db, ticker, entry)
+    if entry.get('format', '').startswith('twse_fund_'):
+        from bot.etf_research_sources import validate_entry as validate_fund
+        return validate_fund(root, db, ticker, entry)
     source, raw = read_source(root, db, entry['source_document_id'], entry['sha256'])
     if entry.get('url') != source.url:
         raise ValueError('source URL mismatch')
@@ -208,24 +228,24 @@ def collect(root, tickers, *, refresh=False, cache_dir=None):
             raise ValueError('empty or incomplete official response')
         if urlparse(response.url).hostname != urlparse(url).hostname:
             raise ValueError('official request redirected to another host')
-        if is_sec:
+        if is_sec and source_name != 'sec_financial_filing':
             response.json()
         with SourceRegistry(root) as registry:
             source = registry.capture_document(source_name, response.content, source_url=url,
-                source_ref=url, suffix='json' if is_sec else 'pdf' if response.content.startswith(b'%PDF') else 'html', kind='http_response')
+                source_ref=url, suffix='json' if is_sec and source_name != 'sec_financial_filing' else 'pdf' if response.content.startswith(b'%PDF') else 'html', kind='http_response')
         manifest[url] = source.document_id
         write_json(manifest_path, manifest)
         return source, response.content
 
     directory_error = None
-    if any(t.endswith(' US') for t in tickers):
+    if any(sec_symbol(t) for t in tickers):
         try:
             directory_source, raw = fetch('https://www.sec.gov/files/company_tickers_exchange.json', 'sec_ticker_directory')
             directory_id, directory = directory_source.document_id, json.loads(raw)
         except (ValueError, OSError, requests.RequestException) as exc:
             directory_error = str(exc)
     for ticker in tickers:
-        if not ticker.endswith(' US'):
+        if sec_symbol(ticker) is None:
             try:
                 from bot.official_release_discovery import collect_official
                 entries = [collect_official(ticker, fetch, cutoff)]
@@ -249,7 +269,7 @@ def collect(root, tickers, *, refresh=False, cache_dir=None):
         try:
             if directory_error:
                 raise ValueError(directory_error)
-            matches = [dict(zip(directory['fields'], row)) for row in directory['data'] if dict(zip(directory['fields'], row)).get('ticker') == ticker[:-3]]
+            matches = [dict(zip(directory['fields'], row)) for row in directory['data'] if dict(zip(directory['fields'], row)).get('ticker') == sec_symbol(ticker)]
             if len(matches) != 1:
                 raise ValueError('missing or ambiguous directory identity')
             cik = int(matches[0]['cik'])
@@ -262,7 +282,25 @@ def collect(root, tickers, *, refresh=False, cache_dir=None):
                 raise ValueError('companyfacts identity mismatch')
             pointers = select_facts(facts, submissions, cutoff)
             if not pointers:
-                raise ValueError('no verifiable financial facts with filing links')
+                from bot.sec_financial_releases import collect_release
+                entry = collect_release(fetch, submissions, identity, cutoff)
+                entry.update(directory_source_id=directory_id, directory_sha256=directory_source.content_hash,
+                    submissions_source_id=submissions_source.document_id, submissions_sha256=submissions_source.content_hash,
+                    identity=identity, cutoff=cutoff)
+                with SourceRegistry(root) as registry:
+                    validate_entry(root, registry.db, ticker, entry)
+                    encoded = json.dumps(entry['row'], ensure_ascii=False, sort_keys=True, allow_nan=False)
+                    row_hash = hashlib.sha256(encoded.encode()).hexdigest()
+                    packet = make_evidence('sec_financial_excerpt', source='sec_financial_filing',
+                        source_ref=entry['source_document_id'] + ':' + ticker + ':' + row_hash,
+                        title=ticker + ' SEC financial release', url=entry['url'], excerpt=encoded,
+                        source_document_id=entry['source_document_id'], quality_status='ok', provenance_status='composite_exact',
+                        metadata={'row_sha256': row_hash, 'source_document_ids': [entry['source_document_id'], directory_id, submissions_source.document_id]})
+                    entry['evidence_id'] = packet['id']
+                    persist_evidence_items(registry.db, [packet])
+                    result[ticker] = [entry]
+                print(f'SEC {ticker}: verified financial release (no tagged accounting facts)', flush=True)
+                continue
             with SourceRegistry(root) as registry:
                 for taxonomy, concept, unit, index in pointers:
                     row = fact_row(facts, taxonomy, concept, unit, index)
