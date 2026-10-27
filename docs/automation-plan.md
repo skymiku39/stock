@@ -186,6 +186,15 @@ Exit code：`0` 成功／`2` 缺工作、權限不足或驗證未過（fail-clos
 
 清單為設定 SYMBOLS、自選清單、追蹤 ETF 最新持股，以及當日採集發現的焦點標的聯集。
 同一天新增追蹤會自動納入，當天已列入的標的保留在進度與稽核紀錄。
+
+每日入口另行執行新聞與主要追蹤行情採集，不依賴 `auto_research_focus` 或 LLM。
+新聞會強制更新並回讀日快取；設定 SYMBOLS 與自選清單的日 K 會核對來源登錄、
+raw hash 及資料庫回讀。網路失敗時沿用的舊行情不能算本次更新成功。
+台北日期的盤前、盤中（09:00 起）、收盤後（14:30 起）各保留一次成功採集，
+同時段只重試失敗項目，避免午夜快取阻止後續更新。這些時段是擷取時段，
+週末或來源尚未公布時仍保留原始行情日期，不偽造當日收盤值。
+`daily-inputs.json` 記錄各步驟與來源日期，`summary.txt` 提供可直接閱讀的當日摘要；
+即使模型未啟用或整批研究仍 partial，也會寫出摘要。任何採集缺口仍阻止 complete=true。
 每個台北日期使用獨立的 `data/daily_research/YYYY-MM-DD/status.json`，其中記錄
 requested、completed、excluded、pending、collection_errors 及 collection_warnings。
 

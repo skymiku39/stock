@@ -2,9 +2,17 @@ import datetime as dt
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from bot import daily_research as daily
 from bot.config import Settings
 from bot.verified_research_batch import write_json
+
+
+@pytest.fixture(autouse=True)
+def daily_inputs_are_isolated(monkeypatch):
+    monkeypatch.setattr(daily, "collect_daily_inputs", lambda *a: {
+        "complete": True, "news": {"status": "ok"}, "prices": {}, "errors": []})
 
 
 def test_daily_all_scope_restart_retry_and_day_rollover(tmp_path, monkeypatch):
@@ -114,3 +122,39 @@ def test_daily_successes_are_not_resubmitted_with_pending_symbols(tmp_path, monk
     assert daily.run_daily(tmp_path) == 0
     result = json.loads((out / "status.json").read_text())
     assert result["completed"] == 2 and result["results"]["2330"]["reused"]
+
+
+def test_missing_news_blocks_daily_completion_and_has_readable_summary(tmp_path, monkeypatch):
+    from bot import data_pipeline, verified_research_batch
+    monkeypatch.setattr(daily, "Settings", lambda **kw: SimpleNamespace(llm_enabled=True))
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
+    monkeypatch.setattr(daily, "collect_daily_inputs", lambda *a: {
+        "complete": False, "errors": ["news: source unavailable"]})
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", lambda *a: SimpleNamespace(
+        run_id="source", errors=[], warnings=[], focus_tickers=[]))
+    def verified(args):
+        from pathlib import Path
+        write_json(Path(args[args.index("--output-dir") + 1]) / "verification-summary.json",
+                   {"results": {"2330": {"status": "completed"}}})
+        return 0
+    monkeypatch.setattr(verified_research_batch, "main", verified)
+    assert daily.run_daily(tmp_path) == 3
+    summary = next((tmp_path / "data/daily_research").glob("*/summary.txt")).read_text(encoding="utf-8")
+    assert "news: source unavailable" in summary and "partial" in summary
+
+
+def test_disabled_llm_still_collects_inputs_and_writes_summary(tmp_path, monkeypatch):
+    from bot import data_pipeline
+    called = []
+    monkeypatch.setattr(daily, "Settings", lambda **kw: SimpleNamespace(llm_enabled=False))
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
+    monkeypatch.setattr(daily, "collect_daily_inputs", lambda *a: called.append(True) or {
+        "complete": True, "news": {"status": "ok", "today_count": 4}, "prices": {}, "errors": []})
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", lambda *a: SimpleNamespace(
+        run_id="source", errors=[], warnings=[], focus_tickers=[]))
+    assert daily.run_daily(tmp_path) == 2
+    assert called == [True]
+    summary = next((tmp_path / "data/daily_research").glob("*/summary.txt")).read_text(encoding="utf-8")
+    assert "今天發布 4 則" in summary and "LLM disabled" in summary

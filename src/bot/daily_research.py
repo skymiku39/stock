@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from bot.config import Settings
+from bot.daily_collection import collect_daily_inputs, write_daily_summary
 from bot.utils import now_tw
 from bot.verified_research_batch import write_json
 
@@ -47,6 +48,7 @@ def run_daily(root):
     out = root / "data/daily_research" / date
     path = out / "status.json"
     state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    state.pop("error", None)
     state.update(complete=False, phase="discovering", attempted_at=now_tw().isoformat())
     write_json(path, state)
     # Preserve the day's membership and add newly followed symbols on each retry.
@@ -54,6 +56,13 @@ def run_daily(root):
     state.update(date=date, tickers=tickers, requested=len(tickers), complete=False, phase="collecting",
                  attempted_at=now_tw().isoformat(), attempts=state.get("attempts", 0) + 1)
     write_json(path, state)
+    # News and watched prices must not depend on the optional auto-LLM path.
+    try:
+        state["daily_inputs"] = collect_daily_inputs(root, settings)
+    except Exception as exc:
+        state["daily_inputs"] = {"complete": False, "errors": [str(exc)]}
+    write_json(path, state)
+    write_daily_summary(root, state)
     if not state.get("collection_complete"):
         try:
             run = run_full_pipeline(PipelineConfig(
@@ -82,6 +91,7 @@ def run_daily(root):
     if not settings.llm_enabled:
         state.update(phase="failed", error="LLM disabled; no analysis executed")
         write_json(path, state)
+        write_daily_summary(root, state)
         return 2
     # Resume only the unfinished symbols; validated daily successes are not
     # invalidated by an unrelated source refresh's retrieval timestamp.
@@ -108,9 +118,10 @@ def run_daily(root):
     state["completed"] = sum(v.get("status") == "completed" for v in state["results"].values())
     state["excluded"] = [t for t, v in state["results"].items() if v.get("status") == "excluded"]
     state["pending"] = [t for t in tickers if state["results"].get(t, {}).get("status") != "completed"]
-    state["complete"] = now_tw().date().isoformat() == date and bool(tickers) and not state["pending"] and state.get("collection_complete", False) and state.get("official_complete", False)
+    state["complete"] = now_tw().date().isoformat() == date and bool(tickers) and not state["pending"] and state.get("collection_complete", False) and state.get("official_complete", False) and state["daily_inputs"].get("complete", False)
     state.update(phase="complete" if state["complete"] else "partial", finished_at=now_tw().isoformat())
     write_json(path, state)
+    write_daily_summary(root, state)
     print(f"Daily {date}: requested={len(tickers)} completed={state['completed']} excluded={len(state['excluded'])} pending={len(state['pending'])}", flush=True)
     return 0 if state["complete"] else (result or 3)
 

@@ -41,6 +41,10 @@ function Show-Status {
         $pending = if ($null -eq $d.pending) { 'not recorded yet' } else { @($d.pending).Count }
         Write-Output "Requested=$($d.requested) ; completed=$completed ; excluded=$excluded ; pending=$pending"
         Write-Output "Progress: $status"
+        if ($null -ne $d.daily_inputs) {
+            Write-Output "Daily inputs complete=$($d.daily_inputs.complete) ; news=$($d.daily_inputs.news.status) ; published today=$($d.daily_inputs.news.today_count)"
+        }
+        Write-Output "Daily summary: $(Join-Path $dailyDir 'summary.txt')"
     } else { Write-Output "No daily progress file yet for $today." }
     Write-Output 'Task Running is process state; use daily complete/results for analysis completion.'
 }
