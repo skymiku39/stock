@@ -121,8 +121,13 @@ uv run --no-sync pytest tests/test_extended_issuer_releases.py tests/test_sec_fi
 
 `full-offline-audit.json` 的 SHA-256：
 `c9fc4fba54b66e1eb1bd8961db95f15a05a06a59ddd528250d7d200e26a15b65`。
-原始 127 筆明細檔的 SHA-256：
+原始 127 筆明細檔在本機 Windows 工作目錄（CRLF）的 SHA-256：
 `15cc60cb7a4be9fa097b5f97e83288cca7ff80654240549d74faeedbacb8fe5e`。
+同一明細檔在 Git（LF）的 SHA-256：
+`88516b611ac02f19be9806d6326b246ba7bb435d758b08c8d30cfa915cad2bab`。
+提交後已確認差異僅為換行正規化，JSON 內容與 80 份報告雜湊一致；
+首次直接比較兩種換行格式的檔案雜湊未通過，改以正規化後逐位元及結構比對後通過。
+結果保留於 `committed-content-verification.json`。
 `natural-round-acceptance.json` 的 SHA-256：
 `b0ace3e3bd52f03ed2c995b7f822161adb0561548d59d1d3c573ae1478ee70c4`。
 最終摘要快照的 SHA-256：
