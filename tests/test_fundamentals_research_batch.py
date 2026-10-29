@@ -154,3 +154,14 @@ def test_history_keeps_old_periods_and_latest_revision_without_double_counting(t
                    if e.kind == "monthly_revenue")
     finally:
         db.close()
+
+
+def test_history_skips_known_blocked_archives_but_keeps_bad_valid_source_failure(tmp_path):
+    with SourceRegistry(tmp_path) as registry:
+        for source, quality in [('monthly_revenue_twse', 'invalid'), ('valuation_twse', 'ok')]:
+            registry.register_document(source, b'<html>access denied</html>',
+                kind='http_response', quality_status=quality, suffix='json')
+    result = materialize_all_fundamentals(tmp_path, include_history=True)
+    assert result['monthly_revenue']['unusable_source_documents'] == 1
+    assert result['monthly_revenue']['failed'] == 0
+    assert result['valuation']['failed'] == 1

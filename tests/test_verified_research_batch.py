@@ -18,6 +18,21 @@ def test_exact_company_identity_not_name_substring():
     assert matching_rows(raw, '238') == []
 
 
+def test_collection_retains_comparable_periods_without_duplicate_revisions(tmp_path):
+    with SourceRegistry(tmp_path) as registry:
+        for day, period, revenue in [('01','11508','100'), ('02','11508','110'), ('03','11509','120')]:
+            registry.register_document('monthly_revenue_twse',
+                json.dumps([{'公司代號':'2330','資料年月':period,'營業收入-當月營收':revenue}]).encode(),
+                kind='http_response', quality_status='ok', suffix='json',
+                url='https://openapi.twse.com.tw/v1/opendata/t187ap05_L',
+                retrieved_at=f'2026-10-{day}T00:00:00+08:00')
+    inputs, excluded = collect(tmp_path, ['2330'])
+    assert not excluded
+    assert [(e['row']['資料年月'],e['row']['營業收入-當月營收']) for e in inputs['2330']] == [('11509','120'), ('11508','110')]
+    assert inputs['2330'][1]['historical'] is True
+    revalidate(tmp_path, [{'ticker':'2330','sources':inputs['2330']}])
+
+
 def test_raw_replay_rejects_tampering(tmp_path):
     raw = [{'公司代號': '2382', '資料年月': '11509', '營收': '100'}]
     with SourceRegistry(tmp_path) as registry:

@@ -47,6 +47,14 @@ def company_rows(source, content):
     return json.loads(content)
 
 
+def _financial_period(row):
+    if row.get('資料年月'):
+        return str(row['資料年月'])
+    if '季別' in row or 'Season' in row:
+        return str(row.get('年度', row.get('Year', ''))) + 'Q' + str(row.get('季別', row.get('Season', '')))
+    return str(row.get('股利年度') or row.get('股利所屬年(季)度') or row.get('股利所屬年度') or '')
+
+
 def collect(root, tickers):
     result = {t: [] for t in tickers}
     excluded = []
@@ -56,23 +64,34 @@ def collect(root, tickers):
             "OR source LIKE 'valuation_%' OR source LIKE 'quarterly_financials_%' "
             "OR source LIKE 'dividend_%' ORDER BY retrieved_at DESC, document_id"
         ).fetchall()
-        seen = set()
+        seen, periods = set(), {}
         for row in rows:
-            if row['source'] in seen:
+            historical = row['source'] in seen
+            # Keep comparable financial history; daily valuation uses its
+            # latest snapshot. Bound input size to twelve observed periods.
+            if historical and row['source'].startswith('valuation_'):
                 continue
-            seen.add(row['source'])
             source = registry.db.get_source_document(row['document_id'])
             try:
                 if urlparse(source.url).hostname not in {'openapi.twse.com.tw', 'www.tpex.org.tw', 'mopsfin.twse.com.tw'}:
                     raise ValueError('unsupported official source host')
                 if source.quality_status not in {'ok', 'partial'}:
-                    raise ValueError('unusable source quality')
+                    continue
                 content = resolve_source_document_path(root, source).read_bytes()
                 if hashlib.sha256(content).hexdigest() != source.content_hash:
                     raise ValueError('raw hash mismatch')
                 raw = company_rows(source, content)
+                seen.add(row['source'])
                 for ticker in tickers:
+                    prior_periods = periods.setdefault((source.source, ticker), set())
+                    current_periods = set()
                     for record in matching_rows(raw, ticker):
+                        period = _financial_period(record)
+                        if period in prior_periods or (historical and not period):
+                            continue
+                        if period not in current_periods and len(prior_periods | current_periods) >= 12:
+                            continue
+                        current_periods.add(period)
                         # Keep the exact original values and their original period labels.
                         encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False)
                         packet = make_evidence('official_company_row', source=source.source,
@@ -84,7 +103,8 @@ def collect(root, tickers):
                         persist_evidence_items(registry.db, [packet])
                         result[ticker].append({'evidence_id': packet['id'], 'source_document_id': source.document_id,
                             'sha256': source.content_hash, 'url': source.url, 'retrieved_at': source.retrieved_at,
-                            'row': record})
+                            'row': record, 'historical': historical})
+                    prior_periods.update(current_periods)
             except (ValueError, OSError, TypeError, csv.Error) as exc:
                 excluded.append({'source_document_id': source.document_id, 'reason': str(exc)})
     return result, excluded
@@ -201,13 +221,23 @@ def _main(argv=None):
         with SourceRegistry(root) as registry:
             for ticker, entries in inputs.items():
                 fresh = []
+                sources = {e['source_document_id']: registry.db.get_source_document(e['source_document_id']) for e in entries}
+                fresh_source_names = set()
+                for source in sources.values():
+                    try:
+                        ts = datetime.fromisoformat(source.retrieved_at)
+                        if ts.tzinfo and ts.astimezone(now_tw().tzinfo).date() == now_tw().date():
+                            fresh_source_names.add(source.source)
+                    except (ValueError, AttributeError, TypeError):
+                        pass
                 for entry in entries:
-                    source = registry.db.get_source_document(entry['source_document_id'])
+                    source = sources[entry['source_document_id']]
                     try:
                         retrieved = datetime.fromisoformat(source.retrieved_at)
                         if retrieved.tzinfo is None:
                             raise ValueError('retrieval timezone missing')
-                        if retrieved.astimezone(now_tw().tzinfo).date() != now_tw().date():
+                        if (retrieved.astimezone(now_tw().tzinfo).date() != now_tw().date()
+                                and not (entry.get('historical') and source.source in fresh_source_names)):
                             raise ValueError('not collected today')
                         fresh.append(entry)
                     except (ValueError, AttributeError, TypeError) as exc:

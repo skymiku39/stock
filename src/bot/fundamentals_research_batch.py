@@ -52,6 +52,7 @@ class BatchStats:
     """Counters for one or more deterministic materialization passes."""
 
     source_documents: int = 0
+    unusable_source_documents: int = 0
     rows_seen: int = 0
     attempted: int = 0
     ok: int = 0
@@ -169,6 +170,9 @@ def _materialize_dividend(
     source_names: Dict[Tuple[str, int], str] = {}
     for source in _latest_documents(db, "dividend_", include_history=include_history):
         stats.source_documents += 1
+        if source.quality_status not in {"ok", "partial"}:
+            stats.unusable_source_documents += 1
+            continue
         try:
             rows = _dividend_raw_rows(root, source)
         except Exception as exc:
@@ -291,6 +295,9 @@ def _materialize_monthly_revenue(
     seen: Set[Tuple[str, str]] = set()
     for source in _latest_documents(db, "monthly_revenue_", include_history=include_history):
         stats.source_documents += 1
+        if source.quality_status not in {"ok", "partial"}:
+            stats.unusable_source_documents += 1
+            continue
         try:
             rows = _raw_rows(root, source)
         except Exception as exc:
@@ -343,6 +350,9 @@ def _materialize_valuation(
     seen: Set[Tuple[str, str]] = set()
     for source in _latest_documents(db, "valuation_", include_history=include_history):
         stats.source_documents += 1
+        if source.quality_status not in {"ok", "partial"}:
+            stats.unusable_source_documents += 1
+            continue
         try:
             rows = _raw_rows(root, source)
         except Exception as exc:
@@ -394,6 +404,9 @@ def _materialize_quarterly(
     seen: Set[Tuple[str, str]] = set()
     for source in _latest_documents(db, "quarterly_financials_", include_history=include_history):
         stats.source_documents += 1
+        if source.quality_status not in {"ok", "partial"}:
+            stats.unusable_source_documents += 1
+            continue
         try:
             rows = _raw_rows(root, source)
         except Exception as exc:
