@@ -5,6 +5,7 @@ import math
 import os
 import time
 import io
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -154,7 +155,51 @@ def select_facts(facts, submissions, cutoff):
                         selected.append(records[0][:4])
                 continue
             selected.append(best[:4])
-    return selected
+    # Retain the previous comparable period and prior-year period. CompanyFacts
+    # already contains them; dropping them made growth analysis impossible.
+    history = list(selected)
+    for taxonomy, concept, unit, index in selected:
+        records = facts['facts'][taxonomy][concept]['units'][unit]
+        latest = records[index]
+        try:
+            end = date.fromisoformat(latest['end'])
+            duration = (end - date.fromisoformat(latest['start'])).days if latest.get('start') else None
+        except (ValueError, KeyError):
+            continue
+        periods = {}
+        for i, row in enumerate(records):
+            value = row.get('val')
+            if (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+                    or row.get('accn') not in accessions or not row.get('filed')
+                    or row['filed'] > cutoff):
+                continue
+            try:
+                prior_end = date.fromisoformat(row['end'])
+                prior_duration = (prior_end - date.fromisoformat(row['start'])).days if row.get('start') else None
+            except (ValueError, KeyError):
+                continue
+            if prior_end >= end or (duration is None) != (prior_duration is None):
+                continue
+            if duration is not None and abs(duration - prior_duration) > 7:
+                continue
+            key = (row.get('start', ''), row['end'])
+            periods.setdefault(key, []).append((i, row))
+        usable = []
+        for values in periods.values():
+            filed = max(row['filed'] for _, row in values)
+            revision = [(i, row) for i, row in values if row['filed'] == filed]
+            if len({row['val'] for _, row in revision}) == 1:
+                usable.append(revision[0])
+        usable.sort(key=lambda pair: pair[1]['end'], reverse=True)
+        comparisons = usable[:1]
+        yearly = [pair for pair in usable if 350 <= (end - date.fromisoformat(pair[1]['end'])).days <= 380]
+        if yearly:
+            comparisons.append(min(yearly, key=lambda pair: abs((end - date.fromisoformat(pair[1]['end'])).days - 365)))
+        for i, _ in comparisons:
+            pointer = (taxonomy, concept, unit, i)
+            if pointer not in history:
+                history.append(pointer)
+    return history
 
 
 def validate_entry(root, db, ticker, entry):

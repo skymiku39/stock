@@ -68,6 +68,7 @@ def verify_saved(root, report, item):
 
 def summarize(root, out, state):
     from bot.verified_research_batch import write_json
+    from bot.research_analysis import analyze
     inputs = {i['ticker']: i for i in json.loads((out / 'inputs.json').read_text(encoding='utf-8'))}
     documents, receipts, evidence = set(), set(), set()
     details = []
@@ -77,6 +78,10 @@ def summarize(root, out, state):
         try:
             report = json.loads((out / 'reports' / (ticker + '.json')).read_text(encoding='utf-8'))
             verify_saved(root, report, inputs[ticker])
+            analysis = analyze(inputs[ticker])
+            result.update(research_ready=analysis['research_ready'],
+                          missing_objectives=analysis['missing'],
+                          input_fingerprint=analysis['input_fingerprint'])
             receipts.add(report['input_receipt'])
             periods = []
             for entry in inputs[ticker]['sources']:
@@ -95,8 +100,12 @@ def summarize(root, out, state):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 failed.replace(destination)
     counts = dict(Counter(r['status'] for r in state['results'].values()))
+    ready = sum(r.get('research_ready', False) for r in state['results'].values())
+    fingerprints = {r['input_fingerprint'] for r in state['results'].values() if r.get('input_fingerprint')}
     summary = {'verified_at': now_tw().isoformat(), 'requested': state['requested'], 'counts': counts,
-               'complete': counts.get('completed', 0) == state['requested'],
+               'reports_complete': bool(state['requested']) and counts.get('completed', 0) == state['requested'],
+               'research_completed': ready, 'unique_input_sets': len(fingerprints),
+               'complete': bool(state['requested']) and ready == state['requested'],
                'raw_source_documents': len(documents), 'model_input_receipts': len(receipts),
                'exact_evidence_entries': len(evidence), 'scope': state['scope'],
                'excluded_tickers': [t for t,r in state['results'].items() if r['status']=='excluded'],

@@ -34,7 +34,7 @@ def test_daily_all_scope_restart_retry_and_day_rollover(tmp_path, monkeypatch):
         targets = args[args.index("--tickers")+1:args.index("--output-dir")]
         assert len(targets) == 200 and "--require-collected-today" in args
         out = tmp_path / "data/daily_research" / day[0].date().isoformat() / "verified"
-        results = {t: {"status": "completed"} for t in targets}
+        results = {t: {"status": "completed", "research_ready": True} for t in targets}
         if len(calls) == 1:
             results[targets[0]] = {"status": "excluded"}
         write_json(out / "verification-summary.json", {"results": results})
@@ -119,9 +119,10 @@ def test_daily_successes_are_not_resubmitted_with_pending_symbols(tmp_path, monk
         write_json(out / "verified/verification-summary.json", {"results": {"2317": {"status": "completed"}}})
         return 0
     monkeypatch.setattr(verified_research_batch, "main", verified)
-    assert daily.run_daily(tmp_path) == 0
+    assert daily.run_daily(tmp_path) == 3
     result = json.loads((out / "status.json").read_text())
     assert result["completed"] == 2 and result["results"]["2330"]["reused"]
+    assert result["research_completed"] == 0 and not result["complete"]
 
 
 def test_missing_news_blocks_daily_completion_and_has_readable_summary(tmp_path, monkeypatch):

@@ -57,14 +57,15 @@ def test_unattended_retries_resumes_audits_and_quarantines_invalid_inputs(tmp_pa
     monkeypatch.setattr(llm_analyzer, 'gemini_call', generate)
     out = tmp_path / 'output'
     args = ['--root',str(tmp_path),'--tickers','2330','--output-dir',str(out),'--execute']
-    assert main(args) == 0
+    assert main(args) == 3
     assert len(calls)==2
     summary=json.loads((out/'verification-summary.json').read_text(encoding='utf-8'))
-    assert summary['complete'] and summary['counts']=={'completed':1}
-    assert main(args)==0 and len(calls)==2
+    assert not summary['complete'] and summary['reports_complete']
+    assert summary['research_completed'] == 0 and summary['counts']=={'completed':1}
+    assert main(args)==3 and len(calls)==2
     next_run = list(args)
     next_run[next_run.index('--output-dir') + 1] = str(tmp_path / 'another-run')
-    assert main(next_run)==0 and len(calls)==2
+    assert main(next_run)==3 and len(calls)==2
     report=json.loads((out/'reports/2330.json').read_text(encoding='utf-8'))
     report['input_receipt']='missing'
     with pytest.raises(ValueError): verify_saved(tmp_path,report,report['input'])

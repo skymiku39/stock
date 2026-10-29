@@ -84,7 +84,8 @@ def test_summary_never_calls_intraday_snapshot_a_close(tmp_path):
                  "retrieved_at": "2026-10-27T11:00:00+08:00", "source_url": "https://example.test"}}}}
     text = collection.write_daily_summary(tmp_path, state).read_text(encoding="utf-8")
     assert "盤中" in text and "來源日 2026-10-22" in text
-    assert "來源驗證不代表模型結論正確" in text and "完整：False" in text
+    assert "資料摘要：1 / 2" in text and "完整：False" in text
+    assert "研究條件齊備：0 / 2" in text
 
 
 def test_price_collection_reads_real_database_and_registered_raw(tmp_path, monkeypatch):

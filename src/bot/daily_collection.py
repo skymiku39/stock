@@ -121,9 +121,10 @@ def write_daily_summary(root, state):
     lines = [f"{date} 每日資料整理", f"更新時間：{now_tw().isoformat()}",
              f"擷取時段：{labels.get(inputs.get('period'), '未確認')}；行情日期依原始來源標示。",
              f"整體狀態：{state.get('phase', 'collecting')}；完整：{state.get('complete', False)}",
-             f"研究：{state.get('completed', 0)} / {state.get('requested', 0)}；"
+             f"資料摘要：{state.get('completed', 0)} / {state.get('requested', 0)}；"
              f"排除 {len(state.get('excluded', []))}，待完成 {len(state.get('pending', []))}。",
-             "來源驗證不代表模型結論正確。", "",
+             f"研究條件齊備：{state.get('research_completed', 0)} / {state.get('requested', 0)}；"
+             f"不同資料組：{state.get('unique_input_sets', 0)}。", "",
              f"新聞：{news.get('status', 'pending')}；本次快取 {news.get('cached_count', 0)} 則，"
              f"今天發布 {news.get('today_count', 0)} 則。"]
     for item in news.get("headlines", []):

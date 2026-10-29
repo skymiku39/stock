@@ -106,3 +106,17 @@ def test_distinct_reporting_currencies_are_preserved_without_conversion():
         'TWD': [{**record, 'val': 3000}], 'USD': [{**record, 'val': 100}]}}}}}
     selected = select_facts(facts, {'filings': {'recent': {'accessionNumber': ['a']}}}, '2026-10-16')
     assert selected == [('ifrs-full', 'Assets', 'TWD', 0), ('ifrs-full', 'Assets', 'USD', 0)]
+
+
+def test_comparisons_retain_previous_quarter_and_prior_year_but_not_ytd():
+    records = [
+        {'val': 150, 'start': '2026-04-01', 'end': '2026-06-30'},
+        {'val': 130, 'start': '2026-01-01', 'end': '2026-03-31'},
+        {'val': 100, 'start': '2025-04-01', 'end': '2025-06-30'},
+        {'val': 200, 'start': '2025-01-01', 'end': '2025-06-30'},
+        {'val': 999, 'start': '2025-04-01', 'end': '2025-06-30', 'filed': '2027-01-01'},
+    ]
+    records = [{'filed': '2026-07-30', 'accn': 'a', **r} for r in records]
+    facts = {'facts': {'us-gaap': {'Revenues': {'units': {'USD': records}}}}}
+    selected = select_facts(facts, {'filings': {'recent': {'accessionNumber': ['a']}}}, '2026-10-16')
+    assert [p[-1] for p in selected] == [0, 1, 2]

@@ -108,6 +108,7 @@ def run_daily(root):
     # Resume only the unfinished symbols; validated daily successes are not
     # invalidated by an unrelated source refresh's retrieval timestamp.
     from bot.verified_research_audit import verify_saved
+    from bot.research_analysis import analyze
     accepted = {}
     for ticker in valid:
         try:
@@ -115,7 +116,11 @@ def run_daily(root):
             if not report.get("generated_at", "").startswith(date):
                 continue
             verify_saved(root, report, report["input"])
-            accepted[ticker] = {"status": "completed", "reused": True}
+            analysis = analyze(report["input"])
+            accepted[ticker] = {"status": "completed", "reused": True,
+                                "research_ready": analysis["research_ready"],
+                                "missing_objectives": analysis["missing"],
+                                "input_fingerprint": analysis["input_fingerprint"]}
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
     valid = [t for t in valid if t not in accepted]
@@ -130,7 +135,10 @@ def run_daily(root):
     state["completed"] = sum(v.get("status") == "completed" for v in state["results"].values())
     state["excluded"] = [t for t, v in state["results"].items() if v.get("status") == "excluded"]
     state["pending"] = [t for t in tickers if state["results"].get(t, {}).get("status") != "completed"]
-    state["complete"] = now_tw().date().isoformat() == date and bool(tickers) and not state["pending"] and state.get("collection_complete", False) and state.get("official_complete", False) and state["daily_inputs"].get("complete", False)
+    state["research_completed"] = sum(bool(r.get("research_ready")) for r in state["results"].values())
+    state["research_pending"] = [t for t in tickers if not state["results"].get(t, {}).get("research_ready")]
+    state["unique_input_sets"] = len({r["input_fingerprint"] for r in state["results"].values() if r.get("input_fingerprint")})
+    state["complete"] = now_tw().date().isoformat() == date and bool(tickers) and not state["research_pending"] and state.get("collection_complete", False) and state.get("official_complete", False) and state["daily_inputs"].get("complete", False)
     state.update(phase="complete" if state["complete"] else "partial", finished_at=now_tw().isoformat())
     write_json(path, state)
     write_daily_summary(root, state)

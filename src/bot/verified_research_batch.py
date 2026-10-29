@@ -91,8 +91,10 @@ def collect(root, tickers):
 
 
 def validate_report(report, item):
+    from bot.research_analysis import validate_analysis
     if not isinstance(report, dict) or report.get('ticker') != item['ticker']:
         raise ValueError('ticker mismatch')
+    validate_analysis(report, item)
     if not isinstance(report.get('summary'), str) or not report['summary'].strip():
         raise ValueError('missing summary')
     if not isinstance(report.get('limitations'), list) or not report['limitations']:
@@ -109,8 +111,11 @@ def validate_report(report, item):
 
 
 def revalidate(root, items):
+    from bot.research_analysis import analyze
     with SourceRegistry(root) as registry:
         for item in items:
+            if 'analysis' in item and item['analysis'] != analyze(item):
+                raise ValueError('input calculations do not match the source rows')
             for entry in item['sources']:
                 if entry.get('format'):
                     from bot.foreign_research_sources import validate_entry
@@ -215,10 +220,15 @@ def _main(argv=None):
     from bot.verified_research_audit import verify_saved, summarize
     cache = root / 'data/verified_research_cache' / now_tw().date().isoformat()
     pending = []
+    prepared = []
+    from bot.research_analysis import analyze
     for ticker in tickers:
         item = {'ticker': ticker, 'sources': inputs[ticker]}
         if ticker in funds:
             item['asset_class'] = 'ETF; fund profile and historical price only, no corporate financial statements'
+        item['analysis'] = analyze(item)
+        if item['sources']:
+            prepared.append(item)
         saved = out / 'reports' / (ticker + '.json')
         if not item['sources']:
             reasons = list(dict.fromkeys(e['reason'] for e in exclusions if e.get('ticker') == ticker))
@@ -241,7 +251,7 @@ def _main(argv=None):
             archived = out / 'attempts' / attempt_id / 'reports' / saved.name
             archived.parent.mkdir(parents=True, exist_ok=True)
             saved.replace(archived)
-    write_json(out / 'inputs.json', [dict(ticker=t, sources=inputs[t], **({'asset_class': 'ETF; fund profile and historical price only, no corporate financial statements'} if t in funds else {})) for t in tickers if inputs[t]])
+    write_json(out / 'inputs.json', prepared)
     write_json(out / 'status.json', state)
     summarize(root, out, state)
     reused = sum(r['status'] == 'completed' for r in state['results'].values())
@@ -251,7 +261,7 @@ def _main(argv=None):
         summary = summarize(root, out, state)
         if any(r['status'] == 'verification_failed' for r in state['results'].values()):
             return 2
-        return 3 if excluded_count else 0
+        return 3 if excluded_count or (args.execute and not summary['complete']) else 0
     from bot.config import Settings
     from bot.llm_analyzer import GeminiClient, gemini_call, extract_json
     settings = Settings(_env_file=str(root / '.env'))
@@ -285,7 +295,8 @@ def _main(argv=None):
                         raise ValueError('missing or duplicate ticker output')
                     validate_report(matches[0], item)
                     report = {**matches[0], 'input': item, 'input_receipt': receipt.document_id,
-                              'conclusions_verified': False, 'scope': state['scope'], 'generated_at': now_tw().isoformat()}
+                              'analysis': item['analysis'], 'conclusions_verified': False,
+                              'scope': state['scope'], 'generated_at': now_tw().isoformat()}
                     verify_saved(root, report, item)
                     write_json(out / 'reports' / (item['ticker'] + '.json'), report)
                     write_json(cache / (item['ticker'] + '.json'), report)

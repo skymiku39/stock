@@ -1,5 +1,5 @@
 id: verified_research_batch
-version: "1.4"
+version: "1.5"
 description: 僅依可重放官方原始資料進行批次個股研究
 max_output_tokens: 12000
 temperature: 0.1
@@ -16,8 +16,11 @@ template: |
   asset_class 標示 ETF 時，只研究提供的基金基本資料與歷史行情。
   發行單位數不是公司股本，日K收盤價不是基金淨值；不得據此推導公司營收、EPS或估值。
   不提供目標價或交易指令。資料不足要明確說明。模型推論不是已驗證事實。
-  每檔輸出 summary（最多200字）、limitations、observations。
-  observations 為1至4個物件，每個包含 evidence_id、field、value，三者必須
+  每檔輸出 summary（最多600字）、limitations、observations。
+  優先說明實際數值、比較期間與變化；analysis.comparisons 是程式依同單位與可比期間計算的結果，
+  可在 summary 引用其數值，保留期間與 basis；change_pct 為 null 時不可自行補成零。
+  analysis.missing 是尚未達成的研究條件，須具體指出缺少的資料，不要重複泛用免責文字。
+  observations 為1至12個物件，每個包含 evidence_id、field、value，三者必須
   逐字複製自該 ticker 的同一筆 source.row，value 保留原始JSON型別。
   SEC 資料的數值欄位名稱是 val，concept 是會計項目名稱的值，不是欄位名稱。
   例如 row={{"concept":"Assets","val":100,"unit":"USD"}}，數值觀察應輸出

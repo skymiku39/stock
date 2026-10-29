@@ -77,9 +77,10 @@ def collect(root, tickers):
                     if prices:
                         price, price_raw = read_source(root, registry.db, prices['document_id'])
                         if price.retrieved_at.startswith(now_tw().date().isoformat()):
-                            entries.append({'format': 'twse_fund_price', 'source_document_id': price.document_id,
-                                'sha256': price.content_hash, 'url': price.url, 'row_index': -1,
-                                'row': price_row(price_raw, -1)})
+                            for index in range(len(json.loads(price_raw).get('data', []))):
+                                entries.append({'format': 'twse_fund_price', 'source_document_id': price.document_id,
+                                    'sha256': price.content_hash, 'url': price.url, 'row_index': index,
+                                    'row': price_row(price_raw, index)})
                     for entry in entries:
                         entry.update(identity_source_id=profile.document_id, identity_sha256=profile.content_hash)
                         validate_entry(root, registry.db, ticker, entry)
