@@ -9,6 +9,14 @@ from bot.evidence import persist_evidence_items
 from bot.source_registry import SourceRegistry, resolve_source_document_path
 
 
+def require_brief_text(raw, info):
+    """The model client reports many failures as metadata instead of raising."""
+    error = info.get("error") or info.get("validation_error")
+    if error or info.get("disabled") or not isinstance(raw, str) or not raw.strip():
+        raise ValueError(str(error or "LLM returned no usable brief"))
+    return raw
+
+
 def prepare_brief_metadata(*, root: Path, task: str, run_id: str, variables: dict[str, Any],
                            macro_snapshot=None, latest=None, previous=None,
                            chip_summaries=None, etf_meta=None, min_consensus=2):

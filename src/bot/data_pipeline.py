@@ -747,7 +747,8 @@ def run_full_pipeline(
                 metadata=brief_metadata, **brief_variables,
             )
             run.brief_input_metadata["us_market_brief"] = info.get("input_provenance", brief_metadata)
-            run.us_brief_md = raw or "(LLM 未產出內容)"
+            from bot.pipeline_brief import require_brief_text
+            run.us_brief_md = require_brief_text(raw, info)
             run.us_brief_prompt_id = info.get("prompt_id", "")
             run.us_brief_prompt_version = info.get("prompt_version", "")
         except Exception as e:
@@ -795,7 +796,8 @@ def run_full_pipeline(
                 metadata=brief_metadata, **brief_variables,
             )
             run.brief_input_metadata["daily_brief"] = info.get("input_provenance", brief_metadata)
-            run.daily_brief_md = raw or "(LLM 未產出內容)"
+            from bot.pipeline_brief import require_brief_text
+            run.daily_brief_md = require_brief_text(raw, info)
             run.daily_brief_prompt_id = info.get("prompt_id", "")
             run.daily_brief_prompt_version = info.get("prompt_version", "")
         except Exception as e:

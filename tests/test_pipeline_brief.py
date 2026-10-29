@@ -87,3 +87,22 @@ def test_nan_cannot_mask_modified_quote(tmp_path):
     with pytest.raises(ValueError, match="differs"):
         prepare_brief_metadata(root=tmp_path, task="us_market_brief", run_id="bad",
             variables=variables, macro_snapshot=snapshot)
+
+
+@pytest.mark.parametrize('raw,info', [(None, {'error': 'usage limit'}), ('', {}),
+                                     ('unusable', {'error': 'provider failed'})])
+def test_model_failure_is_a_pipeline_error_not_a_successful_placeholder(tmp_path, monkeypatch, raw, info):
+    from types import SimpleNamespace
+    from bot import data_pipeline, market_macro
+    snapshot = market_macro.MacroSnapshot(fetched_at='2026-10-29', asof_date='2026-10-28')
+    monkeypatch.setattr(market_macro, 'fetch_macro_snapshot', lambda **kw: snapshot)
+    monkeypatch.setattr(data_pipeline, 'GeminiClient', lambda **kw: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(data_pipeline, 'prepare_brief_metadata', lambda **kw: {'evidence_ids': [], 'excluded_inputs': []})
+    monkeypatch.setattr(data_pipeline, 'gemini_call', lambda *a, **kw: (raw, info))
+    run = data_pipeline.run_full_pipeline(data_pipeline.PipelineConfig(
+        project_root=tmp_path, fetch_etf_holdings=False, fetch_chips=False,
+        fetch_macro=True, update_calendar=False, auto_research_focus=False,
+        run_llm_analysis=False, generate_brief=True, generate_us_brief=True))
+    assert any(e.startswith('us_brief:') for e in run.errors)
+    assert any(e.startswith('daily_brief:') for e in run.errors)
+    assert not run.us_brief_md and not run.daily_brief_md
