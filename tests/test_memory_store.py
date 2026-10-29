@@ -274,6 +274,23 @@ def test_capacity_report_warns_without_archiving_at_threshold(tmp_path: Path) ->
     assert store.db.get_memory_item(item.memory_id).memory_status == "active"
 
 
+def test_capacity_includes_llm_calls_hidden_by_retrieval_policy(tmp_path):
+    store = _store(tmp_path, max_active_short_items=1)
+    with store.db.transaction() as c:
+        c.execute("INSERT INTO historical_exclusions VALUES ('policy','trusted_research_only','x','{}','2026-01-01')")
+    first = store.put_short('original prompt', memory_type='llm_call', memory_id='a')
+    assert store.db.list_memory_items(memory_layer='short') == []
+    assert store.capacity_report()['short']['active_items'] == 1
+    second = store.put_short('another prompt', memory_type='llm_call', memory_id='b')
+    assert store.capacity_report()['short']['active_items'] == 1
+    assert store.db.get_memory_item(first.memory_id).memory_status == 'archived'
+    assert store.db.get_memory_item(first.memory_id).content == 'original prompt'
+    assert store.db.get_memory_item(second.memory_id).memory_status == 'active'
+    with store.db.transaction() as c:
+        c.execute("UPDATE memory_items SET expires_at='2000-01-01T00:00:00+08:00' WHERE memory_id='b'")
+    assert store.archive_expired() == 1
+
+
 def test_llm_call_memory_preserves_prompt_and_output(tmp_path: Path) -> None:
     store = _store(tmp_path)
     row = store.record_llm_call(SimpleNamespace(

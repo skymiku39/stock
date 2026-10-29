@@ -1159,43 +1159,51 @@ class MemoryStore:
     def archive_expired(self, *, now: str = "") -> int:
         current = _parse_time(now) or now_tw()
         changed = 0
-        for item in self.db.list_memory_items(memory_layer="short", memory_status="active", limit=100_000):
-            expires = _parse_time(item.expires_at)
+        for item in self._capacity_rows("short"):
+            expires = _parse_time(item["expires_at"])
             if expires and expires <= current:
-                self.db.update_memory_status(item.memory_id, "archived")
-                self._event(item.memory_id, "archived", payload={"reason": "expired"})
+                self.db.update_memory_status(item["memory_id"], "archived")
+                self._event(item["memory_id"], "archived", payload={"reason": "expired"})
                 changed += 1
         return changed
+
+    def _capacity_rows(self, layer: str):
+        # Retrieval hides quarantined/untrusted records. Capacity must count
+        # them too, without loading hundreds of MB of prompts into Python.
+        return self.db.conn.execute(
+            "SELECT memory_id, expires_at, length(content) AS chars "
+            "FROM memory_items WHERE memory_layer=? AND memory_status='active' "
+            "ORDER BY importance, COALESCE(NULLIF(last_accessed_at,''), created_at), memory_id",
+            (layer,),
+        ).fetchall()
 
     def enforce_limits(self) -> Dict[str, int]:
         """只封存低重要度項目，保留原文供日後重建或人工回放。"""
         self.archive_expired()
         archived_short = 0
-        short = self.db.list_memory_items(memory_layer="short", memory_status="active", limit=100_000)
-        short = sorted(short, key=lambda row: (row.importance, row.last_accessed_at or row.created_at))
-        total_chars = sum(len(row.content) for row in short)
+        short = self._capacity_rows("short")
+        total_chars = sum(row["chars"] for row in short)
         while (
             len(short) - archived_short > self.policy.max_active_short_items
             or total_chars > self.policy.max_active_short_chars
         ) and archived_short < len(short):
             row = short[archived_short]
-            self.db.update_memory_status(row.memory_id, "archived")
-            self._event(row.memory_id, "archived", payload={"reason": "capacity"})
-            total_chars -= len(row.content)
+            self.db.update_memory_status(row["memory_id"], "archived")
+            self._event(row["memory_id"], "archived", payload={"reason": "capacity"})
+            total_chars -= row["chars"]
             archived_short += 1
 
         archived_long = 0
-        long = self.db.list_memory_items(memory_layer="long", memory_status="active", limit=100_000)
-        long = sorted(long, key=lambda row: (row.importance, row.last_accessed_at or row.created_at))
-        total_long_chars = sum(len(row.content) for row in long)
+        long = self._capacity_rows("long")
+        total_long_chars = sum(row["chars"] for row in long)
         while (
             len(long) - archived_long > self.policy.max_active_long_items
             or total_long_chars > self.policy.max_active_long_chars
         ) and archived_long < len(long):
             row = long[archived_long]
-            self.db.update_memory_status(row.memory_id, "archived")
-            self._event(row.memory_id, "archived", payload={"reason": "capacity", "layer": "long"})
-            total_long_chars -= len(row.content)
+            self.db.update_memory_status(row["memory_id"], "archived")
+            self._event(row["memory_id"], "archived", payload={"reason": "capacity", "layer": "long"})
+            total_long_chars -= row["chars"]
             archived_long += 1
         return {"archived_short": archived_short, "archived_long": archived_long}
 
@@ -1207,9 +1215,9 @@ class MemoryStore:
             ("short", self.policy.max_active_short_items, self.policy.max_active_short_chars),
             ("long", self.policy.max_active_long_items, self.policy.max_active_long_chars),
         ):
-            rows = self.db.list_memory_items(memory_layer=layer, memory_status="active", limit=100_000)
+            rows = self._capacity_rows(layer)
             count = len(rows)
-            chars = sum(len(row.content) for row in rows)
+            chars = sum(row["chars"] for row in rows)
             item_ratio = count / max_items if max_items > 0 else 1.0
             char_ratio = chars / max_chars if max_chars > 0 else 1.0
             values[layer] = {
