@@ -8,7 +8,7 @@ from bot.source_registry import SourceRegistry
 from bot.stock_db import StockDB
 
 
-def _register(root: Path, source: str, rows: list[dict]) -> None:
+def _register(root: Path, source: str, rows: list[dict], *, retrieved_at="2026-09-20T08:00:00+08:00") -> None:
     db = StockDB.open(root=root)
     try:
         registry = SourceRegistry(root, db=db)
@@ -17,7 +17,7 @@ def _register(root: Path, source: str, rows: list[dict]) -> None:
             json.dumps(rows, ensure_ascii=False).encode("utf-8"),
             kind="http_response",
             url=f"https://example.test/{source}",
-            retrieved_at="2026-09-20T08:00:00+08:00",
+            retrieved_at=retrieved_at,
             quality_status="ok",
             suffix="json",
         )
@@ -126,5 +126,31 @@ def test_materialize_all_fundamentals_materializes_dividend_archive(tmp_path: Pa
         assert db.conn.execute(
             "SELECT COUNT(*) FROM evidence_items WHERE kind='dividend_history'"
         ).fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_history_keeps_old_periods_and_latest_revision_without_double_counting(tmp_path):
+    for day, month, revenue, dividend in [("20", "11508", "100", "2"),
+                                          ("21", "11508", "120", "3"),
+                                          ("22", "11509", "150", "3")]:
+        retrieved = f"2026-09-{day}T08:00:00+08:00"
+        _register(tmp_path, "monthly_revenue_twse", [{
+            "公司代號": "2330", "資料年月": month, "營業收入-當月營收": revenue,
+        }], retrieved_at=retrieved)
+        _register(tmp_path, "dividend_twse", [{
+            "公司代號": "2330", "股利年度": "115",
+            "股東配發-盈餘分配之現金股利(元/股)": dividend,
+        }], retrieved_at=retrieved)
+    result = materialize_all_fundamentals(tmp_path, include_history=True)
+    assert result["failed"] == 0
+    db = StockDB.open(root=tmp_path)
+    try:
+        assert db.get_monthly_revenue("2330", "2026-08")[0].revenue == 120
+        assert db.get_monthly_revenue("2330", "2026-09")[0].revenue == 150
+        assert db.get_dividend_history("2330", 2026)[0].cash_dividend == 3
+        assert db.conn.execute("SELECT count(*) FROM monthly_revenue").fetchone()[0] == 2
+        assert all(not e.published_at for e in db.list_evidence(limit=100)
+                   if e.kind == "monthly_revenue")
     finally:
         db.close()

@@ -28,6 +28,7 @@ def tracked_tickers(root, settings):
 
 def refresh_official(root):
     from bot import fundamentals_fetcher as fetcher
+    from bot.fundamentals_research_batch import materialize_all_fundamentals
     errors = []
     for name in ("fetch_monthly_revenue_all", "fetch_valuation_all",
                  "fetch_quarterly_financials_all", "fetch_dividend_all"):
@@ -37,6 +38,17 @@ def refresh_official(root):
                 errors.append(name + ": no rows")
         except Exception as exc:
             errors.append(name + ": " + str(exc))
+    try:
+        result = materialize_all_fundamentals(root, include_history=True)
+        write_json(root / "data/daily_research" / now_tw().date().isoformat()
+                   / "fundamentals-materialization.json", result)
+        for domain in ("monthly_revenue", "valuation", "quarterly", "dividend_history"):
+            stats = result[domain]
+            if stats["failed"] or not stats["attempted"]:
+                errors.append(f"{domain}: materialization failed={stats['failed']}, "
+                              f"attempted={stats['attempted']}; " + "; ".join(stats["errors"]))
+    except Exception as exc:
+        errors.append("fundamentals materialization: " + str(exc))
     return errors
 
 

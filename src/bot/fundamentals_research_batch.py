@@ -78,13 +78,13 @@ class BatchStats:
         return asdict(self)
 
 
-def _latest_documents(db: StockDB, source_prefix: str) -> List[SourceDocumentRow]:
-    """Return one newest manifest row per exact source name."""
+def _latest_documents(db: StockDB, source_prefix: str, *, include_history: bool = False) -> List[SourceDocumentRow]:
+    """Newest revisions first; optionally retain archives of older periods."""
     rows = db.conn.execute(
         """
         SELECT document_id FROM source_documents
         WHERE source LIKE ? AND kind = 'http_response'
-        ORDER BY source, retrieved_at DESC, document_id DESC
+        ORDER BY retrieved_at DESC, document_id DESC
         """,
         (f"{source_prefix}%",),
     ).fetchall()
@@ -92,7 +92,7 @@ def _latest_documents(db: StockDB, source_prefix: str) -> List[SourceDocumentRow
     out: List[SourceDocumentRow] = []
     for row in rows:
         document = db.get_source_document(str(row[0]))
-        if document is None or document.source in seen:
+        if document is None or (not include_history and document.source in seen):
             continue
         seen.add(document.source)
         out.append(document)
@@ -152,6 +152,7 @@ def _materialize_dividend(
     db: StockDB,
     *,
     limit: int = 0,
+    include_history: bool = False,
     logger: logging.Logger,
 ) -> BatchStats:
     """Materialize the newest exact full-market dividend archives.
@@ -165,7 +166,8 @@ def _materialize_dividend(
     stats = BatchStats()
     grouped: Dict[Tuple[str, int], DividendRecord] = {}
     source_ids: Dict[Tuple[str, int], Set[str]] = {}
-    for source in _latest_documents(db, "dividend_"):
+    source_names: Dict[Tuple[str, int], str] = {}
+    for source in _latest_documents(db, "dividend_", include_history=include_history):
         stats.source_documents += 1
         try:
             rows = _dividend_raw_rows(root, source)
@@ -196,6 +198,12 @@ def _materialize_dividend(
                 stats.skipped += 1
                 continue
             key = (parsed.ticker, parsed.year)
+            # Sum distributions within one snapshot, never repeated snapshots.
+            if (key in grouped and source_names[key] == source.source
+                    and grouped[key].source_document_id != source.document_id):
+                stats.skipped += 1
+                continue
+            source_names.setdefault(key, source.source)
             source_ids.setdefault(key, set()).add(source.document_id)
             current = grouped.get(key)
             if current is None:
@@ -276,11 +284,12 @@ def _materialize_monthly_revenue(
     db: StockDB,
     *,
     limit: int = 0,
+    include_history: bool = False,
     logger: logging.Logger,
 ) -> BatchStats:
     stats = BatchStats()
     seen: Set[Tuple[str, str]] = set()
-    for source in _latest_documents(db, "monthly_revenue_"):
+    for source in _latest_documents(db, "monthly_revenue_", include_history=include_history):
         stats.source_documents += 1
         try:
             rows = _raw_rows(root, source)
@@ -312,7 +321,7 @@ def _materialize_monthly_revenue(
                 cumulative=parsed.cum_revenue,
                 cum_yoy_pct=parsed.cum_yoy,
                 source_url=source.url,
-                published_at=source.published_at or source.as_of or key[1],
+                published_at=source.published_at,
                 retrieved_at=source.retrieved_at,
                 quality_status=source.quality_status,
                 db=db,
@@ -327,11 +336,12 @@ def _materialize_valuation(
     db: StockDB,
     *,
     limit: int = 0,
+    include_history: bool = False,
     logger: logging.Logger,
 ) -> BatchStats:
     stats = BatchStats()
     seen: Set[Tuple[str, str]] = set()
-    for source in _latest_documents(db, "valuation_"):
+    for source in _latest_documents(db, "valuation_", include_history=include_history):
         stats.source_documents += 1
         try:
             rows = _raw_rows(root, source)
@@ -377,11 +387,12 @@ def _materialize_quarterly(
     db: StockDB,
     *,
     limit: int = 0,
+    include_history: bool = False,
     logger: logging.Logger,
 ) -> BatchStats:
     stats = BatchStats()
     seen: Set[Tuple[str, str]] = set()
-    for source in _latest_documents(db, "quarterly_financials_"):
+    for source in _latest_documents(db, "quarterly_financials_", include_history=include_history):
         stats.source_documents += 1
         try:
             rows = _raw_rows(root, source)
@@ -445,9 +456,10 @@ def materialize_all_fundamentals(
     root: Path,
     *,
     limit_per_domain: int = 0,
+    include_history: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, Any]:
-    """Materialize latest exact raw rows for all four fundamental domains.
+    """Materialize exact raw rows for all four fundamental domains.
 
     ``limit_per_domain`` is intended for smoke tests; zero means all parsed
     rows.  The returned counters are safe to persist in a pipeline manifest.
@@ -458,16 +470,16 @@ def materialize_all_fundamentals(
     try:
         domains = {
             "monthly_revenue": _materialize_monthly_revenue(
-                project_root, db, limit=limit_per_domain, logger=log,
+                project_root, db, limit=limit_per_domain, include_history=include_history, logger=log,
             ).to_dict(),
             "valuation": _materialize_valuation(
-                project_root, db, limit=limit_per_domain, logger=log,
+                project_root, db, limit=limit_per_domain, include_history=include_history, logger=log,
             ).to_dict(),
             "quarterly": _materialize_quarterly(
-                project_root, db, limit=limit_per_domain, logger=log,
+                project_root, db, limit=limit_per_domain, include_history=include_history, logger=log,
             ).to_dict(),
             "dividend_history": _materialize_dividend(
-                project_root, db, limit=limit_per_domain, logger=log,
+                project_root, db, limit=limit_per_domain, include_history=include_history, logger=log,
             ).to_dict(),
         }
         result: Dict[str, Any] = dict(domains)

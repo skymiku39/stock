@@ -53,6 +53,8 @@ def test_quarterly_refresh_wires_raw_canonical_research_and_claims(tmp_path: Pat
     ]
     assert len(evidence) == 1
     assert evidence[0].source_document_id == rows[0].source_document_id
+    assert json.loads(evidence[0].excerpt)["period_basis"] == "year_to_date"
+    assert "累計" in json.loads(evidence[0].excerpt)["note"]
     assert db.conn.execute(
         "SELECT COUNT(*) FROM claims WHERE run_id LIKE 'quarterly-slice:%'"
     ).fetchone()[0] == 6

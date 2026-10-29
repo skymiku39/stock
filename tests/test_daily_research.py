@@ -158,3 +158,20 @@ def test_disabled_llm_still_collects_inputs_and_writes_summary(tmp_path, monkeyp
     assert called == [True]
     summary = next((tmp_path / "data/daily_research").glob("*/summary.txt")).read_text(encoding="utf-8")
     assert "今天發布 4 則" in summary and "LLM disabled" in summary
+
+
+def test_official_refresh_materializes_history_and_propagates_failures(tmp_path, monkeypatch):
+    from bot import fundamentals_fetcher, fundamentals_research_batch
+    for name in ("fetch_monthly_revenue_all", "fetch_valuation_all",
+                 "fetch_quarterly_financials_all", "fetch_dividend_all"):
+        monkeypatch.setattr(fundamentals_fetcher, name, lambda **kw: [{"data": 1}])
+    domains = {d: {"attempted": 1, "failed": 0, "errors": []} for d in
+               ("monthly_revenue", "valuation", "quarterly", "dividend_history")}
+    def materialize(root, *, include_history):
+        assert root == tmp_path and include_history
+        return domains
+    monkeypatch.setattr(fundamentals_research_batch, "materialize_all_fundamentals", materialize)
+    assert daily.refresh_official(tmp_path) == []
+    assert list((tmp_path / "data/daily_research").glob("*/fundamentals-materialization.json"))
+    domains["quarterly"] = {"attempted": 1, "failed": 1, "errors": ["bad raw hash"]}
+    assert "bad raw hash" in daily.refresh_official(tmp_path)[0]

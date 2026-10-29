@@ -323,6 +323,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=0,
         help="--materialize-all 每個資料域最多處理幾筆；0 表示全部",
     )
+    parser.add_argument("--include-history", action="store_true",
+                        help="重播所有已保存期間，同一公司／期間採用最新來源版本")
     parser.add_argument(
         "--root", type=Path, default=None,
         help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
@@ -338,6 +340,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = materialize_all_fundamentals(
             root,
             limit_per_domain=max(0, int(args.materialize_limit)),
+            include_history=args.include_history,
             logger=log,
         )
         log.info("full-market fundamental materialize result: %s", result)
