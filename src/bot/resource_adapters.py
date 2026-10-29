@@ -336,7 +336,7 @@ class WebSearchAdapter:
             rows = (
                 search_news(query, max_results=plan.max_sources, timeout=self.timeout, root=self.root)
                 if self.resource_name == "news"
-                else search_web(query, max_results=plan.max_sources, timeout=self.timeout, root=self.root)
+                else search_web(query, max_results=plan.max_sources, timeout=self.timeout, root=self.root, strict=True)
             )
             evidence = []
             for row in rows:
@@ -406,6 +406,7 @@ class ProfessionalKnowledgeAdapter:
                 max_results=min(plan.max_sources * 2, 20),
                 timeout=max(1, int(min(8.0, self.timeout))),
                 root=self.root,
+                strict=True,
             )
             candidates = [
                 row for row in rows

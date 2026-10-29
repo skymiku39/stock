@@ -533,7 +533,7 @@ def check_web_search(root: Optional[Path] = None) -> CheckResult:
     from bot.web_search import search_web
     r = CheckResult(name="網路搜尋 (DuckDuckGo)", layer="parse")
     try:
-        results = search_web("台積電 法說會", max_results=5, root=root)
+        results = search_web("台積電 法說會", max_results=5, root=root, strict=True)
         r.rows = len(results)
         r.ok = r.rows > 0
         if not r.ok:

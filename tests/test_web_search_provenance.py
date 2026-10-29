@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pytest
 
 from bot.stock_db import StockDB
 from bot.web_search import fetch_page_text, search_news, search_web
+from bot.web_search import SearchUnavailable, _ddg_destination
 
 
 class _Response:
@@ -64,3 +66,18 @@ def test_search_and_page_raw_responses_are_replayable(tmp_path: Path):
     }
     assert {"web_search", "news_search"} <= research_types
     assert db.fetch_all_rows("claims")
+
+
+def test_blocked_search_is_not_reported_as_no_results():
+    class Blocked(_SearchSession):
+        def post(self, *args, **kwargs):
+            return _Response(b'<form id="challenge-form"></form>', status_code=202)
+    with pytest.raises(SearchUnavailable, match="驗證頁"):
+        search_web("test", session=Blocked(), strict=True)
+    assert search_web("test", session=Blocked()) == []
+
+
+def test_ddg_redirects_resolve_to_source_and_reject_non_web_urls():
+    assert _ddg_destination('//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Freport&amp;rut=x') == 'https://example.test/report'
+    assert _ddg_destination('/l/?uddg=https%3A%2F%2Fexample.test%2Fa') == 'https://example.test/a'
+    assert _ddg_destination('javascript:alert(1)') == ''

@@ -32,7 +32,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import requests
 
@@ -186,6 +186,20 @@ def _materialize_search_results(
 _DDG_HTML_URL = "https://html.duckduckgo.com/html/"
 
 
+class SearchUnavailable(RuntimeError):
+    """The provider failed; this is distinct from a successful empty search."""
+
+
+def _ddg_destination(href: str) -> str:
+    href = html.unescape(str(href))
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if parsed.hostname in {"duckduckgo.com", "html.duckduckgo.com"} or href.startswith("/l/"):
+        href = parse_qs(parsed.query).get("uddg", [href])[0]
+    return href if urlparse(href).scheme in {"http", "https"} else ""
+
+
 def search_web(
     query: str,
     *,
@@ -194,10 +208,11 @@ def search_web(
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
     root: Optional[Path] = None,
+    strict: bool = False,
 ) -> List[SearchResult]:
     """走 DuckDuckGo HTML 端點抓搜尋結果。
 
-    DDG 不需 API key、不限頻率；遇到失敗會回 []。
+    DDG 不需 API key；strict=True 時將拒絕、驗證頁與網路錯誤回報呼叫端。
     """
     log = logger or get_logger("web-search")
     sess = session or _new_session()
@@ -209,9 +224,10 @@ def search_web(
             data={"q": query, "kl": "tw-tzh"},
             timeout=timeout,
         )
+        if any(marker in resp.text.lower() for marker in ("challenge-form", "anomaly.js", "anomaly-modal")):
+            raise SearchUnavailable(f"DuckDuckGo 回傳驗證頁 (HTTP {resp.status_code})")
         if resp.status_code != 200:
-            log.warning("DDG HTTP %d for q=%r", resp.status_code, query)
-            return []
+            raise SearchUnavailable(f"DuckDuckGo HTTP {resp.status_code}")
         if root is not None and getattr(resp, "content", b""):
             try:
                 raw_document = SourceRegistry(Path(root)).capture_document(
@@ -229,8 +245,12 @@ def search_web(
             except Exception:
                 log.debug("DuckDuckGo raw 保存失敗", exc_info=True)
         html_text = resp.text
-    except Exception:
-        log.exception("DDG 搜尋失敗 q=%r", query)
+    except Exception as exc:
+        if strict:
+            if isinstance(exc, SearchUnavailable):
+                raise
+            raise SearchUnavailable(f"DuckDuckGo {type(exc).__name__}: {exc}") from exc
+        log.warning("DDG 搜尋不可用 q=%r: %s", query, exc)
         return []
 
     if _HAS_BS4:
@@ -240,7 +260,7 @@ def search_web(
             if link_el is None:
                 continue
             title = link_el.get_text(" ", strip=True)
-            href = link_el.get("href", "")
+            href = _ddg_destination(link_el.get("href", ""))
             snippet_el = el.select_one(".result__snippet")
             snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
             if not title or not href:
@@ -257,10 +277,10 @@ def search_web(
             r'.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
             html_text, re.S,
         ):
-            href, title_html, snippet_html = m.group(1), m.group(2), m.group(3)
+            href, title_html, snippet_html = _ddg_destination(m.group(1)), m.group(2), m.group(3)
             title = _clean_text(title_html)
             snippet = _clean_text(snippet_html)
-            if not title:
+            if not title or not href:
                 continue
             results.append(SearchResult(
                 title=title, url=href, snippet=snippet,
@@ -269,6 +289,8 @@ def search_web(
             if len(results) >= max_results:
                 break
 
+    if strict and not results and "no-results" not in html_text.lower():
+        raise SearchUnavailable("DuckDuckGo 回應沒有可辨識的結果或查無結果標記")
     _materialize_search_results(root, raw_document_id, results, log)
     log.info("DDG q=%r -> %d 筆", query, len(results))
     return results
