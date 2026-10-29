@@ -229,20 +229,20 @@ class FundamentalSnapshot:
             [q for q in self.quarterlies if q.year == latest_year],
             key=lambda q: q.quarter,
         )
-        cum = 0.0
+        from bot.quarterly import cumulative_eps
+        by_quarter = {q.quarter: q for q in items}
         progress = []
         for q in items:
-            cum += q.eps
             progress.append({
                 "label": f"Q{q.quarter}",
                 "eps": q.eps,
-                "cum_eps": round(cum, 2),
+                "cum_eps": cumulative_eps(by_quarter, q.quarter),
             })
         prev_year_items = sorted(
             [q for q in self.quarterlies if q.year == latest_year - 1],
             key=lambda q: q.quarter,
         )
-        prev_total = round(sum(q.eps for q in prev_year_items), 2)
+        prev_total = cumulative_eps({q.quarter: q for q in prev_year_items}, 4)
         return {
             "year": latest_year,
             "progress": progress,
@@ -1738,11 +1738,12 @@ def _enrich_dividends_with_payout(
     """以該年度 4 季 EPS 估算 payout_ratio (簡易版)。"""
     if not divs:
         return divs
-    eps_by_year: Dict[int, float] = {}
+    from bot.quarterly import cumulative_eps
+    by_year: Dict[int, Dict[int, QuarterlyFinancials]] = {}
     for q in quarterlies:
-        eps_by_year[q.year] = eps_by_year.get(q.year, 0.0) + q.eps
+        by_year.setdefault(q.year, {})[q.quarter] = q
     for d in divs:
-        eps = eps_by_year.get(d.year)
+        eps = cumulative_eps(by_year.get(d.year, {}), 4)
         if eps and eps > 0:
             d.payout_ratio = round(100.0 * (d.cash_dividend + d.stock_dividend) / eps, 1)
     return divs

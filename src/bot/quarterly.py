@@ -94,7 +94,8 @@ class QuarterlyRevenue:
     months: List[int] = field(default_factory=list)
     revenue: float = 0.0
     revenue_last_year: float = 0.0
-    yoy: float = 0.0
+    yoy: Optional[float] = None
+    complete: bool = False
 
 
 @dataclass
@@ -104,9 +105,9 @@ class RollingEpsPoint:
     label: str           # Q1 / H1 / 9M / FY
     year: int
     quarters: int        # 1-4
-    eps_sum: float = 0.0
-    prev_year_eps_sum: float = 0.0
-    diff_pct: float = 0.0
+    eps_sum: Optional[float] = None
+    prev_year_eps_sum: Optional[float] = None
+    diff_pct: Optional[float] = None
     note: str = ""
 
 
@@ -120,7 +121,8 @@ def revenue_quarterly_aggregate(revs: List[MonthlyRevenue]) -> List[QuarterlyRev
     if not revs:
         return []
     bucket: Dict[tuple, QuarterlyRevenue] = {}
-    for r in revs:
+    unique = {(r.year, r.month): r for r in revs}
+    for r in unique.values():
         if not r.month or not r.year:
             continue
         q = (r.month - 1) // 3 + 1
@@ -130,10 +132,23 @@ def revenue_quarterly_aggregate(revs: List[MonthlyRevenue]) -> List[QuarterlyRev
         qr.revenue += r.revenue
         qr.revenue_last_year += r.revenue_last_year
     for qr in bucket.values():
-        if qr.revenue_last_year > 0:
+        qr.complete = len(set(qr.months)) == 3
+        if qr.complete and qr.revenue_last_year > 0:
             qr.yoy = round(100.0 * (qr.revenue - qr.revenue_last_year) / qr.revenue_last_year, 2)
         qr.months = sorted(qr.months)
     return sorted(bucket.values(), key=lambda x: (x.year, x.quarter))
+
+
+def cumulative_eps(items: Dict[int, QuarterlyFinancials], last_q: int) -> Optional[float]:
+    """Use an existing YTD total or consecutive single quarters, never both."""
+    if last_q not in items:
+        return None
+    anchors = [q for q, item in items.items() if q <= last_q and "累計" in item.note]
+    anchor = max(anchors, default=0)
+    if any(q not in items for q in range(anchor + 1, last_q + 1)):
+        return None
+    total = items[anchor].eps if anchor else 0.0
+    return round(total + sum(items[q].eps for q in range(anchor + 1, last_q + 1)), 2)
 
 
 def rolling_eps_series(quarterlies: List[QuarterlyFinancials]) -> List[RollingEpsPoint]:
@@ -152,21 +167,23 @@ def rolling_eps_series(quarterlies: List[QuarterlyFinancials]) -> List[RollingEp
             if last_q not in items:
                 continue
             label = {1: "Q1", 2: "H1", 3: "9M", 4: "FY"}[last_q]
-            cum = sum(items[q].eps for q in range(1, last_q + 1) if q in items)
+            cum = cumulative_eps(items, last_q)
             prev = by_year.get(y - 1, {})
-            prev_cum = sum(prev[q].eps for q in range(1, last_q + 1) if q in prev)
-            diff = 0.0
-            if abs(prev_cum) > 1e-9:
+            prev_cum = cumulative_eps(prev, last_q)
+            diff = None
+            if cum is not None and prev_cum is not None and abs(prev_cum) > 1e-9:
                 diff = round(100.0 * (cum - prev_cum) / abs(prev_cum), 2)
-            note = ""
-            if last_q == 3 and prev:
-                full_prev = sum(prev[q].eps for q in (1, 2, 3, 4) if q in prev)
-                if full_prev > 0 and cum > full_prev:
+            note = "缺少連續季度，無法計算累計 EPS" if cum is None else ""
+            if prev_cum is None:
+                note = (note + "；" if note else "") + "缺少去年同期，無法計算年增率"
+            if last_q == 3 and cum is not None:
+                full_prev = cumulative_eps(prev, 4)
+                if full_prev is not None and full_prev > 0 and cum > full_prev:
                     note = f"9M 累計 EPS 已超越去年全年 ({cum:.2f} > {full_prev:.2f})"
             out.append(RollingEpsPoint(
                 label=label, year=y, quarters=last_q,
-                eps_sum=round(cum, 2),
-                prev_year_eps_sum=round(prev_cum, 2),
+                eps_sum=cum,
+                prev_year_eps_sum=prev_cum,
                 diff_pct=diff,
                 note=note,
             ))
@@ -234,6 +251,7 @@ def _qrev_to_dict(qr: QuarterlyRevenue) -> Dict[str, Any]:
         "revenue": qr.revenue,
         "revenue_last_year": qr.revenue_last_year,
         "yoy": qr.yoy,
+        "complete": qr.complete,
     }
 
 

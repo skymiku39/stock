@@ -226,6 +226,27 @@ class TestManualQuarterlyIO:
 
 
 class TestQuarterlyAggregation:
+    def test_ytd_is_not_added_twice_and_missing_comparison_stays_missing(self):
+        qs = [QuarterlyFinancials("2330", year=2026, quarter=1, eps=5),
+              QuarterlyFinancials("2330", year=2026, quarter=2, eps=12, note="累計，缺前季")]
+        half = rolling_eps_series(qs)[-1]
+        assert half.eps_sum == 12
+        assert half.prev_year_eps_sum is None and half.diff_pct is None
+        snapshot = FundamentalSnapshot(ticker="2330", quarterlies=qs)
+        assert snapshot.rolling_eps_progress()["progress"][-1]["cum_eps"] == 12
+        divs = [DividendRecord(ticker="2330", year=2026, cash_dividend=6)]
+        assert _enrich_dividends_with_payout(divs, qs)[0].payout_ratio is None
+
+    def test_missing_quarter_is_not_treated_as_zero(self):
+        qs = [QuarterlyFinancials("2330", year=2026, quarter=2, eps=12)]
+        assert rolling_eps_series(qs)[0].eps_sum is None
+
+    def test_partial_months_do_not_claim_a_complete_quarter(self):
+        rev = MonthlyRevenue("2330", year=2026, month=8, revenue=100, revenue_last_year=80)
+        q = revenue_quarterly_aggregate([rev, rev])[0]
+        assert q.revenue == 100 and q.months == [8]
+        assert not q.complete and q.yoy is None
+
     def test_revenue_quarterly_aggregate(self) -> None:
         revs = [
             MonthlyRevenue("2330", year=2025, month=m, revenue=100, revenue_last_year=80)
