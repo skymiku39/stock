@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.venv\Scripts\python.e
 }
 $port = if ($Action -eq 'smile') { 8502 } else { 8501 }
 $baseline = Join-Path $projectRoot 'data\reports\smile_execution_20261016'
-if ($Action -in @('replay','smile')) {
+if ($Action -eq 'replay' -or ($Action -eq 'smile' -and -not (Test-Path -LiteralPath (Join-Path $projectRoot 'data\stock.db')))) {
     foreach ($name in @('inputs.json','comparison.json')) {
         if (-not (Test-Path -LiteralPath (Join-Path $baseline $name))) { throw "Missing baseline: $name" }
     }

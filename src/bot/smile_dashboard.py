@@ -3,13 +3,14 @@ from collections import Counter
 from datetime import date
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from bot.smile_dashboard_service import BASELINE, REPORTS, RunRequest, run_comparison, save_run
-from bot.smile_snapshot import load_snapshot
+from bot.smile_dashboard_service import BASELINE, REPORTS, RunRequest, run_comparison, save_run, load_dashboard_inputs
+from bot.stock_db import default_db_path
 
 ROOT = Path(os.environ.get("STOCK_SMILE_ROOT", Path(__file__).resolve().parents[2])).resolve()
 
@@ -17,9 +18,12 @@ st.set_page_config(page_title="微笑曲線回測",layout="wide")
 st.title("微笑曲線回測")
 st.caption("收盤訊號 · 次日開盤 · 多檔共用本金")
 
+source_label = st.sidebar.selectbox("行情來源", ["最新本機日 K", "固定歷史快照"],
+                                  index=0 if default_db_path(ROOT).exists() else 1)
+source = "local_db" if source_label == "最新本機日 K" else "snapshot"
 try:
-    manifest, histories = load_snapshot(ROOT, ROOT / BASELINE)
-except (OSError,ValueError,KeyError,TypeError) as exc:
+    manifest, histories = load_dashboard_inputs(ROOT, source)
+except (OSError,ValueError,KeyError,TypeError,sqlite3.Error) as exc:
     st.error(f"資料快照無法驗證，已停止回測：{exc}")
     st.stop()
 
@@ -34,6 +38,9 @@ with st.sidebar:
     st.caption(f"所選股票共同資料區間：{first} ～ {last}")
     with st.form("parameters"):
         capital = st.number_input("共用本金（元）",min_value=1000,value=500000,step=10000,key="capital")
+        odd_lot = st.checkbox("使用零股", value=True, key="odd_lot")
+        base_quantity = st.number_input("每階基礎數量（零股為股，整張為張）", min_value=1,
+                                       value=100, step=1, key="base_quantity")
         start = st.date_input("開始日期",value=date.fromisoformat(first),key=f"start_{first}_{last}")
         end = st.date_input("結束日期",value=date.fromisoformat(last),key=f"end_{first}_{last}")
         slip = st.number_input("每邊滑價（%）",min_value=0.0,max_value=10.0,value=.1,step=.05,format="%.3f",key="slip")
@@ -44,7 +51,7 @@ with st.sidebar:
             stress_slip = st.number_input("壓力滑價（%）",min_value=0.0,max_value=10.0,value=.3,step=.1,format="%.3f",key="stress_slip")
             stress_volume = st.number_input("壓力成交量參與率（%）",min_value=.0001,max_value=100.0,value=.01,step=.01,format="%.4f",key="stress_volume")
         submitted = st.form_submit_button("執行回測",type="primary",width="stretch")
-    st.caption("固定策略：跌 1/3/5/8% 分批買，基本一張，單檔最多兩張。手續費折扣 0.28、最低 1 元、賣出稅率 0.3%。")
+    st.caption("跌 1/3/5/8% 分批買，單檔最多兩張等值。手續費折扣 0.28、最低 1 元；股票賣出稅率 0.3%，0050 為 0.1%。")
     st.divider()
     st.subheader("已保存的回測")
     files = sorted((ROOT / REPORTS).glob("*.json"),reverse=True)[:100]
@@ -65,14 +72,15 @@ with st.sidebar:
 if submitted:
     try:
         request = RunRequest(tuple(symbols),start.isoformat(),end.isoformat(),int(capital),
-                             slip,volume,compare,stress_slip,stress_volume)
-        with st.spinner("驗證快照並執行回測…"):
+                             slip,volume,compare,stress_slip,stress_volume,
+                             data_source=source,odd_lot=odd_lot,base_quantity=int(base_quantity))
+        with st.spinner("讀取行情並執行回測…"):
             result = run_comparison(ROOT,request)
             path = save_run(ROOT,result)
         st.session_state["result"] = result
         st.session_state["result_file"] = str(path)
         st.success("回測完成，結果與參數已保存。")
-    except (OSError,ValueError,KeyError,TypeError) as exc:
+    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error) as exc:
         st.error(f"本次未完成：{exc}。若下方有結果，仍是上一次的紀錄。")
 
 payload = st.session_state.get("result")
@@ -81,6 +89,7 @@ if not payload:
 else:
     req = payload["request"]
     st.subheader("回測結果")
+    st.caption("資料來源：" + ("本機日 K" if req.get("data_source") == "local_db" else "固定歷史快照"))
     st.caption(f"以下結果使用：{', '.join(req['symbols'])}｜{req['start']} ～ {req['end']}｜"
                f"本金 {req['capital']:,} 元｜滑價 {req['slippage_pct']}%｜參與率 {req['participation_pct']}%｜"
                f"執行時間 {payload['created_at']}。調整左側參數後需重新執行才會更新。")

@@ -93,3 +93,34 @@ def test_page_fails_closed_for_missing_snapshot(tmp_path,monkeypatch):
     assert not app.exception
     assert app.error
     assert not app.button
+
+
+def test_local_database_inputs_are_readonly_and_include_0050(tmp_path):
+    from bot.stock_db import StockDB, default_db_path
+    from bot.smile_dashboard_service import load_dashboard_inputs
+    (tmp_path / ".env").write_text("SYMBOLS=2330,0050\n", encoding="utf-8")
+    db = StockDB.open(path=default_db_path(tmp_path))
+    for symbol in ("2330", "0050"):
+        db.bulk_upsert_price_bars([
+            PriceBar(symbol, f"2026-11-0{i+1}", open=o, high=max(o,c), low=min(o,c), close=c, volume=100000)
+            for i, (o,c) in enumerate([(100,100),(100,98),(99,102),(103,103)])])
+    db.close()
+    path = default_db_path(tmp_path)
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest, histories = load_dashboard_inputs(tmp_path, "local_db")
+    assert sorted(histories) == ["0050", "2330"]
+    assert histories["0050"][-1].date == "2026-11-04"
+    result = run_comparison(tmp_path, RunRequest(("0050", "2330"), "2026-11-01", "2026-11-04",
+                                                data_source="local_db", odd_lot=True, base_quantity=100))
+    assert result["input_sha256"] == manifest["input_sha256"]
+    assert result["results"]["目前設定"]["trade_count"] > 0
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_missing_local_database_never_creates_empty_db(tmp_path):
+    import sqlite3
+    from bot.smile_dashboard_service import load_dashboard_inputs
+    from bot.stock_db import default_db_path
+    with pytest.raises(sqlite3.OperationalError):
+        load_dashboard_inputs(tmp_path, "local_db")
+    assert not default_db_path(tmp_path).exists()

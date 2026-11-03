@@ -3,6 +3,8 @@ from dataclasses import asdict, dataclass
 from datetime import date
 import json
 import math
+import hashlib
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ from bot.config import Settings
 from bot.smile_curve_backtest import SmileCurveBacktester
 from bot.smile_execution import SmileExecution
 from bot.smile_snapshot import load_snapshot
+from bot.stock_db import PriceBar, default_db_path
 from bot.utils import now_tw
 
 BASELINE = Path("data/reports/smile_execution_20261016")
@@ -27,8 +30,15 @@ class RunRequest:
     compare: bool = True
     stress_slippage_pct: float = .3
     stress_participation_pct: float = .01
+    data_source: str = "snapshot"
+    odd_lot: bool = False
+    base_quantity: int = 1
 
     def validate(self):
+        if self.data_source not in ("snapshot", "local_db"):
+            raise ValueError("不支援的資料來源。")
+        if not isinstance(self.base_quantity, int) or self.base_quantity < 1 or (self.odd_lot and self.base_quantity > 999):
+            raise ValueError("基礎數量須為正整數，零股每筆最多 999 股。")
         if not self.symbols or len(set(self.symbols)) != len(self.symbols):
             raise ValueError("請選擇至少一檔且不重複的股票。")
         if date.fromisoformat(self.start) > date.fromisoformat(self.end):
@@ -43,9 +53,38 @@ class RunRequest:
                 raise ValueError("成交量參與率必須大於 0% 且不超過 100%。")
 
 
+def load_dashboard_inputs(root: Path, source: str):
+    if source == "snapshot":
+        return load_snapshot(root, root / BASELINE)
+    if source != "local_db":
+        raise ValueError("不支援的資料來源。")
+    settings = Settings(_env_file=str(root / ".env"))
+    symbols = sorted(set(settings.symbols or ["2330", "0050"]))
+    symbols = [s for s in symbols if s == "0050" or
+               (s.isdigit() and len(s) == 4 and not s.startswith("0"))]
+    path = default_db_path(root).resolve()
+    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        connection.execute("BEGIN")
+        histories = {}
+        for symbol in symbols:
+            rows = connection.execute(
+                "SELECT symbol,date,open,high,low,close,volume FROM price_history WHERE symbol=? ORDER BY date",
+                (symbol,)).fetchall()
+            if rows:
+                histories[symbol] = [PriceBar(*row) for row in rows]
+    finally:
+        connection.close()
+    if not histories:
+        raise ValueError("本機資料庫沒有支援股票的日 K。")
+    raw = json.dumps({s: [asdict(b) for b in rows] for s, rows in histories.items()},
+                     sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return dict(input_sha256=hashlib.sha256(raw).hexdigest(), data_source="local_db"), histories
+
+
 def run_comparison(root: Path, request: RunRequest) -> dict:
     request.validate()
-    manifest, histories = load_snapshot(root, root / BASELINE)
+    manifest, histories = load_dashboard_inputs(root, request.data_source)
     selected = {}
     for symbol in request.symbols:
         if symbol not in histories:
@@ -57,8 +96,8 @@ def run_comparison(root: Path, request: RunRequest) -> dict:
         if len(selected[symbol]) < 2:
             raise ValueError(f"{symbol} 至少需要兩根日 K 才能回測次日成交。")
     settings = Settings(_env_file=None,max_fund=request.capital,daily_fund_budget=0,
-                        smile_buy_tiers="1:1,3:2,5:3,8:4",smile_base_lot=1,
-                        smile_reference_prices={},use_odd_lot=False,max_lot_per_symbol=2,
+                        smile_buy_tiers="1:1,3:2,5:3,8:4",smile_base_lot=request.base_quantity,
+                        smile_reference_prices={},use_odd_lot=request.odd_lot,max_lot_per_symbol=2,
                         broker_fee_discount=.28,broker_min_fee=1,smile_regular_tax_rate=.003)
     scenarios = {"目前設定":SmileExecution(request.slippage_pct*100,request.participation_pct/100)}
     if request.compare:
