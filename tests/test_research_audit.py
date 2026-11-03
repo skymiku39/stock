@@ -9,6 +9,27 @@ from bot.source_registry import SourceRegistry
 from bot.stock_db import StockDB
 
 
+def test_shared_archives_resolve_once_per_audit_and_tampering_is_rechecked(tmp_path, monkeypatch):
+    from bot import research_audit
+    with SourceRegistry(tmp_path) as registry:
+        source = registry.capture_document("fixture", b"shared raw", suffix="txt")
+        for symbol in ("2330", "2317"):
+            registry.materialize_research_document(source.document_id, symbol + " shared raw",
+                document_type="fixture", symbol=symbol)
+    calls = []
+    original = research_audit._safe_path
+    def resolve(*args):
+        calls.append(args)
+        return original(*args)
+    monkeypatch.setattr(research_audit, "_safe_path", resolve)
+    report = audit_research_database(tmp_path / "data/stock.db", root=tmp_path)
+    assert report["documents_checked"] == 2 and len(calls) == 1
+    (tmp_path / source.content_path).write_bytes(b"tampered")
+    report = audit_research_database(tmp_path / "data/stock.db", root=tmp_path)
+    assert len(calls) == 2
+    assert sum(f["code"] == "research_raw_hash_mismatch" for f in report["findings"]) == 2
+
+
 def test_research_audit_reports_type_mismatch_without_rewriting(tmp_path: Path) -> None:
     db = StockDB.open(root=tmp_path)
     try:

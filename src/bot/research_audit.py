@@ -259,33 +259,31 @@ def audit_research_database(
                     ))
 
             relative = str(source["content_path"] or "").strip()
-            raw_path = _safe_path(project_root, relative)
-            if raw_path is None or not raw_path.is_file():
-                source_replay_cache[source_id] = (False, "raw_missing_or_outside_root")
-                findings.append(_finding(
-                    "research_raw_missing", "error",
-                    "研究文件的 exact raw archive 不存在或超出專案根目錄。",
-                    document_id=document_id, source_document_id=source_id,
-                    details={"content_path": relative},
-                ))
-            elif source_id not in source_replay_cache:
-                digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-                expected = str(source["content_hash"] or "").strip().lower()
-                ok = bool(expected and digest == expected)
-                source_replay_cache[source_id] = (ok, "" if ok else "hash_mismatch")
-                if not ok:
+            if source_id not in source_replay_cache:
+                raw_path = _safe_path(project_root, relative)
+                if raw_path is None or not raw_path.is_file():
+                    source_replay_cache[source_id] = (False, "raw_missing_or_outside_root")
+                else:
+                    digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+                    expected = str(source["content_hash"] or "").strip().lower()
+                    ok = bool(expected and digest == expected)
+                    source_replay_cache[source_id] = (ok, "" if ok else "hash_mismatch")
+            ok, reason = source_replay_cache[source_id]
+            if not ok:
+                if reason == "raw_missing_or_outside_root":
+                    findings.append(_finding(
+                        "research_raw_missing", "error",
+                        "研究文件的 exact raw archive 不存在或超出專案根目錄。",
+                        document_id=document_id, source_document_id=source_id,
+                        details={"content_path": relative},
+                    ))
+                else:
                     findings.append(_finding(
                         "research_raw_hash_mismatch", "error",
                         "研究文件的 raw archive SHA-256 與 source manifest 不一致。",
                         document_id=document_id, source_document_id=source_id,
                         details={"content_path": relative},
                     ))
-            elif not source_replay_cache[source_id][0]:
-                findings.append(_finding(
-                    "research_raw_hash_mismatch", "error",
-                    "研究文件共用的 raw archive 未通過 SHA-256 驗證。",
-                    document_id=document_id, source_document_id=source_id,
-                ))
 
             suffix = Path(relative).suffix.lower()
             mime = str(source["mime_type"] or "").lower()
