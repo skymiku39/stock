@@ -2,6 +2,8 @@
 
 import datetime as dt
 import json
+import logging
+import sqlite3
 from types import SimpleNamespace
 import pytest
 
@@ -60,6 +62,32 @@ def test_historical_record_ids_remain_compatible():
                         metadata={"run_id": "old-run", "ticker": "2330"})
     assert research_run_id(old) == "old-run"
     assert analysis_record_id(old) == "2026-10-01T00:00:00Z_legacy_2330"
+
+
+def test_llm_mirror_reserves_writer_before_its_existence_check(tmp_path):
+    db = StockDB.open(root=tmp_path)
+    other = sqlite3.connect(str(db.path), isolation_level=None, timeout=0)
+    attempts = []
+    def competing_write(sql):
+        if sql.startswith("SELECT 1 FROM llm_analysis_history"):
+            try:
+                other.execute("INSERT INTO stock_info(symbol) VALUES ('writer-race')")
+                attempts.append("committed")
+            except sqlite3.OperationalError:
+                attempts.append("reserved")
+    db.conn.set_trace_callback(competing_write)
+    rec = LlmCallRecord(ts="2026-11-04T01:00:00+08:00", prompt_id="fixture",
+        prompt_version="1", model="fixture", input="fixture", output='{"summary":"saved"}',
+        call_id="fixture-writer-race", success=True)
+    try:
+        llm_log._mirror_to_stock_db(rec, logger=logging.getLogger(__name__), db=db, mirror_memory=False)
+        assert attempts == ["reserved"]
+        assert db.get_llm_run(research_run_id(rec)) is not None
+        assert db.conn.execute("SELECT count(*) FROM llm_analysis_history").fetchone()[0] == 1
+    finally:
+        db.conn.set_trace_callback(None)
+        other.close()
+        db.close()
 
 
 @pytest.mark.parametrize("ids, expected_state", [

@@ -350,7 +350,9 @@ def _persist_research_llm_run(
     """
     from bot.stock_db import LlmOutputRow, LlmRunEvidenceRow, LlmRunRow
 
-    with db.transaction():
+    # The existence check reads before the first write. Reserve the writer so
+    # another process cannot invalidate that WAL snapshot during the upgrade.
+    with db.transaction(immediate=True):
         if analysis is not None:
             existing = db.conn.execute("SELECT 1 FROM llm_analysis_history WHERE id = ?", (analysis.id,)).fetchone()
             if rec.call_id or not existing:
