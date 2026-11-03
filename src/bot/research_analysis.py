@@ -117,11 +117,25 @@ def _fund_comparisons(sources):
         value = number(row.get('收盤價'))
         if value is not None and value > 0:
             prices[day] = (value, source['evidence_id'])
+    out = []
+    for source in sources:
+        if source.get('format') != 'fund_nav':
+            continue
+        row = source['row']
+        nav = number(row.get('nav'))
+        day = row.get('as_of', '')
+        if nav is not None and nav > 0 and day in prices:
+            close, price_id = prices[day]
+            out.append({'metric': 'premium_to_nav', 'unit': 'pct',
+                'comparison': 'same_day_close_to_nav', 'period': day,
+                'close': float(close), 'nav': float(nav),
+                'premium_pct': float((close - nav) / nav * 100),
+                'evidence_ids': [price_id, source['evidence_id']]})
     if len(prices) < 2:
-        return []
+        return out
     days = sorted(prices)
     first, last = days[0], days[-1]
-    return [{'metric': 'close', 'unit': 'TWD', 'comparison': 'observed_price_change',
+    return out + [{'metric': 'close', 'unit': 'TWD', 'comparison': 'observed_price_change',
              'start': first, 'end': last, 'observations': len(prices),
              **_change(prices[last][0], prices[first][0]),
              'evidence_ids': [prices[first][1], prices[last][1]],
@@ -142,7 +156,7 @@ def analyze(item):
         objective('fund_identity', bool(profile.get('基金代號')))
         objective('price_comparison', any(c['metric'] == 'close' for c in comparisons))
         objective('holdings', any(s.get('format') == 'fund_holdings' for s in sources))
-        objective('nav_and_premium', any(s.get('format') == 'fund_nav' for s in sources))
+        objective('nav_and_premium', any(c['metric'] == 'premium_to_nav' for c in comparisons))
         kind = 'fund_research'
     elif 'sec_fact' in formats:
         concepts = {s['row'].get('concept') for s in sources if s.get('format') == 'sec_fact'}

@@ -12,6 +12,12 @@ from bot.utils import now_tw
 PROFILE_URL = 'https://openapi.twse.com.tw/v1/opendata/t187ap47_L'
 
 
+def yuanta_url(ticker):
+    if not ticker.isdigit() or not 4 <= len(ticker) <= 6:
+        raise ValueError('invalid fund ticker')
+    return f'https://www.yuantaetfs.com/product/detail/{ticker}/ratio'
+
+
 def profile_row(raw, ticker):
     rows = [r for r in json.loads(raw) if isinstance(r, dict) and r.get('基金代號') == ticker]
     if len(rows) != 1:
@@ -47,6 +53,15 @@ def validate_entry(root, db, ticker, entry):
             raise ValueError('wrong fund price identity')
         if entry['row'] != price_row(raw, entry['row_index']):
             raise ValueError('fund price cannot be replayed')
+    elif entry['format'] in {'fund_holdings', 'fund_nav'}:
+        from bot.yuanta_fund_source import parse_snapshot
+        if (not str(profile.get('基金中文名稱', '')).startswith('元大')
+                or source.source != 'yuanta_fund_snapshot' or source.url != yuanta_url(ticker)):
+            raise ValueError('wrong official fund portfolio identity')
+        snapshot = parse_snapshot(raw, ticker)
+        expected = snapshot['holdings' if entry['format'] == 'fund_holdings' else 'nav']
+        if entry['row'] != expected:
+            raise ValueError('fund portfolio cannot be replayed')
     else:
         raise ValueError('unsupported fund evidence format')
 
@@ -81,15 +96,36 @@ def collect(root, tickers):
                                 entries.append({'format': 'twse_fund_price', 'source_document_id': price.document_id,
                                     'sha256': price.content_hash, 'url': price.url, 'row_index': index,
                                     'row': price_row(price_raw, index)})
+                    if str(row.get('基金中文名稱', '')).startswith('元大'):
+                        try:
+                            from bot.yuanta_fund_source import parse_snapshot
+                            url = yuanta_url(ticker)
+                            response = requests.get(url, timeout=30)
+                            response.raise_for_status()
+                            if response.status_code != 200 or response.url != url:
+                                raise ValueError('invalid official fund portfolio response')
+                            snapshot = parse_snapshot(response.content, ticker)
+                            if snapshot['nav']['as_of'] > now_tw().date().isoformat():
+                                raise ValueError('future fund portfolio date')
+                            portfolio = registry.capture_document('yuanta_fund_snapshot', response.content,
+                                source_url=url, source_ref=ticker, suffix='html', kind='http_response',
+                                as_of=snapshot['nav']['as_of'])
+                            for key, format_name in (('holdings', 'fund_holdings'), ('nav', 'fund_nav')):
+                                entries.append({'format': format_name, 'source_document_id': portfolio.document_id,
+                                    'sha256': portfolio.content_hash, 'url': url, 'row': snapshot[key]})
+                        except (ValueError, KeyError, TypeError, OSError, requests.RequestException) as exc:
+                            excluded.append({'ticker': ticker, 'reason': 'official fund portfolio: ' + str(exc)})
                     for entry in entries:
                         entry.update(identity_source_id=profile.document_id, identity_sha256=profile.content_hash)
                         validate_entry(root, registry.db, ticker, entry)
                         encoded = json.dumps(entry['row'], ensure_ascii=False, sort_keys=True, allow_nan=False)
                         packet = make_evidence('official_fund_row', source=entry['format'],
                             source_ref=entry['source_document_id'] + ':' + ticker + ':' + hashlib.sha256(encoded.encode()).hexdigest(),
-                            title=ticker + ' official fund profile or daily price', url=entry['url'], excerpt=encoded,
+                            title=ticker + ' official fund ' + entry['format'], url=entry['url'], excerpt=encoded,
                             source_document_id=entry['source_document_id'], quality_status='ok', provenance_status='composite_exact',
-                            metadata={'source_document_ids': [entry['source_document_id'], profile.document_id]})
+                            metadata={'symbol': ticker, 'format': entry['format'],
+                                'row_sha256': hashlib.sha256(encoded.encode()).hexdigest(),
+                                'source_document_ids': [entry['source_document_id'], profile.document_id]})
                         entry['evidence_id'] = packet['id']
                         persist_evidence_items(registry.db, [packet])
                     result[ticker] = entries

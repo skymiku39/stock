@@ -206,7 +206,7 @@ def validate_entry(root, db, ticker, entry):
     if entry.get('format') == 'sec_filing_excerpt':
         from bot.sec_financial_releases import validate_entry as validate_release
         return validate_release(root, db, ticker, entry)
-    if entry.get('format', '').startswith('twse_fund_'):
+    if entry.get('format', '').startswith('twse_fund_') or entry.get('format') in {'fund_holdings', 'fund_nav'}:
         from bot.etf_research_sources import validate_entry as validate_fund
         return validate_fund(root, db, ticker, entry)
     source, raw = read_source(root, db, entry['source_document_id'], entry['sha256'])
