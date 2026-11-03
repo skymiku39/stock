@@ -129,6 +129,22 @@ def test_raw_archive_hash_replay(tmp_path: Path) -> None:
     assert second.claim_ids == first.claim_ids
 
 
+def test_shared_full_market_archive_never_reuses_another_issuers_evidence(tmp_path):
+    from bot.query_plan import plan_query
+    rows = [{**SAMPLE_ROWS[1], "公司代號": str(1000 + i)} for i in range(60)] + [SAMPLE_ROWS[1]]
+    doc, _ = _register_raw(tmp_path, rows=rows)
+    expected = ingest_monthly_revenue_from_source_document(
+        root=tmp_path, source_document_id=doc.document_id, ticker="2330")
+    # Put more than the old 50-row scan limit ahead of the requested company.
+    for row in rows[:60]:
+        ingest_monthly_revenue_from_source_document(root=tmp_path,
+            source_document_id=doc.document_id, ticker=row["公司代號"])
+    result = MonthlyRevenueAdapter(root=tmp_path).collect(plan_query("2330 月營收", ticker="2330"))
+    assert result.status == "ok"
+    assert result.evidence[0]["id"] == expected.evidence_id
+    assert result.evidence[0]["metadata"]["symbol"] == "2330"
+
+
 def test_exact_source_document_id_required(tmp_path: Path) -> None:
     slice_row = materialize_monthly_revenue_slice(
         root=tmp_path,

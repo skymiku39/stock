@@ -58,3 +58,16 @@ def test_numeric_formatting_and_grouping_are_equivalent() -> None:
 def test_spaced_attribution_and_ascii_fact_are_supported() -> None:
     result = verify("2330 公布重大訊息 fixture", "2330 公布重大訊息 fixture", "根據 MOPS，2330 公布重大訊息 fixture。")
     assert result.valid, result.errors
+
+
+def test_source_url_stays_intact_during_answer_clause_checks():
+    value = '"source_url": "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"'
+    result = verify(value, value)
+    assert result.valid, result.errors
+
+
+def test_a_multiclause_claim_can_be_rendered_as_its_extracted_sentences():
+    value = "2330 營收 100 元；毛利 50 元"
+    assert verify(value, value).valid
+    assert not verify("2330 不代表營收成長；毛利 50 元", "2330 不代表營收成長；毛利 50 元",
+                      "營收成長；毛利 50 元").valid

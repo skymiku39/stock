@@ -28,6 +28,15 @@ from bot.stock_db import (
 )
 
 
+def test_issuer_evidence_requires_exact_symbol_identity():
+    from bot.ask import _evidence_matches_ticker
+    assert not _evidence_matches_ticker({"kind": "monthly_revenue", "title": "9958 月營收",
+        "excerpt": "營收 2330", "metadata": {"symbol": "9958"}}, "2330")
+    assert not _evidence_matches_ticker({"kind": "monthly_revenue", "title": "12330 月營收"}, "2330")
+    assert _evidence_matches_ticker({"kind": "monthly_revenue", "title": "2330 月營收"}, "2330")
+    assert _evidence_matches_ticker({"kind": "macro", "title": "市場背景"}, "2330")
+
+
 def test_ask_engine_closes_only_database_handles_it_owns(tmp_path: Path) -> None:
     owned = AskEngine(root=tmp_path / "owned", client=None)
     owned_db = owned.db
@@ -153,6 +162,7 @@ def test_live_evidence_wins_same_resource_quota(tmp_path: Path) -> None:
     local = make_evidence(
         "ticker_snapshot",
         source="local-cache",
+        metadata={"symbol": "2330"},
         observed_at="2026-09-18T13:30:00+08:00",
         excerpt="2330 舊快取 900",
     )
@@ -161,7 +171,7 @@ def test_live_evidence_wins_same_resource_quota(tmp_path: Path) -> None:
         source="twse_mis",
         observed_at="2026-09-20T09:01:00+08:00",
         excerpt="2330 live 1000",
-        metadata={"live": True},
+        metadata={"live": True, "symbol": "2330"},
     )
     plan = plan_query("2330 最新盤中資料", ticker="2330")
     plan = replace(plan, resource_needs=["ticker_snapshot"])
@@ -671,6 +681,7 @@ def test_ask_accepts_only_answers_linked_to_pack_evidence(tmp_path: Path) -> Non
         "fundamental",
         source="official",
         source_ref="rev-1",
+        metadata={"symbol": "2330"},
         title="月營收公告",
         excerpt="2330 五月營收年增 10%",
     )
@@ -701,8 +712,9 @@ def test_ask_accepts_only_answers_linked_to_pack_evidence(tmp_path: Path) -> Non
     assert result.status == "answered"
     assert result.verified is True
     assert result.verification.valid is True
+    assert db.get_llm_run(result.trace_id).prompt_version == "1.0"
     assert [call.args[0] for call in mocked_call.call_args_list] == [
-        "query_plan", "ask_answer",
+        "ask_answer",
     ]
 
 
@@ -712,6 +724,7 @@ def test_ask_repairs_one_invalid_answer_then_stops_at_bound(tmp_path: Path) -> N
         "fundamental",
         source="official",
         source_ref="rev-repair",
+        metadata={"symbol": "2330"},
         title="月營收公告",
         excerpt="2330 五月營收年增 10%",
     )
@@ -799,7 +812,7 @@ def test_ask_warn_mixed_retains_temporal_mixed_with_explicit_warning(
         source_ref="rev-mixed",
         title="月營收公告",
         excerpt="2330 五月營收年增 10%",
-        metadata={"temporal_status": "mixed"},
+        metadata={"temporal_status": "mixed", "symbol": "2330"},
     )
     MemoryStore(db).put_long(
         "2330 五月營收年增 10%",

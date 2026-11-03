@@ -810,7 +810,17 @@ class MonthlyRevenueAdapter:
                     else:
                         provenance = "exact"
                         # 重用既有 evidence（同 source_document_id + pipeline）
-                        for row in db.list_evidence(source=SOURCE_NAME, limit=50):
+                        exact_rows = db.conn.execute(
+                            "SELECT evidence_id FROM evidence_items WHERE source_document_id=? "
+                            "AND source=? AND kind='monthly_revenue' "
+                            "AND source_ref=? AND quality_status IN ('ok','partial') "
+                            "ORDER BY updated_at DESC",
+                            (source_document_id, SOURCE_NAME, f"{revenue.symbol}:{revenue.year_month}"),
+                        ).fetchall()
+                        for candidate in exact_rows:
+                            row = db.get_evidence(candidate["evidence_id"])
+                            if row is None:
+                                continue
                             if row.source_document_id != source_document_id:
                                 continue
                             try:
@@ -821,7 +831,7 @@ class MonthlyRevenueAdapter:
                                 meta = {}
                             if meta.get("pipeline") != PIPELINE:
                                 continue
-                            if meta.get("year_month") and meta.get("year_month") != revenue.year_month:
+                            if meta.get("symbol") != revenue.symbol or meta.get("year_month") != revenue.year_month:
                                 continue
                             existing = row
                             break
@@ -889,7 +899,7 @@ class MonthlyRevenueAdapter:
                     observed_at=revenue.source_date or revenue.year_month,
                     as_of=revenue.year_month,
                     published_at=revenue.source_date or "",
-                    retrieved_at=revenue.retrieved_at or now_tw().isoformat(timespec="seconds"),
+                    retrieved_at=revenue.retrieved_at,
                     excerpt=excerpt,
                     quality_status=revenue.quality_status,
                     source_document_id=source_document_id,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
@@ -86,7 +87,7 @@ _RESOURCE_KIND_MAP = {
     },
     "technical": {"technical"},
     "chips": {"chips"},
-    "etf": {"etf", "etf_holdings"},
+    "etf": {"etf", "etf_holdings", "official_fund_row"},
     "macro": {"macro"},
     "news": {"news", "news_cache"},
     "ticker_snapshot": {"ticker_snapshot"},
@@ -101,6 +102,27 @@ _MARKET_RESOURCES = {
     "ticker_snapshot", "technical", "fundamental", "chips", "etf", "taifex",
     "macro", "news", "mops", "web_search", "professional_knowledge",
 }
+
+_ISSUER_EVIDENCE_KINDS = {
+    "fundamental", "monthly_revenue", "quarterly_report", "valuation_daily",
+    "dividend_history", "technical", "chips", "ticker_snapshot", "mops_material",
+    "etf", "etf_holdings", "official_fund_row",
+}
+
+
+def _evidence_matches_ticker(item: Dict[str, Any], ticker: str) -> bool:
+    if not ticker or item.get("kind") not in _ISSUER_EVIDENCE_KINDS:
+        return True
+    metadata = item.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    identity = str(metadata.get("symbol") or metadata.get("ticker") or "").strip()
+    if identity:
+        return identity == ticker
+    # A shared raw document and numbers in an excerpt do not establish issuer identity.
+    return (ticker in str(item.get("source_ref") or "").split(":")
+            or re.search(r"(?<![A-Za-z0-9])" + re.escape(ticker) + r"(?![A-Za-z0-9])",
+                         str(item.get("title") or "")) is not None)
 
 
 def _search_evidence_is_relevant(item: Dict[str, Any], plan: QueryPlan) -> bool:
@@ -392,7 +414,8 @@ class AskEngine:
 
     def _run_llm_planner(self, plan: QueryPlan) -> tuple[QueryPlan, Dict[str, Any], str]:
         """用 LLM 補充資源規劃；失敗時保留 deterministic fallback。"""
-        if not self.use_llm_planner or self.client is None or not self.client.enabled:
+        if (not plan.planner_required or not self.use_llm_planner
+                or self.client is None or not self.client.enabled):
             return plan, {}, ""
         raw, info = gemini_call(
             "query_plan",
@@ -442,6 +465,14 @@ class AskEngine:
             except Exception:
                 evidence_rows = []
             for row in evidence_rows:
+                # Filter identity before replaying large shared market archives.
+                try:
+                    row_metadata = json.loads(row.metadata_json or "{}")
+                except (ValueError, TypeError):
+                    row_metadata = {}
+                if not _evidence_matches_ticker({"kind": row.kind, "title": row.title,
+                        "source_ref": row.source_ref, "metadata": row_metadata}, plan.ticker):
+                    continue
                 item = _row_to_evidence(row, root=self.root, db=self.db)
                 if not _search_evidence_is_relevant(item, plan):
                     continue
@@ -629,6 +660,7 @@ class AskEngine:
                     seen.add(item["id"])
                     items.append(item)
 
+        items = [item for item in items if _evidence_matches_ticker(item, plan.ticker)]
         selected_items: List[Dict[str, Any]] = []
         selected_ids: set[str] = set()
         # 先滿足使用者明確要求的非 memory 資源，再用剩餘 quota 補充相關
@@ -797,7 +829,9 @@ class AskEngine:
                     source_ref=bar.source_record_id or f"{bar.symbol}:{bar.date}",
                     title=f"{bar.symbol} 日 K {bar.date}",
                     url=bar.source_url,
-                    observed_at=bar.source_date or bar.date,
+                    observed_at=bar.date,
+                    as_of=bar.date,
+                    retrieved_at=bar.retrieved_at,
                     excerpt=(
                         f"{bar.symbol} {bar.date} 開 {bar.open:g} 高 {bar.high:g} "
                         f"低 {bar.low:g} 收 {bar.close:g} 量 {bar.volume:g}"
@@ -1005,6 +1039,8 @@ class AskEngine:
         pack: EvidencePack,
         payload: Any,
         verification: VerificationResult,
+        *,
+        prompt_version: str = "",
     ) -> None:
         """把通過驗證的回答、claims 與來源關聯寫入 relational layer。"""
         if not isinstance(payload, dict) or not verification.valid:
@@ -1019,7 +1055,7 @@ class AskEngine:
                 task_type="ask_answer",
                 model=getattr(self.client, "model", "") if self.client else "",
                 prompt_id="ask_answer",
-                prompt_version="1.1",
+                prompt_version=prompt_version,
                 started_at=now,
                 finished_at=now,
                 status="verified",
@@ -1252,7 +1288,9 @@ class AskEngine:
         )
         if result.verified:
             try:
-                self._persist_verified_answer(plan, pack, payload, verification)
+                answer_metadata = llm_info.get("answer_repair") or llm_info.get("answer") or {}
+                self._persist_verified_answer(plan, pack, payload, verification,
+                    prompt_version=str(answer_metadata.get("prompt_version") or ""))
             except Exception as exc:
                 result.llm_info["research_persistence_warning"] = (
                     f"verified answer 寫入失敗：{type(exc).__name__}: {exc}"

@@ -246,6 +246,7 @@ def test_official_evidence_still_supports_answer(tmp_path: Path) -> None:
         source_ref="rev-official",
         title="月營收公告",
         excerpt="2330 五月營收年增 10%",
+        metadata={"symbol": "2330"},
         provenance_status="exact",
         source_document_id="",  # exact provenance only when ID exists; keep empty here
     )
@@ -258,6 +259,7 @@ def test_official_evidence_still_supports_answer(tmp_path: Path) -> None:
         source_ref="rev-official",
         title="月營收公告",
         excerpt="2330 五月營收年增 10%",
+        metadata={"symbol": "2330"},
     )
     MemoryStore(db).put_long(
         "2330 五月營收年增 10%",

@@ -132,7 +132,7 @@ def _answer_covered_by_claims(
     text = unicodedata.normalize("NFKC", answer)
     text = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", text)
     text = _ATTRIBUTION_RE.sub("", text.strip())
-    clauses = re.split(r"[。！？!?；;，,\n]+|(?<!\d)\.(?!\d)", text)
+    clauses = re.split(r"[。！？!?；;，,\n]+|(?<!\d)\.(?=\s|$)", text)
     for raw in clauses:
         clause = _ATTRIBUTION_RE.sub("", raw.strip())
         if not _match_text(clause):
@@ -142,7 +142,7 @@ def _answer_covered_by_claims(
             if not isinstance(claim, Mapping):
                 continue
             statement = str(claim.get("text") or claim.get("statement") or "")
-            if not _contains_statement(statement, clause):
+            if not (_contains_statement(statement, clause) or _contains_statement(clause, statement)):
                 continue
             for evidence_id in _as_ids(claim.get("evidence_ids")):
                 item = usable_by_id.get(evidence_id)
