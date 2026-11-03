@@ -177,3 +177,31 @@ def test_official_refresh_materializes_history_and_propagates_failures(tmp_path,
     assert list((tmp_path / "data/daily_research").glob("*/fundamentals-materialization.json"))
     domains["quarterly"] = {"attempted": 1, "failed": 1, "errors": ["bad raw hash"]}
     assert "bad raw hash" in daily.refresh_official(tmp_path)[0]
+
+
+def test_model_retry_deadline_reaches_daily_status_and_clears_on_recovery(tmp_path, monkeypatch):
+    from bot import verified_research_batch
+    date = daily.now_tw().date().isoformat()
+    out = tmp_path / 'data/daily_research' / date
+    write_json(out / 'status.json', {'collection_complete': True, 'official_complete': True})
+    monkeypatch.setattr(daily, 'Settings', lambda **kw: SimpleNamespace(llm_enabled=True))
+    monkeypatch.setattr(daily, 'tracked_tickers', lambda *a: ['2330'])
+    results = {'2330': {'status': 'blocked', 'reason': 'fixture timeout', 'next_retry_at': 2000000000}}
+
+    def verified(args):
+        write_json(out / 'verified/verification-summary.json', {'results': results})
+        return 3 if results['2330']['status'] == 'blocked' else 0
+
+    monkeypatch.setattr(verified_research_batch, 'main', verified)
+    assert daily.run_daily(tmp_path) == 3
+    state = json.loads((out / 'status.json').read_text(encoding='utf-8'))
+    assert state['model_blocked'] and state['outcome'] == 'blocked'
+    assert state['next_retry_epoch'] == 2000000000
+    assert 'fixture timeout' in (out / 'summary.txt').read_text(encoding='utf-8')
+    assert 'retry after' in state['error']
+
+    results['2330'] = {'status': 'completed', 'research_ready': True}
+    assert daily.run_daily(tmp_path) == 0
+    state = json.loads((out / 'status.json').read_text(encoding='utf-8'))
+    assert not state['model_blocked'] and state['outcome'] == 'complete'
+    assert state['next_retry_epoch'] == 0 and not state.get('error')

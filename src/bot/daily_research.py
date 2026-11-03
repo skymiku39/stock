@@ -131,6 +131,19 @@ def run_daily(root):
     summary_path = out / "verified/verification-summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if valid and summary_path.exists() else {}
     state["results"] = {**accepted, **summary.get("results", {}), **unsupported}
+    blocked = [v for v in state["results"].values() if v.get("status") == "blocked"]
+    state["model_blocked"] = bool(blocked)
+    # The scheduler consumes this deadline; report generation must carry it
+    # through rather than retry every symbol while the provider is cooling down.
+    state["next_retry_epoch"] = max((v.get("next_retry_at", 0) for v in blocked
+                                     if isinstance(v.get("next_retry_at"), (int, float))), default=0)
+    if blocked:
+        reasons = list(dict.fromkeys(str(v.get("reason") or "model unavailable") for v in blocked))
+        state["error"] = f"Model blocked {len(blocked)} symbols: " + "; ".join(reasons)
+        if state["next_retry_epoch"]:
+            import datetime as dt
+            retry = dt.datetime.fromtimestamp(state["next_retry_epoch"], now_tw().tzinfo)
+            state["error"] += f"; retry after {retry.isoformat()}"
     state["completed"] = sum(v.get("status") == "completed" for v in state["results"].values())
     state["excluded"] = [t for t, v in state["results"].items() if v.get("status") == "excluded"]
     state["pending"] = [t for t in tickers if state["results"].get(t, {}).get("status") != "completed"]
@@ -138,6 +151,7 @@ def run_daily(root):
     state["research_pending"] = [t for t in tickers if not state["results"].get(t, {}).get("research_ready")]
     state["unique_input_sets"] = len({r["input_fingerprint"] for r in state["results"].values() if r.get("input_fingerprint")})
     state["complete"] = now_tw().date().isoformat() == date and bool(tickers) and not state["research_pending"] and state.get("collection_complete", False) and state.get("official_complete", False) and state["daily_inputs"].get("complete", False)
+    state["outcome"] = "complete" if state["complete"] else "blocked" if blocked else "partial"
     state.update(phase="complete" if state["complete"] else "partial", finished_at=now_tw().isoformat())
     write_json(path, state)
     write_daily_summary(root, state)
