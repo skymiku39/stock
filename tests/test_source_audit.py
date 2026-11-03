@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+
+import pytest
 
 from bot.evidence import persist_evidence_items
 from bot.source_audit_cli import audit_project
@@ -16,6 +19,28 @@ from bot.stock_db import (
     StockDB,
     StockInfo,
 )
+
+
+def test_audit_cache_is_connection_local_and_cannot_modify_the_database(tmp_path):
+    from bot.source_audit_cli import _open_readonly
+
+    path = tmp_path / 'audit.db'
+    with sqlite3.connect(path) as connection:
+        connection.execute('CREATE TABLE records(value TEXT)')
+        connection.execute("INSERT INTO records VALUES ('saved')")
+        baseline_cache = connection.execute('PRAGMA cache_size').fetchone()[0]
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    connection = _open_readonly(path)
+    try:
+        assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert connection.execute('SELECT value FROM records').fetchone()[0] == 'saved'
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            connection.execute("INSERT INTO records VALUES ('must not be saved')")
+    finally:
+        connection.close()
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    with sqlite3.connect(path) as connection:
+        assert connection.execute('PRAGMA cache_size').fetchone()[0] == baseline_cache
 
 
 def test_audit_accepts_aliases_and_records_schema() -> None:

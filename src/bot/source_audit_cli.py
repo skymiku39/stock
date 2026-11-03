@@ -76,6 +76,10 @@ def _relative_files(root: Path, directory: Path) -> Iterable[str]:
 def _open_readonly(path: Path) -> sqlite3.Connection:
     uri = f"file:{path.resolve().as_posix()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
+    # integrity_check revisits index pages extensively on multi-GB databases.
+    # Bound the connection-local cache at 256 MiB; SQLite allocates on demand.
+    # This PRAGMA neither changes the file nor weakens the full integrity check.
+    conn.execute("PRAGMA cache_size=-262144")
     conn.row_factory = sqlite3.Row
     return conn
 
