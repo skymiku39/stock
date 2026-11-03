@@ -158,7 +158,10 @@ class SmileCurveBacktester:
         """
         cap = float(self.settings.effective_fund_cap())
         if not self.execution.is_ideal:
-            unsupported = [s for s in histories if s.isdigit() and (len(s) != 4 or s.startswith("0"))]
+            unsupported = [s for s in histories if s != "0050" and
+                           (not s.isdigit() or len(s) != 4 or s.startswith("0"))]
+            # Synthetic symbols remain useful for deterministic offline tests.
+            unsupported = [s for s in unsupported if s[:1].isdigit()]
             if unsupported:
                 raise ValueError(f"execution model supports ordinary TW equities only, not {unsupported}")
         if not math.isfinite(cap) or cap <= 0:
@@ -215,7 +218,7 @@ class SmileCurveBacktester:
                     log.update(open_price=float(bar.open), previous_close=marks.get(sym),
                                previous_volume_lots=prior_volume if prior_volume is not None and math.isfinite(prior_volume) else None,
                                available_shares=None if math.isinf(available_shares) else available_shares)
-                    px, blocked = self.execution.quote(float(bar.open), order["side"], marks.get(sym))
+                    px, blocked = self.execution.quote(float(bar.open), order["side"], marks.get(sym), sym)
                     if blocked:
                         log["reason"] = blocked
                         continue
@@ -294,7 +297,7 @@ class SmileCurveBacktester:
                         pending[sym].append(dict(side="buy", signal_date=date, tier=None,
                                                 quantity=e.base_lot, label="bottom_dca"))
             realized = sum(e.realized_pnl_twd for e in engines.values())
-            unrealized = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[s], "sell"), l.quantity, l.unit,
+            unrealized = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[s], "sell", s), l.quantity, l.unit,
                                         settings=self.settings, sell_tax_rate=e.sell_tax)
                              for s, e in engines.items() for l in e.open_lots)
             equity = cap + realized + unrealized
@@ -314,7 +317,7 @@ class SmileCurveBacktester:
             r.cycle_count = e.state.cycle_index
             r.open_lots = len(e.open_lots)
             r.open_cost_twd = sum(cost(l) for l in e.open_lots)
-            r.unrealized_pnl_twd = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[sym], "sell"), l.quantity, l.unit,
+            r.unrealized_pnl_twd = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[sym], "sell", sym), l.quantity, l.unit,
                                                 settings=self.settings, sell_tax_rate=e.sell_tax)
                                        for l in e.open_lots)
             r.pending_orders = len(pending[sym])

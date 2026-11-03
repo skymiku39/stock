@@ -138,11 +138,16 @@ def _check_env(
             "RUN_MODE=trade 已封存，stock-bot 啟動會被阻擋",
             "改用 watch/report，或設 DAY_TRADING_UNFREEZE=true（見 docs/archive/day-trading.md）",
         ))
+    elif settings.run_mode == "trade" and settings.simulation:
+        out.append(CheckResult(
+            "當沖模組封存", "info",
+            "模擬交易可驗證完整流程；正式交易封存仍保留",
+        ))
     elif getattr(settings, "day_trading_archived", True) and settings.run_mode == "trade":
         out.append(CheckResult(
             "當沖模組封存", "warn",
             "已解除封存 (DAY_TRADING_UNFREEZE=true)，使用舊版當沖邏輯",
-            "新功能請改走微笑曲線策略（規劃中）",
+            "微笑自動買賣目前僅支援模擬模式",
         ))
     else:
         out.append(CheckResult(
@@ -151,6 +156,8 @@ def _check_env(
         ))
 
     # RUN_MODE
+    if settings.strategy_type == "smile_curve" and settings.run_mode == "trade" and not settings.simulation:
+        out.append(CheckResult("微笑策略正式交易", "fail", "微笑自動買賣僅允許 SIMULATION=true"))
     if settings.run_mode == "trade":
         out.append(CheckResult(
             "執行模式 (RUN_MODE)", "ok",
@@ -735,6 +742,7 @@ def _check_position_safety(
     settings: Settings,
     *,
     do_real_login: bool = True,
+    project_root: Optional[Path] = None,
 ) -> List[CheckResult]:
     """監控標的 vs 手動持股重疊、本工具紀錄對帳。"""
     from bot.position_safety import (
@@ -771,6 +779,8 @@ def _check_position_safety(
 
     report = run_startup_safety_checks(
         settings,
+        project_root=((project_root or Path.cwd()) / "data" / "simulation"
+                      if settings.run_mode == "trade" and settings.simulation else project_root),
         engage_kill_switch=False,
         require_broker_snapshot=True,
     )
@@ -868,7 +878,7 @@ def run_preflight(
     )
     report.section_risk = _check_risk(settings)
     report.section_time = _check_time(settings)
-    report.section_safety = _check_position_safety(settings, do_real_login=do_real_login)
+    report.section_safety = _check_position_safety(settings, do_real_login=do_real_login, project_root=root)
 
     # ---- 最終結論 ----
     report.can_simulate = not report.has_fail()  # 模擬只需設定齊全 + 登入成功

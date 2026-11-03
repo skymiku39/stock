@@ -80,7 +80,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=Path.cwd(),
         help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
     )
+    parser.add_argument("--simulate", action="store_true",
+                        help="僅本次啟動模擬交易與零股，不修改 .env、不解除正式交易封存")
+    parser.add_argument("--strategy", choices=("configurable", "etf_follow", "smile_curve"),
+                        help="搭配 --simulate 選擇策略")
     args = parser.parse_args(argv)
+    if args.strategy and not args.simulate:
+        parser.error("--strategy 需搭配 --simulate")
     project_root = args.root.resolve()
     if not project_root.is_dir():
         parser.error(f"專案根目錄不存在：{project_root}")
@@ -93,150 +99,171 @@ def main(argv: Optional[List[str]] = None) -> None:
     logger = get_logger("main")
     logger.info("=== Stock Bot 啟動 ===")
 
-    event_bus = bootstrap_event_bus(project_root=project_root)
-
     settings = Settings(_env_file=str(project_root / ".env"))  # type: ignore[call-arg]
+    if args.simulate:
+        settings = settings.model_copy(update=dict(
+            run_mode="trade", simulation=True, market_source="shioaji", use_odd_lot=True,
+            symbols_auto_merge=False, smile_base_lot=100,
+            strategy_type=args.strategy or settings.strategy_type,
+        ))
+    if settings.strategy_type == "smile_curve" and settings.run_mode == "trade" and not settings.simulation:
+        logger.error("微笑自動買賣目前僅允許 SIMULATION=true，正式委託已封鎖")
+        sys.exit(1)
     if day_trading_trade_blocked(settings):
         logger.error(trade_block_message(settings))
         sys.exit(1)
-    if settings.run_mode == "trade":
-        _acquire_instance_lock(logger)
-    logger.info(
-        "組態載入完成 (run_mode=%s, market_source=%s, simulation=%s)",
-        settings.run_mode,
-        settings.market_source,
-        settings.simulation,
-    )
-
-    if getattr(settings, "symbols_auto_merge", True):
-        from bot.watch_symbol_pool import merge_watch_symbols_into_settings
-
-        merge_watch_symbols_into_settings(
-            settings,
-            project_root,
-            reason="main",
-            refresh_live_quotes=False,
-            logger=logger,
-        )
-
-    if not settings.symbols:
-        logger.error(
-            "監控池為空：請設定 SYMBOLS 或啟用 SYMBOLS_AUTO_MERGE 並確保戰情室/明日關注報告存在",
-        )
-        sys.exit(1)
-
+    event_root = (project_root / "data" / "simulation"
+                  if settings.run_mode == "trade" and settings.simulation else project_root)
+    event_bus = bootstrap_event_bus(project_root=event_root)
     broker = None
-    market_source = None
+    try:
+        if settings.run_mode == "trade":
+            _acquire_instance_lock(logger)
+        logger.info(
+            "組態載入完成 (run_mode=%s, market_source=%s, simulation=%s)",
+            settings.run_mode,
+            settings.market_source,
+            settings.simulation,
+        )
 
-    # ---- trade / watch: 需要 Shioaji ----
-    if settings.run_mode in ("trade", "watch"):
-        from bot.broker import SjBroker
+        if getattr(settings, "symbols_auto_merge", True):
+            from bot.watch_symbol_pool import merge_watch_symbols_into_settings
 
-        if not settings.api_key or not settings.secret_key:
+            merge_watch_symbols_into_settings(
+                settings,
+                project_root,
+                reason="main",
+                refresh_live_quotes=False,
+                logger=logger,
+            )
+
+        if not settings.symbols:
             logger.error(
-                "run_mode=%s 需要 API_KEY 與 SECRET_KEY，請檢查 .env",
-                settings.run_mode,
+                "監控池為空：請設定 SYMBOLS 或啟用 SYMBOLS_AUTO_MERGE 並確保戰情室/明日關注報告存在",
             )
             sys.exit(1)
 
-        broker = SjBroker(settings)
-        if not broker.login():
-            logger.error("登入失敗，程式結束")
-            sys.exit(1)
+        broker = None
+        market_source = None
 
-    # ---- report: 公開資料來源 ----
-    if settings.run_mode == "report":
-        from bot.market_source import TwsePublicMarketSource
+        # ---- trade / watch: 需要 Shioaji ----
+        if settings.run_mode in ("trade", "watch"):
+            from bot.broker import SjBroker
 
-        market_source = TwsePublicMarketSource(
-            symbols=settings.symbols,
-            poll_seconds=settings.report_poll_seconds,
-            root=project_root,
-        )
-        logger.info(
-            "report 模式 — 使用 TWSE 公開延遲資料 (輪詢 %ds)",
-            settings.report_poll_seconds,
-        )
+            if not settings.api_key or not settings.secret_key:
+                logger.error(
+                    "run_mode=%s 需要 API_KEY 與 SECRET_KEY，請檢查 .env",
+                    settings.run_mode,
+                )
+                sys.exit(1)
 
-    # ---- 建立策略 ----
-    if settings.strategy_type == "etf_follow":
-        from bot.strategy_etf_follow import EtfFollowStrategy
+            broker = SjBroker(settings, simulation_only=args.simulate or settings.strategy_type == "smile_curve")
+            if not broker.login():
+                logger.error("登入失敗，程式結束")
+                sys.exit(1)
 
-        strategy = EtfFollowStrategy(
-            broker=broker,
-            settings=settings,
-            market_source=market_source,
-            publisher=event_bus,
-            min_consensus_new=settings.etf_min_consensus_new,
-            min_consensus_add=settings.etf_min_consensus_add,
-            max_pct_chg_on_entry=settings.etf_max_pct_chg_on_entry,
-            project_root=project_root,
-        )
-        logger.info(
-            "策略: EtfFollowStrategy (new>=%d, add>=%d, max_pct=%.1f)",
-            settings.etf_min_consensus_new,
-            settings.etf_min_consensus_add,
-            settings.etf_max_pct_chg_on_entry,
-        )
-    else:
-        from bot.strategy_configurable import ConfigurableStrategy
+        # ---- report: 公開資料來源 ----
+        if settings.run_mode == "report":
+            from bot.market_source import TwsePublicMarketSource
 
-        strategy = ConfigurableStrategy(
-            broker=broker,
-            settings=settings,
-            market_source=market_source,
-            publisher=event_bus,
-            project_root=project_root,
-        )
-        logger.info(
-            "策略: ConfigurableStrategy (min_pct=%.1f, odd_lot=%s, "
-            "llm_entry=%s, llm_sell=%s, daily_budget=%d)",
-            settings.min_pct_chg_on_entry,
-            settings.use_odd_lot,
-            settings.llm_gate_enabled,
-            settings.llm_sell_gate_enabled,
-            settings.effective_fund_cap(),
-        )
+            market_source = TwsePublicMarketSource(
+                symbols=settings.symbols,
+                poll_seconds=settings.report_poll_seconds,
+                root=project_root,
+            )
+            logger.info(
+                "report 模式 — 使用 TWSE 公開延遲資料 (輪詢 %ds)",
+                settings.report_poll_seconds,
+            )
 
-    def _shutdown(signum: int, frame: object) -> None:
-        logger.info("收到信號 %d，關閉中 ...", signum)
-        strategy.stop()
+        # ---- 建立策略 ----
+        if settings.strategy_type == "etf_follow":
+            from bot.strategy_etf_follow import EtfFollowStrategy
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+            strategy = EtfFollowStrategy(
+                broker=broker,
+                settings=settings,
+                market_source=market_source,
+                publisher=event_bus,
+                min_consensus_new=settings.etf_min_consensus_new,
+                min_consensus_add=settings.etf_min_consensus_add,
+                max_pct_chg_on_entry=settings.etf_max_pct_chg_on_entry,
+                project_root=project_root,
+            )
+            logger.info(
+                "策略: EtfFollowStrategy (new>=%d, add>=%d, max_pct=%.1f)",
+                settings.etf_min_consensus_new,
+                settings.etf_min_consensus_add,
+                settings.etf_max_pct_chg_on_entry,
+            )
+        elif settings.strategy_type == "smile_curve":
+            from bot.strategy_smile import SmileCurveStrategy
 
-    try:
-        strategy.run()
+            strategy = SmileCurveStrategy(
+                broker=broker, settings=settings, market_source=market_source,
+                publisher=event_bus, project_root=project_root,
+            )
+            logger.info("策略: SmileCurveStrategy (simulation=%s)", settings.simulation)
+        else:
+            from bot.strategy_configurable import ConfigurableStrategy
+
+            strategy = ConfigurableStrategy(
+                broker=broker,
+                settings=settings,
+                market_source=market_source,
+                publisher=event_bus,
+                project_root=project_root,
+            )
+            logger.info(
+                "策略: ConfigurableStrategy (min_pct=%.1f, odd_lot=%s, "
+                "llm_entry=%s, llm_sell=%s, daily_budget=%d)",
+                settings.min_pct_chg_on_entry,
+                settings.use_odd_lot,
+                settings.llm_gate_enabled,
+                settings.llm_sell_gate_enabled,
+                settings.effective_fund_cap(),
+            )
+
+        def _shutdown(signum: int, frame: object) -> None:
+            logger.info("收到信號 %d，關閉中 ...", signum)
+            strategy.stop()
+
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+
+        try:
+            strategy.run()
+        finally:
+            # ---- trade 模式: 匯出交易紀錄 ----
+            if settings.run_mode == "trade":
+                strategy.recorder.export_csv()
+                summary = strategy.recorder.summary()
+                logger.info("交易摘要:\n%s", summary)
+
+            # ---- watch / report 模式: 匯出訊號與報表 ----
+            if settings.run_mode in ("watch", "report"):
+                strategy.signal_recorder.export_signals_csv()
+                strategy.signal_recorder.export_report()
+                summary = strategy.signal_recorder.summary()
+                logger.info("訊號摘要:\n%s", summary)
+
+            trade_summary = ""
+            if settings.run_mode == "trade":
+                trade_summary = strategy.recorder.summary()
+            publish_if_bus(
+                event_bus,
+                BotShutdownRequested(
+                    run_mode=settings.run_mode,
+                    trade_summary=trade_summary,
+                ),
+            )
     finally:
-        # ---- trade 模式: 匯出交易紀錄 ----
-        if settings.run_mode == "trade":
-            strategy.recorder.export_csv()
-            summary = strategy.recorder.summary()
-            logger.info("交易摘要:\n%s", summary)
-
-        # ---- watch / report 模式: 匯出訊號與報表 ----
-        if settings.run_mode in ("watch", "report"):
-            strategy.signal_recorder.export_signals_csv()
-            strategy.signal_recorder.export_report()
-            summary = strategy.signal_recorder.summary()
-            logger.info("訊號摘要:\n%s", summary)
-
-        trade_summary = ""
-        if settings.run_mode == "trade":
-            trade_summary = strategy.recorder.summary()
-        publish_if_bus(
-            event_bus,
-            BotShutdownRequested(
-                run_mode=settings.run_mode,
-                trade_summary=trade_summary,
-            ),
-        )
-
-        if broker is not None:
-            broker.logout()
-
-        _release_instance_lock()
-        logger.info("=== Stock Bot 結束 ===")
+        try:
+            if broker is not None:
+                broker.logout()
+        finally:
+            _release_instance_lock()
+            logger.info("=== Stock Bot 結束 ===")
 
 
 if __name__ == "__main__":

@@ -595,7 +595,7 @@ class TestTradeRiskIntegration:
         broker.place_order.assert_not_called()
 
     def test_account_balance_unavailable_blocks_buy(self, tmp_path: Path) -> None:
-        settings = _make_settings(run_mode="trade", check_account_balance=True)
+        settings = _make_settings(run_mode="trade", simulation=False, check_account_balance=True)
         broker = MagicMock()
         broker.get_available_balance.return_value = None
         strategy = ConfigurableStrategy(broker=broker, settings=settings)

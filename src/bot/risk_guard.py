@@ -670,6 +670,7 @@ class RiskGuard:
         *,
         unit: QtyUnit = "lot",
         position_closed: bool = False,
+        sell_tax_rate: Optional[float] = None,
     ) -> None:
         """成交 (賣出) 後呼叫；自動累計實現損益。"""
         with self._lock:
@@ -683,6 +684,7 @@ class RiskGuard:
             pnl = net_pnl_twd(
                 avg_entry_price, exit_price, lots, unit,
                 settings=self.settings,
+                sell_tax_rate=sell_tax_rate,
             )
             self.state.realized_pnl_twd += pnl
             if position_closed:

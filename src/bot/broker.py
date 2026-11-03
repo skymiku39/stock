@@ -41,8 +41,10 @@ BALANCE_CACHE_TTL_SEC = 30
 class SjBroker:
     """封裝 Shioaji SDK 的所有低階操作。"""
 
-    def __init__(self, settings: Settings, logger: Optional[logging.Logger] = None):
+    def __init__(self, settings: Settings, logger: Optional[logging.Logger] = None,
+                 *, simulation_only: bool = False):
         self.settings = settings
+        self._simulation_only = simulation_only
         self.logger = logger or get_logger("broker")
         self.api: Optional[sj.Shioaji] = None
 
@@ -56,6 +58,7 @@ class SjBroker:
 
         self._reconnect_lock = threading.Lock()
         self.last_order_error: Optional[Exception] = None
+        self.last_submitted_trade: Optional[Trade] = None
         self._balance_cache: Optional[Tuple[float, float]] = None  # (monotonic_ts, amount)
 
     def _should_activate_ca(self) -> bool:
@@ -93,6 +96,8 @@ class SjBroker:
     # ------------------------------------------------------------------
 
     def login(self) -> bool:
+        if self._simulation_only and not self.settings.simulation:
+            raise RuntimeError("Simulation-only broker refuses production login")
         self.logger.info("正在初始化 Shioaji ...")
         self.api = sj.Shioaji(simulation=self.settings.simulation)
 
@@ -312,6 +317,9 @@ class SjBroker:
 
     def _handle_reconnect(self) -> None:
         """行情連線異常時嘗試重新登入並恢復訂閱 (指數退避)。"""
+        if self._simulation_only and not self.settings.simulation:
+            self.logger.error("Simulation-only broker refuses production reconnect")
+            return
         if not self._reconnect_lock.acquire(blocking=False):
             return
 
@@ -327,6 +335,8 @@ class SjBroker:
                     time.sleep(delay)
 
                     try:
+                        if self._simulation_only and not self.settings.simulation:
+                            return
                         if self.api is not None:
                             try:
                                 self.api.logout()
@@ -380,6 +390,10 @@ class SjBroker:
         order_lot: StockOrderLot = StockOrderLot.Common,
         max_sell_qty: Optional[int] = None,
     ) -> Optional[Trade]:
+        self.last_submitted_trade = None
+        if self._simulation_only and (not self.settings.simulation or
+                                     getattr(self.api, "simulation", False) is not True):
+            raise RuntimeError("Simulation-only broker refuses production orders")
         if self.settings.run_mode != "trade":
             self.logger.error(
                 "非 trade 模式 (%s) 禁止下單 — 已攔截",
@@ -422,6 +436,7 @@ class SjBroker:
 
         try:
             trade = self.api.place_order(contract, order)
+            self.last_submitted_trade = trade
             self.last_order_error = None
             self.logger.info(
                 "下單結果: id=%s status=%s",
@@ -650,6 +665,9 @@ class SjBroker:
 
     def cancel_order(self, trade: "Trade") -> Optional["Trade"]:
         """Cancel an order and refresh status using Shioaji's recommended flow."""
+        if self._simulation_only and (not self.settings.simulation or
+                                     getattr(self.api, "simulation", False) is not True):
+            raise RuntimeError("Simulation-only broker refuses production cancellation")
         assert self.api is not None
         try:
             self.update_status(trade=trade)

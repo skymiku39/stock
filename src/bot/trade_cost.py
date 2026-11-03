@@ -121,11 +121,13 @@ def position_net_pnl_pct(
     unit: QtyUnit,
     *,
     settings: Optional["Settings"] = None,
+    sell_tax_rate: Optional[float] = None,
 ) -> float:
     """持倉若於 current_price 賣出的預估淨利 %。"""
     if avg_entry <= 0 or current_price <= 0 or qty <= 0:
         return 0.0
-    return net_pnl_pct(avg_entry, current_price, qty, unit, settings=settings)
+    return net_pnl_pct(avg_entry, current_price, qty, unit, settings=settings,
+                       sell_tax_rate=sell_tax_rate)
 
 
 def max_affordable_qty(

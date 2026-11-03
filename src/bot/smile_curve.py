@@ -117,7 +117,8 @@ class SmileCurveEngine:
             getattr(settings, "smile_buy_tiers", "1:1,3:2,5:3,8:4"),
         )
         self.base_lot = max(1, int(getattr(settings, "smile_base_lot", 1)))
-        self.sell_tax = float(getattr(settings, "smile_regular_tax_rate", 0.003))
+        self.sell_tax = (.001 if symbol == "0050" else
+                         float(getattr(settings, "smile_regular_tax_rate", 0.003)))
         self.round_trips: List[SmileRoundTrip] = []
         self._cash_used = 0.0
 

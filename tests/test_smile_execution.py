@@ -88,4 +88,13 @@ def test_reject_invalid_parameters_and_unsupported_etf():
     with pytest.raises(ValueError): SmileExecution(slippage_bps=-1)
     with pytest.raises(ValueError): SmileExecution(participation=0)
     with pytest.raises(ValueError):
-        SmileCurveBacktester(Settings(_env_file=None)).run_histories({"0050":[]})
+        SmileCurveBacktester(Settings(_env_file=None)).run_histories({"00631L":[]})
+
+
+def test_0050_uses_etf_ticks_and_tax():
+    from bot.smile_curve import SmileCurveEngine
+    assert round_tick(100.01, True, "0050") == 100.05
+    assert round_tick(49.991, True, "0050") == 50
+    assert SmileCurveEngine("0050", Settings(_env_file=None)).sell_tax == .001
+    r = SmileCurveBacktester(Settings(_env_file=None)).run_histories({"0050": []})
+    assert r.results[0].skip_reason == "no_daily_bars"

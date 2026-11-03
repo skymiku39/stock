@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from uuid import uuid4
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -20,6 +22,8 @@ class TradeRecorder:
         self.output_dir = output_dir
         self.logger = logger or get_logger("recorder")
         self._records: List[Dict[str, Any]] = []
+        self._exported_count = 0
+        self._export_lock = threading.Lock()
 
     def record_deal(
         self,
@@ -59,6 +63,10 @@ class TradeRecorder:
         return len(self._records)
 
     def export_csv(self) -> Optional[str]:
+        with self._export_lock:
+            return self._export_new_records()
+
+    def _export_new_records(self) -> Optional[str]:
         """匯出所有紀錄為 CSV，回傳檔案路徑。無紀錄時回傳 None。"""
         if not self._records:
             self.logger.info("無成交紀錄，跳過匯出")
@@ -68,7 +76,10 @@ class TradeRecorder:
         date_str = now_tw().strftime("%Y-%m-%d")
         filepath = os.path.join(self.output_dir, f"trades_{date_str}.csv")
 
-        df = pd.DataFrame(self._records)
+        if self._exported_count == len(self._records):
+            return filepath
+        snapshot_count = len(self._records)
+        df = pd.DataFrame(self._records[self._exported_count:snapshot_count])
 
         if "unit" not in df.columns:
             df["unit"] = "lot"
@@ -77,7 +88,13 @@ class TradeRecorder:
             axis=1,
         )
 
-        df.to_csv(filepath, index=False, encoding="utf-8-sig")
+        if os.path.exists(filepath):
+            previous = pd.read_csv(filepath, dtype={"symbol": str, "ordno": str})
+            df = pd.concat([previous, df], ignore_index=True)
+        temp = filepath + "." + uuid4().hex + ".tmp"
+        df.to_csv(temp, index=False, encoding="utf-8-sig")
+        os.replace(temp, filepath)
+        self._exported_count = snapshot_count
         self.logger.info("交易紀錄已匯出: %s (%d 筆)", filepath, len(df))
         return filepath
 

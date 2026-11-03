@@ -8,15 +8,17 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import math
 
 
-def tick(price: float) -> float:
+def tick(price: float, symbol: str = "") -> float:
+    if symbol == "0050":
+        return .01 if price < 50 else .05
     for boundary, step in ((10,.01),(50,.05),(100,.1),(500,.5),(1000,1)):
         if price < boundary:
             return step
     return 5.0
 
 
-def round_tick(price: float, up: bool) -> float:
-    step = Decimal(str(tick(price)))
+def round_tick(price: float, up: bool, symbol: str = "") -> float:
+    step = Decimal(str(tick(price, symbol)))
     return float((Decimal(str(price))/step).to_integral_value(
         rounding=ROUND_CEILING if up else ROUND_FLOOR)*step)
 
@@ -55,18 +57,18 @@ class SmileExecution:
             return 0
         return math.floor(previous_volume * 1000 * self.participation)
 
-    def slipped(self, price, side):
+    def slipped(self, price, side, symbol=""):
         value = float(Decimal(str(price)) * (1 + Decimal(str(self.slippage_bps))/10000 * (1 if side == "buy" else -1)))
-        return round_tick(value, side == "buy") if self.tick_rounding else value
+        return round_tick(value, side == "buy", symbol) if self.tick_rounding else value
 
-    def quote(self, opening, side, previous_close):
-        price = self.slipped(opening, side)
+    def quote(self, opening, side, previous_close, symbol=""):
+        price = self.slipped(opening, side, symbol)
         if not self.limit_guard:
             return price, ""
         if previous_close is None or not math.isfinite(previous_close) or previous_close <= 0:
             return None, "missing_limit_reference"
-        upper = round_tick(float(Decimal(str(previous_close)) * Decimal("1.10")), False)
-        lower = round_tick(float(Decimal(str(previous_close)) * Decimal("0.90")), True)
+        upper = round_tick(float(Decimal(str(previous_close)) * Decimal("1.10")), False, symbol)
+        lower = round_tick(float(Decimal(str(previous_close)) * Decimal("0.90")), True, symbol)
         if opening > upper + 1e-8 or opening < lower - 1e-8:
             return None, "outside_proxy_band_requires_reference"
         if side == "buy" and opening >= upper - 1e-8:

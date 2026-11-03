@@ -17,6 +17,7 @@ import datetime as dt
 import logging
 import threading
 import time
+from functools import wraps
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from queue import Empty, Queue
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from shioaji import Exchange, TickSTKv1
-from shioaji.constant import Action, OrderState
+from shioaji.constant import Action, OrderState, OrderType, StockPriceType
 
 from bot.events import (
     BotStarted,
@@ -78,6 +79,22 @@ class SymbolExitRecord:
     unit: QtyUnit
 
 
+def _order_submission(method):
+    """Register a submitted order before applying synchronous SDK callbacks."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        try:
+            with self._submission_lock:
+                self._submitting_orders += 1
+                try:
+                    return method(self, *args, **kwargs)
+                finally:
+                    self._submitting_orders -= 1
+        finally:
+            self._drain_order_events()
+    return wrapped
+
+
 class BaseStrategy(ABC):
     """策略基底類別。"""
 
@@ -95,10 +112,13 @@ class BaseStrategy(ABC):
         self.broker = broker
         self.settings = settings
         self._project_root = (project_root or Path.cwd()).resolve()
+        self._state_root = (self._project_root / "data" / "simulation"
+                            if settings.run_mode == "trade" and settings.simulation
+                            else self._project_root)
         # 保留未指定 root 時的既有依賴注入語意；測試與外部呼叫端可
         # 透過各自的 RiskGuard fixture/default 管理工作目錄。只有明確
         # 指定 project_root 時，才把它傳給有持久化副作用的元件。
-        dependency_root = self._project_root if project_root is not None else None
+        dependency_root = self._state_root if project_root is not None else None
         self._market_source = market_source
         self.logger = logger or get_logger("strategy")
         self._publisher: EventPublisher = publisher or get_event_bus(
@@ -131,6 +151,10 @@ class BaseStrategy(ABC):
 
         # 委託 metadata: ordno -> {symbol, action, custom_field}
         self._order_meta: Dict[str, dict] = {}
+        self._submission_lock = threading.RLock()
+        self._submitting_orders = 0
+        self._order_events: Queue = Queue()
+        self._seen_deals: set[tuple] = set()
 
         # Tick 佇列: (exchange, tick) -- trade/watch 模式
         self._tick_queue: Queue = Queue(maxsize=50_000)
@@ -146,7 +170,7 @@ class BaseStrategy(ABC):
 
         # 交易紀錄 (trade 模式)
         self.recorder = TradeRecorder(
-            output_dir=str(self._project_root / "data"),
+            output_dir=str(self._state_root / "data"),
         )
 
         # 訊號紀錄 (watch/report 模式)
@@ -221,7 +245,7 @@ class BaseStrategy(ABC):
 
         report = run_startup_safety_checks(
             self.settings,
-            project_root=self._project_root,
+            project_root=self._state_root,
             broker=self.broker,
             risk=self.risk,
         )
@@ -236,17 +260,17 @@ class BaseStrategy(ABC):
             self.logger.info("啟動安全檢查通過")
 
         self._fund_used = self.risk.fund_used
-        _, bot_positions = load_bot_portfolio(self._project_root)
+        _, bot_positions = load_bot_portfolio(self._state_root)
         monitored = set(self.settings.symbols or [])
         for symbol, ppos in bot_positions.items():
             if symbol not in monitored or ppos.qty <= 0:
                 continue
-            if ppos.qty >= 1.0 - 1e-9:
+            if self.settings.use_odd_lot:
+                unit: QtyUnit = "share"
+                quantity = int(round(ppos.qty * 1000))
+            elif ppos.qty >= 1.0 - 1e-9 and abs(ppos.qty - round(ppos.qty)) < 1e-9:
                 unit: QtyUnit = "lot"
                 quantity = int(round(ppos.qty))
-            elif self.settings.use_odd_lot:
-                unit = "share"
-                quantity = int(round(ppos.qty * 1000))
             else:
                 continue
             if quantity <= 0:
@@ -570,13 +594,64 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------
 
     def _on_order_callback(self, stat: OrderState, msg: dict) -> None:
+        self._order_events.put((stat, dict(msg)))
+        self._drain_order_events()
+
+    def _drain_order_events(self) -> None:
+        if self._submitting_orders:
+            return
+        if not self._submission_lock.acquire(blocking=False):
+            return
         try:
-            if stat == OrderState.StockDeal:
-                self._handle_deal(msg)
-            elif stat == OrderState.StockOrder:
-                self._handle_order_event(msg)
-        except Exception:
-            self.logger.exception("委託回報處理例外: stat=%s", stat)
+            while True:
+                try:
+                    stat, msg = self._order_events.get_nowait()
+                except Empty:
+                    break
+                try:
+                    if stat == OrderState.StockDeal:
+                        self._handle_deal(msg)
+                    elif stat == OrderState.StockOrder:
+                        self._handle_order_event(msg)
+                except Exception:
+                    self.logger.exception("委託回報處理例外: stat=%s", stat)
+        finally:
+            self._submission_lock.release()
+
+    def _match_order(self, msg: dict, symbol: str, action: str) -> str:
+        identifiers = {str(msg.get(k, "")).strip() for k in ("ordno", "seqno", "id")}
+        identifiers.discard("")
+        for key, meta in self._order_meta.items():
+            if identifiers & {key, *meta.get("aliases", [])}:
+                return key
+        # Some deal callbacks omit the order number. A single outstanding
+        # bot order for this symbol/side is unambiguous; never infer ownership.
+        candidates = [k for k in self.pending_orders.get(symbol, [])
+                      if self._order_meta.get(k, {}).get("action") == action]
+        if len(candidates) == 1 and is_bot_order_field(msg.get("custom_field", "")):
+            return candidates[0]
+        return str(msg.get("ordno", "")).strip()
+
+    @staticmethod
+    def _trade_key(trade) -> str:
+        return next((str(getattr(trade.order, k, "") or "").strip()
+                     for k in ("ordno", "seqno", "id")
+                     if str(getattr(trade.order, k, "") or "").strip()), "")
+
+    def _register_order(self, trade, symbol, action, reason, quantity, unit):
+        key = self._trade_key(trade)
+        if not key:
+            self.risk.engage_kill_switch("broker_order_missing_identifier")
+            raise RuntimeError("Broker returned an order without an identifier")
+        self.pending_orders[symbol].append(key)
+        self._order_meta[key] = dict(
+            symbol=symbol, action=action, custom_field=reason, quantity=quantity,
+            filled_quantity=0, unit=unit,
+            price=float(trade.order.price),
+            aliases=[str(getattr(trade.order, k, "") or "").strip()
+                     for k in ("ordno", "seqno", "id")
+                     if str(getattr(trade.order, k, "") or "").strip()],
+        )
 
     def _handle_order_event(self, msg: dict) -> None:
         op = msg.get("operation", {})
@@ -584,6 +659,12 @@ class BaseStrategy(ABC):
         op_type = op.get("op_type", "")
         op_code = op.get("op_code", "")
         symbol = msg.get("contract", {}).get("code", "")
+        key = self._match_order(order, symbol, str(order.get("action", "")))
+        meta = self._order_meta.get(key)
+        if meta is not None:
+            meta.setdefault("aliases", []).extend(
+                str(order[k]).strip() for k in ("ordno", "seqno", "id")
+                if order.get(k) and str(order[k]).strip())
 
         if op_code != "00":
             self.logger.warning(
@@ -598,6 +679,12 @@ class BaseStrategy(ABC):
         price = float(msg.get("price", 0))
         qty = int(msg.get("quantity", 0))
         custom = msg.get("custom_field", "")
+        if not symbol or action not in ("Buy", "Sell") or qty <= 0 or price <= 0:
+            return
+        deal_id = msg.get("trade_id") or msg.get("exchange_seq")
+        identity = (symbol, action, str(deal_id))
+        if deal_id and identity in self._seen_deals:
+            return
 
         self.logger.info(
             "成交回報: %s %s %d 張 @ %.2f [%s]",
@@ -605,10 +692,14 @@ class BaseStrategy(ABC):
         )
 
         with self._pending_lock[symbol]:
-            ordno = msg.get("ordno", "")
+            ordno = self._match_order(msg, symbol, action)
             was_pending = ordno in self.pending_orders.get(symbol, [])
-            if was_pending:
+            meta = self._order_meta.get(ordno, {})
+            filled = meta.get("filled_quantity", 0) + qty
+            if was_pending and filled >= meta.get("quantity", qty):
                 self.pending_orders[symbol].remove(ordno)
+            if meta:
+                meta["filled_quantity"] = filled
 
             if action == "Buy":
                 if not (was_pending or is_bot_order_field(custom)):
@@ -617,8 +708,10 @@ class BaseStrategy(ABC):
                         symbol, qty, price, custom,
                     )
                     return
-                unit = self._entry_units.pop(symbol, "lot")
-                buy_meta = self._order_meta.pop(ordno, {})
+                unit = meta.get("unit") or self._entry_units.get(symbol, "lot")
+                if str(msg.get("order_lot", "")) in ("IntradayOdd", "Odd"):
+                    unit = "share"
+                buy_meta = meta
                 trade_reason = str(buy_meta.get("custom_field", "enter"))
                 if symbol in self.positions:
                     unit = self.positions[symbol].unit
@@ -630,6 +723,9 @@ class BaseStrategy(ABC):
                         owner_tag=BOT_OWNER_TAG, unit=unit,
                     )
                 self.risk.on_entry_filled(symbol, price, qty, unit=unit)
+                if was_pending and ordno in self.pending_orders[symbol]:
+                    self.risk.reserve_entry_exposure(symbol, buy_cash_required(
+                        meta.get("price", price), max(0, meta["quantity"] - filled), unit, settings=self.settings))
                 self._fund_used = self.risk.fund_used
                 publish_if_bus(
                     self._publisher,
@@ -649,6 +745,8 @@ class BaseStrategy(ABC):
                 self.intraday_advisor.request_refresh(f"fill:buy:{symbol}")
 
             elif action == "Sell":
+                if not (was_pending or is_bot_order_field(custom)):
+                    return
                 if symbol not in self.positions:
                     self.logger.info(
                         "忽略非 AI 持倉賣出成交: %s %d 張 @ %.2f [%s]",
@@ -656,12 +754,16 @@ class BaseStrategy(ABC):
                     )
                     return
                 sell_unit = self.positions[symbol].unit
-                sell_meta = self._order_meta.pop(ordno, {})
+                if qty > self.positions[symbol].quantity:
+                    self.risk.engage_kill_switch("sell_fill_exceeds_position")
+                    return
+                sell_meta = meta
                 entry_price = self.positions[symbol].avg_price
                 sell_pnl_pct = self._position_pnl_pct(symbol, price) or 0.0
                 sell_pnl_twd = net_pnl_twd(
                     entry_price, price, qty, sell_unit,
                     settings=self.settings,
+                    sell_tax_rate=self._sell_tax_rate(symbol),
                 )
                 trade_reason = str(
                     sell_meta.get("custom_field", custom) or custom,
@@ -678,6 +780,7 @@ class BaseStrategy(ABC):
                     self.risk.on_exit_filled(
                         symbol, entry_price, price, qty, unit=unit,
                         position_closed=closed,
+                        sell_tax_rate=self._sell_tax_rate(symbol),
                     )
                     self._fund_used = self.risk.fund_used
                     publish_if_bus(
@@ -707,6 +810,12 @@ class BaseStrategy(ABC):
                         self.logger.info("部位已清空: %s", symbol)
                     else:
                         self.logger.info("部位更新 (賣出): %s", self.positions[symbol])
+            if deal_id:
+                self._seen_deals.add(identity)
+            self._on_fill_applied(symbol, action, price, qty, unit)
+
+    def _on_fill_applied(self, symbol, action, price, quantity, unit) -> None:
+        """Strategy state may advance only after an actual or virtual fill."""
 
     # ------------------------------------------------------------------
     # 虛擬成交 (watch / report)
@@ -731,6 +840,8 @@ class BaseStrategy(ABC):
             )
         self.risk.on_entry_filled(symbol, price, quantity, unit=unit)
         self._fund_used = self.risk.fund_used
+
+        self._on_fill_applied(symbol, "Buy", price, quantity, unit)
 
         prev_close = self._prev_close.get(symbol, 0.0)
         pct_chg = (
@@ -786,8 +897,10 @@ class BaseStrategy(ABC):
         self.risk.on_exit_filled(
             symbol, entry_price, price, quantity, unit=sell_unit,
             position_closed=closed,
+            sell_tax_rate=self._sell_tax_rate(symbol),
         )
         self._fund_used = self.risk.fund_used
+        self._on_fill_applied(symbol, "Sell", price, quantity, sell_unit)
         if closed and reason == "close":
             self._closure_placed.add(symbol)
 
@@ -823,7 +936,8 @@ class BaseStrategy(ABC):
     def _order_status_updater(self) -> None:
         """定期輪詢委託狀態，清理已完成的 pending orders。"""
         assert self.broker is not None
-        while self._running and now_tw_time() < self.settings.exit_time:
+        while self._running:
+            self._drain_order_events()
             has_pending = any(len(v) > 0 for v in self.pending_orders.values())
             if not has_pending:
                 time.sleep(2)
@@ -831,32 +945,43 @@ class BaseStrategy(ABC):
 
             try:
                 self.broker.update_status()
+                self._drain_order_events()
                 for trade in self.broker.list_trades():
-                    status = trade.status.status.value
-                    ordno = getattr(trade.order, "ordno", "")
-                    symbol = getattr(trade.contract, "code", "")
-                    action = str(getattr(trade.order, "action", ""))
-
-                    if status in ("Filled", "Cancelled", "Failed"):
-                        with self._pending_lock[symbol]:
-                            if ordno in self.pending_orders.get(symbol, []):
-                                self.pending_orders[symbol].remove(ordno)
-                        if status in ("Cancelled", "Failed"):
-                            meta = self._order_meta.pop(ordno, {})
-                            meta_symbol = meta.get("symbol", symbol)
-                            meta_action = meta.get("action", action)
-                            if meta_action == "Buy" and meta_symbol not in self.positions:
-                                self._enter_placed.discard(meta_symbol)
-                                self.risk.release_entry_exposure(meta_symbol)
-                            elif meta_action == "Sell":
-                                if meta.get("custom_field") == "close":
-                                    self._closure_pending.discard(meta_symbol)
-                        elif status == "Filled":
-                            self._order_meta.pop(ordno, None)
+                    self._refresh_order_state(trade)
             except Exception:
                 self.logger.exception("委託狀態更新例外")
 
             time.sleep(3)
+
+    def _refresh_order_state(self, trade):
+        with self._submission_lock:
+            status = trade.status.status.value
+            symbol = getattr(trade.contract, "code", "")
+            action = str(getattr(trade.order, "action", ""))
+            key = self._match_order({k: getattr(trade.order, k, "")
+                                     for k in ("ordno", "seqno", "id", "action", "custom_field")},
+                                    symbol, action)
+            meta = self._order_meta.get(key)
+            if meta is None:
+                return
+            reported_fills = getattr(trade.status, "deal_quantity", 0)
+            if isinstance(reported_fills, (int, float)) and reported_fills > meta.get("filled_quantity", 0):
+                return
+            if status == "Filled" and meta.get("filled_quantity", 0) < meta.get("quantity", 0):
+                return
+            if status not in ("Filled", "Cancelled", "Failed"):
+                return
+            with self._pending_lock[symbol]:
+                if key in self.pending_orders.get(symbol, []):
+                    self.pending_orders[symbol].remove(key)
+            self._order_meta.pop(key, None)
+            if status in ("Cancelled", "Failed"):
+                if meta.get("action") == "Buy":
+                    if symbol not in self.positions:
+                        self._enter_placed.discard(symbol)
+                    self.risk.release_entry_exposure(symbol)
+                elif meta.get("custom_field") == "close":
+                    self._closure_pending.discard(symbol)
 
     # ------------------------------------------------------------------
     # 收盤全出場
@@ -958,6 +1083,7 @@ class BaseStrategy(ABC):
 
         return 0, "lot"
 
+    @_order_submission
     def _place_buy(
         self,
         symbol: str,
@@ -969,10 +1095,13 @@ class BaseStrategy(ABC):
         unit: QtyUnit = "lot",
         llm_gate: str = "",
     ) -> bool:
+        if self._has_pending(symbol):
+            return False
         # === 風控守門員 ===
         available_balance = None
         enforce_account_balance = False
-        if self._is_trade_mode and self.settings.check_account_balance and self.broker:
+        if (self._is_trade_mode and not self.settings.simulation
+                and self.settings.check_account_balance and self.broker):
             enforce_account_balance = True
             available_balance = self.broker.get_available_balance()
 
@@ -982,6 +1111,10 @@ class BaseStrategy(ABC):
             entry_kind = "reenter"
         else:
             entry_kind = "enter"
+        held = self.positions.get(symbol)
+        held_shares = held.quantity * qty_multiplier(held.unit) if held else 0
+        remaining_cap = self.settings.max_lot_per_symbol * 1000 - held_shares
+        quantity = min(quantity, max(0, remaining_cap // qty_multiplier(unit)))
         decision = self.risk.check_entry(
             symbol=symbol,
             price=price,
@@ -1050,17 +1183,11 @@ class BaseStrategy(ABC):
             self._entry_units.pop(symbol, None)
             return False
 
-        ordno = getattr(trade.order, "ordno", "")
-        with self._pending_lock[symbol]:
-            self.pending_orders[symbol].append(ordno)
-        self._order_meta[ordno] = {
-            "symbol": symbol,
-            "action": "Buy",
-            "custom_field": custom_field,
-        }
+        self._register_order(trade, symbol, "Buy", custom_field, quantity, unit)
         self._enter_placed.add(symbol)
         return True
 
+    @_order_submission
     def _place_stop_sell(
         self,
         symbol: str,
@@ -1068,12 +1195,17 @@ class BaseStrategy(ABC):
         custom_field: str = "stop",
         *,
         llm_gate: str = "",
+        limit_price: Optional[float] = None,
     ) -> bool:
+        if self._has_pending(symbol):
+            return False
         price = self._last_price.get(symbol, 0.0)
         pos = self.positions.get(symbol)
         if pos is None:
             return False
         quantity = min(quantity, pos.quantity)
+        if pos.unit == "share":
+            quantity = min(quantity, 999)
         if quantity <= 0:
             return False
 
@@ -1112,8 +1244,15 @@ class BaseStrategy(ABC):
                 symbol=symbol,
                 action=Action.Sell,
                 shares=quantity,
-                price=price,
+                price=limit_price if limit_price is not None else price,
                 custom_field=bot_sell_field(custom_field),
+                max_sell_qty=pos.quantity,
+            )
+        elif limit_price is not None:
+            trade = self.broker.place_order(
+                symbol=symbol, action=Action.Sell, quantity=quantity,
+                price=limit_price, price_type=StockPriceType.LMT,
+                order_type=OrderType.ROD, custom_field=bot_sell_field(custom_field),
                 max_sell_qty=pos.quantity,
             )
         else:
@@ -1124,14 +1263,7 @@ class BaseStrategy(ABC):
         if trade is None:
             return False
 
-        ordno = getattr(trade.order, "ordno", "")
-        with self._pending_lock[symbol]:
-            self.pending_orders[symbol].append(ordno)
-        self._order_meta[ordno] = {
-            "symbol": symbol,
-            "action": "Sell",
-            "custom_field": custom_field,
-        }
+        self._register_order(trade, symbol, "Sell", custom_field, quantity, unit)
         if custom_field == "close":
             self._closure_pending.add(symbol)
         return True
@@ -1150,7 +1282,11 @@ class BaseStrategy(ABC):
         return position_net_pnl_pct(
             pos.avg_price, price, pos.quantity, pos.unit,
             settings=self.settings,
+            sell_tax_rate=self._sell_tax_rate(symbol),
         )
+
+    def _sell_tax_rate(self, symbol: str) -> Optional[float]:
+        return .001 if symbol == "0050" else None
 
     def _on_position_closed(
         self,
@@ -1166,6 +1302,7 @@ class BaseStrategy(ABC):
         net_pct = position_net_pnl_pct(
             entry_price, exit_price, quantity, unit,
             settings=self.settings,
+            sell_tax_rate=self._sell_tax_rate(symbol),
         )
         self._symbol_exits[symbol] = SymbolExitRecord(
             exit_price=exit_price,

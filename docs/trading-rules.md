@@ -8,10 +8,39 @@
 |----|------|----------|
 | `configurable`（預設） | ConfigurableStrategy | env 驅動漲幅區間 + LLM 進場閘門 + 回落買回 |
 | `etf_follow` | EtfFollowStrategy | ETF 共識訊號 + 漲幅 -1%~4% |
+| `smile_curve` | SmileCurveStrategy | 跌幅分階買進、回到標準價且各批扣費稅後獲利才送限價賣單；目前僅支援模擬 |
 
 > 舊值 `default` 會自動對應為 `configurable`（向後相容）。
 
-**出場規則**（停損、移動停利、收盤全出、AI 標籤授權）由 `BaseStrategy._evaluate_standard_exits()` 共用。
+**當沖出場規則**（停損、移動停利、收盤全出、AI 標籤授權）由 `BaseStrategy._evaluate_standard_exits()` 共用。微笑策略保留批次部位，不套用當沖收盤強平。
+
+## 模擬買賣驗證
+
+不修改 `.env`、不解除正式交易封存的啟動方式：
+
+```powershell
+uv run stock-bot --simulate --strategy configurable
+uv run stock-bot --simulate --strategy smile_curve
+```
+
+`--simulate` 強制本次使用 `trade + simulation=true`、零股、手動 `SYMBOLS` 清單；微笑策略每階基礎數量為 100 股，仍受本金、單檔與單筆上限約束。兩種指令都是持續監控行情的前景程序；不會修改設定或建立背景排程。微笑策略拒絕正式連線，普通股票與 0050 可用，其餘 ETF 尚未提供商品規則。股票與 0050 的升降單位、0050 賣出稅率依[證交所 ETF 交易規則](https://www.twse.com.tw/zh/products/securities/etf/overview/rules.html)區分。
+
+模擬交易的風控、成交 CSV 與微笑批次狀態位於 `data/simulation/data/`，不混入正式成交紀錄。分階狀態以實際成交回報推進，部分成交保留掛單及剩餘資金保留額；同筆回報不重複入帳，重啟會對帳並恢復零股持倉。微笑賣單使用限價，但限價也可能未成交。
+
+可重複執行的驗收指令：
+
+```powershell
+uv run python -m bot.simulation_check --backend local
+uv run python -m bot.simulation_check --backend shioaji --timeout 60
+```
+
+`local` 不連網，替換撮合端並保留真正的策略、SjBroker 委託建構、SDK Order/Trade、成交事件、風控和 CSV 路徑；以固定行情驗證一般與微笑策略、2330/0050 零股及 0050 整張買賣。它證明應用程式流程，不能當作券商成交驗收。
+
+`shioaji` 強制模擬連線，僅測 0050 一張，買進成交且回報入帳後才允許賣出；只有買賣都成交、回報完成且券商與程式持倉歸零才回報 `passed`。若已有 0050 模擬持倉則停止，不混入測試。券商文件仍標示[模擬環境不支援零股](https://sinotrade.github.io/tutor/simulation/)，所以券商驗收使用整張。逾時只撤本次尚未成交的委託，結果存至 `work/simulation-*/result.json`；`PreSubmitted`、權限不足、僅送單成功均不算通過。若成交後的出場未完成，報告會保留未平倉數量，需先處理該模擬持倉再重跑。
+
+微笑回測頁面預設讀取最新本機日 K，也可選固定歷史快照重現舊結果。可調零股與每階數量；資料庫以唯讀開啟，不自動補抓資料。頁面回測不會向券商送單。
+
+`scripts/run_simulation_acceptance.ps1` 是同一個券商模擬驗收的隱藏視窗包裝，固定 0050 一張、每階段最多 60 秒，輸出至 `work/simulation-broker-opening-時間/`。它不會啟動持續交易服務，`-CheckOnly` 僅檢查入口。
 
 ---
 

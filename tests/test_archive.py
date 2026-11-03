@@ -9,7 +9,7 @@ from bot.config import Settings
 
 
 def _settings(**overrides) -> Settings:
-    defaults = dict(symbols=["2330"], _env_file=None)
+    defaults = dict(symbols=["2330"], simulation=False, _env_file=None)
     defaults.update(overrides)
     return Settings(**defaults)  # type: ignore[call-arg]
 
@@ -34,6 +34,11 @@ class TestDayTradingArchive:
     def test_watch_not_blocked(self) -> None:
         s = _settings(run_mode="watch")
         assert day_trading_trade_blocked(s) is False
+
+    def test_simulation_preserves_production_archive(self) -> None:
+        s = _settings(run_mode="trade", simulation=True)
+        assert day_trading_trade_blocked(s) is False
+        assert day_trading_trade_blocked(s.model_copy(update={"simulation": False})) is True
 
     def test_block_message_mentions_unfreeze(self) -> None:
         msg = trade_block_message(_settings(run_mode="trade"))

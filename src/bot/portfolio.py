@@ -307,6 +307,8 @@ def _parse_trade_row(
     symbol = _first(row, "ticker", "symbol", "code", "stock_id", "證券代號")
     side = _normalize_side(_first(row, "side", "action", "買賣", "交易別"))
     qty = _to_float(_first(row, "qty", "quantity", "lots", "張數", "數量"))
+    if _first(row, "unit").strip().lower() == "share":
+        qty /= LOT_SIZE
     price = _to_float(_first(row, "price", "成交價", "價格"))
     ts = _first(row, "ts", "datetime", "time", "date", "成交時間", "時間")
     note = _first(row, "note", "reason", "custom_field", "custom", "備註")

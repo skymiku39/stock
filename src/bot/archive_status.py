@@ -14,6 +14,10 @@ def day_trading_trade_blocked(settings: "Settings") -> bool:
     """trade 模式是否因封存而被阻擋。"""
     if settings.run_mode != "trade":
         return False
+    # Paper orders cannot reach the production account. Keep the archive gate
+    # on real orders while allowing end-to-end simulation without unfreezing it.
+    if settings.simulation:
+        return False
     if not getattr(settings, "day_trading_archived", True):
         return False
     return not getattr(settings, "day_trading_unfreeze", False)
