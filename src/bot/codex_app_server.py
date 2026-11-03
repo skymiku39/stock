@@ -23,7 +23,7 @@ class CodexAppServerClient:
         model: str = "gpt-6-sol",
         effort: str = "max",
         cwd: Optional[str] = None,
-        timeout: float = 300,
+        timeout: float = 900,
     ) -> None:
         parsed = urlparse(url)
         if parsed.scheme != "ws" or not parsed.hostname or parsed.port is None:
@@ -39,6 +39,8 @@ class CodexAppServerClient:
         self.effort = effort
         self.cwd = cwd
         self.timeout = timeout
+        if timeout <= 0:
+            raise ValueError("Codex App Server timeout must be positive")
         self._next_id = 0
 
     def generate(self, prompt: str) -> tuple[str, Dict[str, Any]]:
@@ -69,8 +71,6 @@ class CodexAppServerClient:
                 if not thread_id:
                     raise CodexAppServerError("Codex App Server returned no thread id")
 
-                self._next_id += 1
-                turn_id = self._next_id
                 params: Dict[str, Any] = {
                     "threadId": thread_id,
                     "input": [{"type": "text", "text": prompt}],
@@ -80,44 +80,68 @@ class CodexAppServerClient:
                 }
                 if self.cwd:
                     params["cwd"] = self.cwd
-                socket.send(json.dumps({"id": turn_id, "method": "turn/start", "params": params}))
-                self._await_response(socket, turn_id, time.monotonic() + 30)
-
+                result = self._rpc(socket, "turn/start", params)
+                active_turn_id = (result.get("turn") or {}).get("id")
+                metadata.update(thread_id=thread_id, turn_id=active_turn_id)
                 deadline = time.monotonic() + self.timeout
                 chunks: list[str] = []
-                while time.monotonic() < deadline:
-                    message = self._receive(socket, deadline)
-                    if message.get("error"):
-                        raise CodexAppServerError(self._error_text(message["error"]))
-                    method = message.get("method", "")
-                    event_params = message.get("params") or {}
-                    if method == "item/agentMessage/delta":
-                        delta = event_params.get("delta")
-                        if isinstance(delta, str):
-                            chunks.append(delta)
-                    elif method == "turn/completed":
-                        turn = event_params.get("turn") or {}
-                        metadata["turn_status"] = turn.get("status", "completed")
-                        if turn.get("status") != "completed":
-                            error = turn.get("error") or {}
-                            raise CodexAppServerError(str(error.get("message") or error
-                                or f"turn did not complete: {turn.get('status', 'unknown')}"))
-                        if not chunks:
-                            chunks.extend(self._message_texts(turn.get("items") or []))
-                        text = "".join(chunks)
-                        metadata["latency_ms"] = int((time.monotonic() - started) * 1000)
-                        return text, metadata
-                raise TimeoutError("Codex App Server turn timed out")
+                completed_items: list[Any] = []
+                try:
+                    while time.monotonic() < deadline:
+                        message = self._receive(socket, deadline)
+                        if message.get("error"):
+                            raise CodexAppServerError(self._error_text(message["error"]))
+                        method = message.get("method", "")
+                        event_params = message.get("params") or {}
+                        if event_params.get("threadId", thread_id) != thread_id:
+                            continue
+                        if active_turn_id and event_params.get("turnId", active_turn_id) != active_turn_id:
+                            continue
+                        if method == "item/agentMessage/delta":
+                            delta = event_params.get("delta")
+                            if isinstance(delta, str):
+                                chunks.append(delta)
+                        elif method == "item/completed":
+                            completed_items.append(event_params.get("item") or {})
+                        elif method == "turn/completed":
+                            turn = event_params.get("turn") or {}
+                            if active_turn_id and turn.get("id", active_turn_id) != active_turn_id:
+                                continue
+                            metadata["turn_status"] = turn.get("status")
+                            if turn.get("status") != "completed":
+                                error = turn.get("error") or {}
+                                raise CodexAppServerError(str(error.get("message") or error
+                                    or f"turn did not complete: {turn.get('status', 'unknown')}"))
+                            items = turn.get("items") or completed_items
+                            agent_items = [i for i in items if isinstance(i, dict)
+                                           and i.get("type") in {"agentMessage", "agent_message"}]
+                            text = "".join(self._message_texts(agent_items)) if agent_items else "".join(chunks)
+                            if not text.strip():
+                                raise CodexAppServerError("Codex App Server completed without a final answer")
+                            metadata["latency_ms"] = int((time.monotonic() - started) * 1000)
+                            return text, metadata
+                    raise TimeoutError("Codex App Server turn timed out")
+                except TimeoutError:
+                    if active_turn_id:
+                        metadata["interrupt_requested"] = True
+                        try:
+                            self._rpc(socket, "turn/interrupt", {"threadId": thread_id,
+                                      "turnId": active_turn_id}, deadline=time.monotonic() + 5)
+                            metadata["interrupt_acknowledged"] = True
+                        except Exception as cancel_error:
+                            metadata["interrupt_acknowledged"] = False
+                            metadata["interrupt_error"] = str(cancel_error)
+                    raise
         except Exception as exc:
             metadata["latency_ms"] = int((time.monotonic() - started) * 1000)
             metadata["error"] = str(exc)
             return "", metadata
 
-    def _rpc(self, socket: Any, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _rpc(self, socket: Any, method: str, params: Dict[str, Any], *, deadline=None) -> Dict[str, Any]:
         self._next_id += 1
         request_id = self._next_id
         socket.send(json.dumps({"id": request_id, "method": method, "params": params}))
-        return self._await_response(socket, request_id, time.monotonic() + 30)
+        return self._await_response(socket, request_id, deadline or time.monotonic() + 30)
 
     def _await_response(self, socket: Any, request_id: int, deadline: float) -> Dict[str, Any]:
         while time.monotonic() < deadline:
@@ -145,8 +169,16 @@ class CodexAppServerClient:
     @staticmethod
     def _message_texts(items: list[Any]) -> list[str]:
         texts: list[str] = []
+        finals = [item for item in items if isinstance(item, dict) and item.get("phase") == "final_answer"]
+        if finals:
+            items = finals
         for item in items:
             if not isinstance(item, dict) or item.get("type") not in {"agentMessage", "agent_message"}:
+                continue
+            if item.get("phase") not in {None, "final_answer"}:
+                continue
+            if isinstance(item.get("text"), str):
+                texts.append(item["text"])
                 continue
             content = item.get("content")
             if isinstance(content, str):

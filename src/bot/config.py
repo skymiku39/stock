@@ -294,6 +294,7 @@ class Settings(BaseSettings):
     codex_app_server_url: str = "ws://127.0.0.1:4500"
     codex_app_server_model: str = "gpt-6-sol"
     codex_app_server_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "max"
+    codex_app_server_timeout_seconds: int = Field(default=900, ge=1, le=3600)
 
     @property
     def llm_enabled(self) -> bool:

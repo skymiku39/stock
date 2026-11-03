@@ -124,6 +124,7 @@ class GeminiClient:
                         url=settings.codex_app_server_url,
                         model=settings.codex_app_server_model,
                         effort=settings.codex_app_server_effort,
+                        timeout=settings.codex_app_server_timeout_seconds,
                         cwd=str(Path(root).resolve()) if root is not None else str(Path.cwd()),
                     )
                     self.logger.info(
