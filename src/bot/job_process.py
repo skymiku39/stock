@@ -18,7 +18,7 @@ class ProcessTerminationError(RuntimeError):
 
 
 def run_with_deadline(cmd, *, cwd, env, stdout, timeout: float,
-                      cancel_event=None, guard_parent: bool = False) -> int:
+                      cancel_event=None, guard_parent: bool = False, on_start=None) -> int:
     """Wait with a deadline and terminate the owned process tree on timeout."""
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("Job timeout must be positive")
@@ -35,6 +35,8 @@ def run_with_deadline(cmd, *, cwd, env, stdout, timeout: float,
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(cmd, **kwargs)
     try:
+        if on_start is not None:
+            on_start(proc)
         if cancel_event is None:
             return proc.wait(timeout=timeout)
         deadline = time.monotonic() + timeout
@@ -57,6 +59,30 @@ def run_with_deadline(cmd, *, cwd, env, stdout, timeout: float,
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
+
+
+def process_created_at(pid):
+    import datetime as dt
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            values = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle, *(ctypes.byref(v) for v in values)):
+                return None
+            created = ((values[0].dwHighDateTime << 32) + values[0].dwLowDateTime) / 10000000 - 11644473600
+            return dt.datetime.fromtimestamp(created, dt.timezone.utc).isoformat()
+        finally:
+            kernel.CloseHandle(handle)
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def terminate_process_tree(proc):

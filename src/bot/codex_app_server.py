@@ -137,6 +137,51 @@ class CodexAppServerClient:
             metadata["error"] = str(exc)
             return "", metadata
 
+    def health(self, *, timeout=10, full=True):
+        """Read protocol/auth/model/limit state without starting a thread or turn."""
+        deadline = time.monotonic() + timeout
+        result = {"reachable": False, "authenticated": False, "quota_blocked": False}
+        try:
+            with connect(self.url, open_timeout=min(5, timeout), close_timeout=1,
+                         max_size=4 * 1024 * 1024) as socket:
+                self._rpc(socket, "initialize", {"clientInfo": {"name": "stock-health", "version": "1.0"}}, deadline=deadline)
+                socket.send(json.dumps({"method": "initialized", "params": {}}))
+                result['reachable'] = True
+                account = self._rpc(socket, "account/read", {"refreshToken": False}, deadline=deadline)
+                result['authenticated'] = bool(account.get('account')) or not account.get('requiresOpenaiAuth', True)
+                if not full:
+                    return result
+                models = self._rpc(socket, 'model/list', {'limit': 100, 'includeHidden': True}, deadline=deadline)
+                entries = list(models.get('data') or [])
+                while models.get('nextCursor'):
+                    models = self._rpc(socket, 'model/list', {'limit': 100, 'includeHidden': True,
+                                       'cursor': models['nextCursor']}, deadline=deadline)
+                    entries.extend(models.get('data') or [])
+                model = next((m for m in entries if self.model in (m.get('id'), m.get('model'))), {})
+                result['model_supported'] = bool(model)
+                result['effort_supported'] = self.effort in [e.get('reasoningEffort') for e in model.get('supportedReasoningEfforts', [])]
+                limits = self._rpc(socket, 'account/rateLimits/read', {}, deadline=deadline)
+                buckets = limits.get('rateLimitsByLimitId') or {'codex': limits.get('rateLimits')}
+                selected = [v for k, v in buckets.items() if isinstance(v, dict) and k in {'codex', self.model}]
+                result['limits_known'] = bool(selected)
+                resets = []
+                for bucket in selected:
+                    if bucket.get('rateLimitReachedType'):
+                        result['quota_blocked'] = True
+                    for window in ('primary', 'secondary'):
+                        value = bucket.get(window) or {}
+                        if value.get('usedPercent', 0) >= 100:
+                            result['quota_blocked'] = True
+                            reset = value.get('resetsAt')
+                            if isinstance(reset, (int, float)) and reset > time.time():
+                                resets.append(reset)
+                result['next_retry_epoch'] = max(resets) + 60 if resets else time.time() + 1800
+                result['available'] = all(result.get(k) for k in ('reachable', 'authenticated', 'model_supported', 'effort_supported', 'limits_known')) and not result['quota_blocked']
+                return result
+        except Exception as exc:
+            result.update(available=False, error=str(exc))
+            return result
+
     def _rpc(self, socket: Any, method: str, params: Dict[str, Any], *, deadline=None) -> Dict[str, Any]:
         self._next_id += 1
         request_id = self._next_id

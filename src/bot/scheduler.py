@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from bot.config import Settings
+from bot.runtime_state import code_identity
 from bot.events import SchedulerJobCompleted, SchedulerStarted
 from bot.events.protocols import EventPublisher
 from bot.events.wiring import publish_if_bus
@@ -196,6 +197,7 @@ class Scheduler:
         job_state: Optional[str] = None,
         job_exit_code: Optional[int] = None,
         job_log_path: Optional[str] = None,
+        job_details: Optional[dict] = None,
     ) -> None:
         """Publish a durable heartbeat for the dashboard and diagnostics."""
         try:
@@ -213,6 +215,7 @@ class Scheduler:
                 "pid": os.getpid(),
                 "heartbeat_at": heartbeat,
                 "run_once": run_once if run_once is not None else previous.get("run_once", False),
+                "runtime": getattr(self, 'runtime_identity', previous.get('runtime', {})),
             }
             if last_job is not None:
                 payload["last_job"] = last_job
@@ -229,13 +232,18 @@ class Scheduler:
                                       "error": "scheduler restarted before completion was recorded"}
             if last_job is not None and job_state is not None:
                 entry = dict(jobs.get(last_job) or {})
+                was_running = entry.get('state') == 'running'
                 entry.update(state=job_state, error=last_error or "", exit_code=job_exit_code)
                 if job_log_path is not None:
                     entry["log_path"] = job_log_path
                 if job_state == "running":
-                    entry.update(started_at=heartbeat, finished_at="")
+                    if not was_running:
+                        entry.update(started_at=heartbeat, finished_at="", process_id=None, process_created_at=None)
                 else:
                     entry["finished_at"] = heartbeat
+                    entry['last_completed_at'] = heartbeat
+                if job_details:
+                    entry.update(job_details)
                 if job_state == "succeeded":
                     entry["last_success_at"] = heartbeat
                 job = next((j for j in self.jobs if j.name == last_job), None)
@@ -517,6 +525,12 @@ class Scheduler:
         env = _child_env(self.project_root)
         error = ""
         job_state = "failed"
+        def started(proc):
+            from bot.job_process import process_created_at
+            self._write_status('running', last_job=job.name, job_state='running', job_details={
+                'process_id': proc.pid, 'process_created_at': process_created_at(proc.pid),
+                'deadline_at': (now_tw() + dt.timedelta(seconds=timeout)).isoformat(),
+                'command': cmd})
         try:
             with open(log_path, "w", encoding="utf-8", buffering=1) as fp:
                 fp.write(f"# job={job.name} cmd={' '.join(cmd)} start={ts}\n# ---\n")
@@ -524,6 +538,7 @@ class Scheduler:
                 rc = run_with_deadline(
                     cmd, cwd=str(self.project_root), env=env,
                     stdout=fp, timeout=timeout,
+                    on_start=started,
                 )
                 fp.write(f"\n# ---\n# exit_code: {rc}\n")
             level = self.logger.info if rc == 0 else self.logger.warning
@@ -630,6 +645,7 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def run(self, *, once: bool = False) -> int:
+        self.runtime_identity = code_identity(self.project_root)
         self.logger.info("=== Scheduler 啟動 (once=%s, dry_run=%s) ===", once, self.dry_run)
         self._write_status("starting", run_once=once)
         publish_if_bus(

@@ -122,3 +122,29 @@ def test_configured_deadline_reaches_the_model_client(tmp_path):
     assert client._client.timeout == 123
     with pytest.raises(ValueError):
         Settings(_env_file=None, codex_app_server_timeout_seconds=0)
+
+
+@pytest.mark.parametrize('account', [{'account': {'type': 'chatgpt'}},
+                                     {'account': None, 'requiresOpenaiAuth': True}])
+def test_liveness_probe_does_not_start_model_work(monkeypatch, account):
+    sent = []
+    replies = iter([{'id': 1, 'result': {}}, {'id': 2, 'result': account}])
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def send(self, message):
+            sent.append(json.loads(message))
+
+        def recv(self, **kwargs):
+            return json.dumps(next(replies))
+
+    monkeypatch.setattr(server, 'connect', lambda *a, **kw: Socket())
+    result = server.CodexAppServerClient(url='ws://127.0.0.1:4500').health(full=False)
+    assert result['reachable'] and 'error' not in result
+    assert result['authenticated'] is bool(account.get('account'))
+    assert [m['method'] for m in sent] == ['initialize', 'initialized', 'account/read']
