@@ -193,6 +193,33 @@ def test_project_audit_verifies_registered_raw_archive_hash(tmp_path) -> None:
     )
 
 
+def test_repeated_report_packets_share_replay_checks_only_within_one_audit(tmp_path, monkeypatch):
+    from bot import source_audit_cli
+    with SourceRegistry(tmp_path) as registry:
+        source = registry.capture_document("fixture", b"shared report raw", suffix="json")
+        db = registry.db
+        db.upsert_evidence(EvidenceItemRow(evidence_id="fixture:shared", source="fixture",
+            source_document_id=source.document_id, excerpt="shared", quality_status="ok"))
+        packet = {"id": "fixture:shared", "source_document_id": source.document_id,
+                  "provenance_status": "exact"}
+        for date in ("2026-11-02", "2026-11-03"):
+            db.upsert_llm_daily_report(LlmDailyReportRow(report_type="daily", report_date=date,
+                quality_status="ok", evidence_json=json.dumps([packet, packet])))
+    calls = []
+    original = source_audit_cli.is_source_document_replayable
+    def check(*args):
+        calls.append(True)
+        return original(*args)
+    monkeypatch.setattr(source_audit_cli, "is_source_document_replayable", check)
+    first = audit_project(tmp_path)
+    assert calls == [True]
+    assert first["database"]["llm_daily_reports_with_unresolved_evidence"] == 0
+    (tmp_path / source.content_path).write_bytes(b"tampered")
+    second = audit_project(tmp_path)
+    assert calls == [True, True]
+    assert second["database"]["llm_daily_reports_with_unresolved_evidence"] == 2
+
+
 def test_project_audit_reports_canonical_source_record_orphan(tmp_path) -> None:
     db = StockDB.open(root=tmp_path)
     db.upsert_stock_info(StockInfo(

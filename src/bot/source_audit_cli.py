@@ -157,6 +157,17 @@ def _llm_provenance_report(conn: sqlite3.Connection, tables: set[str]) -> Dict[s
 
 
 def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    replay_root = Path(root or db_path.parent.parent).resolve()
+    replay_checks: Dict[tuple[str, str], bool] = {}
+
+    def replayable(source: SourceDocumentRow) -> bool:
+        # Many report packets share a full-market response. Hash it once in
+        # this audit snapshot; a subsequent audit always reads it again.
+        key = (source.content_path, source.content_hash)
+        if key not in replay_checks:
+            replay_checks[key] = is_source_document_replayable(replay_root, source)
+        return replay_checks[key]
+
     if not db_path.exists():
         return {
             "exists": False,
@@ -624,7 +635,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                     if source_document_id and source_document is None:
                         packet_reasons.append("source_document_missing")
                     elif source_document_id and source_document is not None:
-                        if not is_source_document_replayable(replay_root, source_document):
+                        if not replayable(source_document):
                             packet_reasons.append("raw_archive_not_replayable")
                     if packet_reasons:
                         reasons.append({
@@ -715,7 +726,7 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
                 source = source_rows.get(source_id)
                 if source is None:
                     reasons.append("source_document_missing")
-                elif not is_source_document_replayable(replay_root, source):
+                elif not replayable(source):
                     reasons.append("raw_archive_not_replayable")
                 if not reasons:
                     research_missing_source_links += 1
