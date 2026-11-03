@@ -55,6 +55,27 @@ def test_today_news_is_counted_by_publication_date_not_cache_date(tmp_path, monk
         collection.collect_news(tmp_path, "2026-10-27")
 
 
+def test_successful_news_refreshes_within_the_same_market_period(tmp_path, monkeypatch):
+    from bot import watchlist
+    clock = [dt.datetime(2026, 11, 4, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))]
+    monkeypatch.setattr(collection, "now_tw", lambda: clock[0])
+    monkeypatch.setattr(watchlist, "load", lambda root: SimpleNamespace(items=[]))
+    calls = []
+    monkeypatch.setattr(collection, "collect_news", lambda *a: calls.append("news") or {"status": "ok"})
+    monkeypatch.setattr(collection, "collect_price", lambda *a: calls.append("price") or {"status": "ok"})
+    settings = SimpleNamespace(symbols=["2330"])
+    assert collection.collect_daily_inputs(tmp_path, settings)["complete"]
+    clock[0] += dt.timedelta(minutes=4)
+    assert collection.collect_daily_inputs(tmp_path, settings)["complete"]
+    assert calls == ["news", "price"]
+    clock[0] += dt.timedelta(minutes=1)
+    assert collection.collect_daily_inputs(tmp_path, settings)["complete"]
+    assert calls == ["news", "price", "news"]
+    clock[0] += dt.timedelta(minutes=25)
+    assert collection.collect_daily_inputs(tmp_path, settings)["complete"]
+    assert calls[-2:] == ["news", "price"]
+
+
 def test_price_fallback_is_not_a_successful_refresh(tmp_path, monkeypatch):
     now = dt.datetime(2026, 10, 27, 11, tzinfo=dt.timezone(dt.timedelta(hours=8)))
     monkeypatch.setattr(collection, "now_tw", lambda: now)

@@ -297,7 +297,7 @@ class Scheduler:
             jobs.append(Job(name="research", console_script="stock-daily-research",
                             module="bot.daily_research",
                             interval_min=s.scheduler_daily_all_interval_min,
-                            market_hours_only=False))
+                            market_hours_only=False, extra_args=['--root', str(self.project_root)]))
         elif s.scheduler_research_interval_min > 0:
             extra = [a for a in str(s.scheduler_research_args).split() if a]
             if not any(

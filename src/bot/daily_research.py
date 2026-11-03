@@ -80,7 +80,7 @@ def run_daily(root):
             run = run_full_pipeline(PipelineConfig(
                 project_root=root, llm_settings=settings, focus_tickers=tickers,
                 auto_research_focus=False, run_llm_analysis=False,
-                generate_brief=settings.llm_enabled, generate_us_brief=settings.llm_enabled))
+                generate_brief=False, generate_us_brief=False))
             state["collection_run"] = run.run_id
             state["collection_errors"] = list(run.errors)
             state["collection_warnings"] = list(run.warnings)
@@ -90,8 +90,7 @@ def run_daily(root):
             state["collection_errors"] = [str(exc)]
             state["collection_complete"] = False
     # Retry bulk official sources only until a complete fetch is recorded today.
-    retry_domestic = any(" " not in t for t in state.get("excluded", []))
-    if not state.get("official_complete") or retry_domestic:
+    if not state.get("official_complete"):
         state["official_errors"] = refresh_official(root)
         state["official_complete"] = not state["official_errors"]
     state.update(tickers=tickers, requested=len(tickers), phase="analysing")

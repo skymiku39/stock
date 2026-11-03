@@ -92,11 +92,17 @@ def collect_daily_inputs(root, settings):
     for key, collect in jobs:
         old = previous.get("news", {}) if key == "news" else previous.get("prices", {}).get(key, {})
         # Successful steps are retained; only unfinished steps retry in this period.
-        if reuse and old.get("status") == "ok":
+        try:
+            age = (now - dt.datetime.fromisoformat(old.get("collected_at", ""))).total_seconds()
+        except (ValueError, TypeError):
+            age = float("inf")
+        ttl = 300 if key == "news" else 1800
+        if reuse and old.get("status") == "ok" and 0 <= age < ttl:
             value = old
         else:
             try:
                 value = collect()
+                value.setdefault("collected_at", now_tw().isoformat())
             except Exception as exc:
                 value = {"status": "failed", "error": str(exc), "attempted_at": now_tw().isoformat()}
         if key == "news":

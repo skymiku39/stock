@@ -26,6 +26,7 @@ def test_daily_all_scope_restart_retry_and_day_rollover(tmp_path, monkeypatch):
     def collect(config):
         collection.append(config)
         assert not config.auto_research_focus and not config.run_llm_analysis
+        assert not config.generate_brief and not config.generate_us_brief
         return SimpleNamespace(run_id="source", errors=[], warnings=[], focus_tickers=tickers)
     monkeypatch.setattr(data_pipeline, "run_full_pipeline", collect)
     monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
@@ -73,7 +74,7 @@ def test_scheduler_daily_mode_covers_weekends_without_ticker_limit(tmp_path):
     from bot.scheduler import Scheduler
     s = Scheduler(Settings(_env_file=None, scheduler_daily_all_enabled=True), project_root=tmp_path)
     job = next(j for j in s.jobs if j.name == "research")
-    assert job.module == "bot.daily_research" and job.extra_args == []
+    assert job.module == "bot.daily_research" and job.extra_args == ["--root", str(tmp_path)]
     assert job.interval_min == 30 and not job.market_hours_only
     assert s._job_eligible(job, dt.datetime(2026, 10, 17, 20), once=False)
 
