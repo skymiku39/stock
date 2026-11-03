@@ -98,9 +98,10 @@ class CodexAppServerClient:
                     elif method == "turn/completed":
                         turn = event_params.get("turn") or {}
                         metadata["turn_status"] = turn.get("status", "completed")
-                        if turn.get("status") == "failed":
+                        if turn.get("status") != "completed":
                             error = turn.get("error") or {}
-                            raise CodexAppServerError(str(error.get("message") or error or "turn failed"))
+                            raise CodexAppServerError(str(error.get("message") or error
+                                or f"turn did not complete: {turn.get('status', 'unknown')}"))
                         if not chunks:
                             chunks.extend(self._message_texts(turn.get("items") or []))
                         text = "".join(chunks)

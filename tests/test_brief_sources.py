@@ -145,7 +145,7 @@ def test_valid_daily_gateway_persists_exact_evidence_links(tmp_path):
     variables = {"date": "2026-10-14", "presentation_analyses_json": '["BAD_UNVERIFIED_INPUT"]'}
     metadata = prepare_brief_metadata(root=tmp_path, task="daily_brief", run_id="test",
                                      variables=variables, macro_snapshot=macro(tmp_path))
-    client = Mock(model="offline-test", enabled=True)
+    client = Mock(model="offline-test", enabled=True, settings=None)
     client.generate_raw.return_value = ("offline test response", {})
     logger = LlmCallLogger(root=tmp_path)
     result, info = gemini_call("daily_brief", client=client, root=tmp_path, call_logger=logger,
