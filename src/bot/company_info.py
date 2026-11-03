@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 from pathlib import Path
@@ -29,11 +31,12 @@ from typing import Dict, Optional
 import requests
 
 from bot.cloud_file_cache import restore_file_from_cloud, write_json_cache
-from bot.data_quality import persist_source_result, response_to_rows
+from bot.data_quality import persist_source_result, response_to_rows, validate_rows
 from bot.stock_db import StockInfo
 from bot.utils import get_logger, mk_folder, now_tw
 
 URL_TWSE_COMPANY = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+URL_TWSE_COMPANY_CSV = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
 URL_TPEX_COMPANY = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
 
 # 上市/上櫃「產業別」代碼 → 中文 (MOPS t187ap03 分類，TWSE 與 TPEx 共用同一套)。
@@ -53,6 +56,7 @@ INDUSTRY_CODE_MAP: Dict[str, str] = {
 # 程序內快取按 project root 隔離；否則同一個長駐程序先讀 A 專案後，
 # B 專案會錯誤重用 A 的公司名冊。
 _COMPANY_MAP_CACHE: Dict[str, Dict[str, StockInfo]] = {}
+_COMPANY_MAP_DATES: Dict[str, str] = {}
 
 
 def _root_key(root: Optional[Path]) -> str:
@@ -105,7 +109,7 @@ def _map_path(root: Optional[Path]) -> Path:
     return base / "company_info.json"
 
 
-def _parse_twse(rows: list, *, source_record_id: str = "") -> Dict[str, StockInfo]:
+def _parse_twse(rows: list, *, source_record_id: str = "", source_url: str = URL_TWSE_COMPANY) -> Dict[str, StockInfo]:
     out: Dict[str, StockInfo] = {}
     for r in rows or []:
         code = str(r.get("公司代號") or "").strip()
@@ -118,7 +122,7 @@ def _parse_twse(rows: list, *, source_record_id: str = "") -> Dict[str, StockInf
             market="TWSE",
             industry=industry_label(r.get("產業別") or ""),
             listed_date=_date_to_iso(r.get("上市日期") or ""),
-            source_url=URL_TWSE_COMPANY,
+            source_url=source_url,
             retrieved_at=now_tw().isoformat(timespec="seconds"),
             quality_status="ok",
             source_record_id=str(source_record_id or ""),
@@ -156,29 +160,28 @@ def _build_company_map(
     sess = session or _session()
     out: Dict[str, StockInfo] = {}
     successful_sources = 0
-    try:
-        r = sess.get(URL_TWSE_COMPANY, timeout=30)
-        result = response_to_rows(
-            r,
-            source="twse_company_info",
-            url=URL_TWSE_COMPANY,
-            min_rows=1,
-        )
-        source_document_id = persist_source_result(result, root=root)
-        if result.usable:
-            parsed = _parse_twse(
-                result.rows,
-                source_record_id=source_document_id or "",
-            )
-            if parsed:
-                out.update(parsed)
-                successful_sources += 1
+    for url in (URL_TWSE_COMPANY, URL_TWSE_COMPANY_CSV):
+        try:
+            r = sess.get(url, timeout=30)
+            if url == URL_TWSE_COMPANY:
+                result = response_to_rows(r, source="twse_company_info", url=url,
+                    required_keys=("公司代號", "公司名稱"), min_rows=1)
             else:
-                log.warning("TWSE 公司資料解析後為 0 筆 (schema=%s)", result.schema_hash)
-        else:
-            log.warning("TWSE 公司資料品質=%s: %s", result.status, result.error)
-    except Exception:
-        log.exception("讀取上市公司基本資料失敗")
+                r.raise_for_status()
+                rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
+                result = validate_rows(rows, source="twse_company_info_csv", url=url,
+                    http_status=r.status_code, raw_bytes=r.content,
+                    required_keys=("公司代號", "公司名稱"), min_rows=1)
+            source_document_id = persist_source_result(result, root=root)
+            if result.usable:
+                parsed = _parse_twse(result.rows, source_record_id=source_document_id or "", source_url=url)
+                if parsed:
+                    out.update(parsed)
+                    successful_sources += 1
+                    break
+            log.warning("TWSE 公司資料品質=%s: %s (%s)", result.status, result.error, url)
+        except Exception:
+            log.exception("讀取上市公司基本資料失敗 (%s)", url)
     try:
         r = sess.get(URL_TPEX_COMPANY, timeout=30)
         result = response_to_rows(
@@ -215,37 +218,35 @@ def load_company_map(
 ) -> Dict[str, StockInfo]:
     """載入 (或建立) 全市場公司基本資料對照表，每日快取一次。"""
     key = _root_key(root)
+    today = now_tw().date().isoformat()
     cached_map = _COMPANY_MAP_CACHE.get(key)
-    if cached_map is not None and not force_refresh:
+    if cached_map is not None and _COMPANY_MAP_DATES.get(key) == today and not force_refresh:
         return cached_map
 
     path = _map_path(root)
     restore_file_from_cloud(path, root=root)
-    today = now_tw().date().isoformat()
     cached_map: Dict[str, StockInfo] = {}
-    if not force_refresh and path.exists():
+    if path.exists():
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
-            if cached.get("date") == today and cached.get("map"):
-                cached_map = {
-                    str(k): StockInfo(**v) for k, v in cached["map"].items()
-                }
+            cached_map = {str(k): StockInfo(**v) for k, v in (cached.get("map") or {}).items()}
+            if not force_refresh and cached.get("date") == today and cached_map:
                 _COMPANY_MAP_CACHE[key] = cached_map
+                _COMPANY_MAP_DATES[key] = today
                 return cached_map
         except Exception:
             pass
-    elif path.exists():
-        # force_refresh 仍先讀取舊快取，用來阻擋「只抓到半邊市場」覆蓋完整名冊。
-        try:
-            cached = json.loads(path.read_text(encoding="utf-8"))
-            cached_map = {
-                str(k): StockInfo(**v) for k, v in (cached.get("map") or {}).items()
-            }
-        except Exception:
-            cached_map = {}
 
     mp = _build_company_map(logger=logger, root=root)
     if mp:
+        # Preserve each failed market independently, including after a date rollover.
+        # Old records retain their original retrieval dates and provenance.
+        for market in {info.market for info in cached_map.values()}:
+            old = {k: v for k, v in cached_map.items() if v.market == market}
+            new = {k: v for k, v in mp.items() if v.market == market}
+            if len(new) < max(1, int(len(old) * 0.6)):
+                mp = {k: v for k, v in mp.items() if v.market != market}
+                mp.update(old)
         # 來源回應突然變小通常是封鎖、schema 變更或只成功一個市場；
         # 有完整舊快取時不允許它被部分結果覆蓋。
         if cached_map and len(mp) < max(1, int(len(cached_map) * 0.6)):
@@ -277,6 +278,7 @@ def load_company_map(
         except Exception:
             pass
         _COMPANY_MAP_CACHE[key] = mp
+        _COMPANY_MAP_DATES[key] = today
         return mp
 
     # 建表失敗 → 盡量用舊快取
@@ -286,6 +288,7 @@ def load_company_map(
             cached = json.loads(path.read_text(encoding="utf-8"))
             cached_map = {str(k): StockInfo(**v) for k, v in (cached.get("map") or {}).items()}
             _COMPANY_MAP_CACHE[key] = cached_map
+            _COMPANY_MAP_DATES[key] = today
             return cached_map
         except Exception:
             pass

@@ -53,6 +53,59 @@ def test_parse_tpex_builds_stock_info() -> None:
     assert info.source_record_id == "source-doc:tpex:test"
 
 
+def test_twse_csv_fallback_preserves_exact_response_and_source_url(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from bot.source_registry import SourceRegistry, resolve_source_document_path
+    raw = "\ufeff公司代號,公司名稱,公司簡稱,產業別\n2330,台灣積體電路,台積電,24\n".encode("utf-8")
+    class Session:
+        def get(self, url, **kwargs):
+            if url == ci.URL_TWSE_COMPANY:
+                def blocked():
+                    raise ValueError("not JSON")
+                return SimpleNamespace(status_code=200, content=b"<html>unavailable</html>", json=blocked)
+            if url == ci.URL_TWSE_COMPANY_CSV:
+                return SimpleNamespace(status_code=200, content=raw, raise_for_status=lambda: None)
+            rows = [{"SecuritiesCompanyCode": "6488", "CompanyName": "環球晶"}]
+            return SimpleNamespace(status_code=200, content=json.dumps(rows).encode(), json=lambda: rows)
+    result = ci._build_company_map(root=tmp_path, session=Session())
+    assert {i.market for i in result.values()} == {"TWSE", "TPEX"}
+    assert result["2330"].source_url == ci.URL_TWSE_COMPANY_CSV
+    with SourceRegistry(tmp_path) as registry:
+        source = registry.db.get_source_document(result["2330"].source_record_id)
+        assert source.url == ci.URL_TWSE_COMPANY_CSV
+        assert resolve_source_document_path(tmp_path, source).read_bytes() == raw
+
+
+def test_stale_company_cache_keeps_failed_market_and_refreshes_after_midnight(tmp_path, monkeypatch):
+    import datetime as dt
+    import json
+    from dataclasses import asdict
+    from bot.utils import now_tw
+    clock = [now_tw()]
+    yesterday = clock[0] - dt.timedelta(days=1)
+    path = tmp_path / "data/meta/company_info.json"
+    path.parent.mkdir(parents=True)
+    old = {s: StockInfo(s, name=s, market=m, retrieved_at=yesterday.isoformat())
+           for s, m in (("2330", "TWSE"), ("6488", "TPEX"))}
+    path.write_text(json.dumps({"date": yesterday.date().isoformat(),
+        "map": {s: asdict(v) for s, v in old.items()}}), encoding="utf-8")
+    calls = []
+    def build(**kwargs):
+        calls.append(True)
+        return {"6488": StockInfo("6488", name="updated", market="TPEX", retrieved_at=clock[0].isoformat())}
+    monkeypatch.setattr(ci, "now_tw", lambda: clock[0])
+    monkeypatch.setattr(ci, "_build_company_map", build)
+    result = ci.load_company_map(root=tmp_path)
+    assert result["2330"].retrieved_at == yesterday.isoformat()
+    assert result["6488"].name == "updated"
+    ci.load_company_map(root=tmp_path)
+    assert len(calls) == 1
+    clock[0] += dt.timedelta(days=1)
+    ci.load_company_map(root=tmp_path)
+    assert len(calls) == 2
+
+
 def test_merge_preserves_manual_fields() -> None:
     existing = StockInfo(symbol="3017", name="奇鋐", short_name="奇鋐", industry="散熱")
     fetched = StockInfo(
