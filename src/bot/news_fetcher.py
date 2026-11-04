@@ -18,6 +18,7 @@ items = fetch_today_news(limit=200, force_refresh=True)
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import html
 import json
 import logging
@@ -188,24 +189,26 @@ def _load_cache(date: dt.date, root: Optional[Path]) -> Optional[List[NewsItem]]
     if not p.exists():
         return None
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
+        payload = p.read_bytes()
+        raw = json.loads(payload)
         items = [NewsItem(**d) for d in raw.get("items", []) or []]
-        # raw archive 與 derived cache 必須可逐字重播；若快取 JSON 沒有
-        # 內嵌 ID，透過 exact source_ref 回查 manifest，不改寫快取內容。
-        if items and not any(item.source_document_id for item in items):
+        # A day can have many revisions, and restored caches can be older than
+        # the latest manifest. Bind only the exact bytes read, never the newest
+        # document for the day or an unverified ID embedded in a cache.
+        for item in items:
+            item.source_document_id = ""
+        if items:
             registry = SourceRegistry(root or Path.cwd())
             try:
-                source_ref = f"news:{date.isoformat()}"
-                documents = [
-                    row for row in registry.db.list_source_documents(
-                        source="cnyes", kind="news_cache", limit=200
-                    )
-                    if row.source_ref == source_ref
-                ]
-                if documents:
-                    document_id = documents[0].document_id
+                digest = hashlib.sha256(payload).hexdigest()
+                document = registry.db.get_source_document(f"source-doc:cnyes:{digest}")
+                if document is None:
+                    document = registry.db.find_source_document(content_hash=digest)
+                if (document is not None and document.content_hash == digest
+                        and document.source == "cnyes" and document.kind == "news_cache"
+                        and document.source_ref == f"news:{date.isoformat()}"):
                     for item in items:
-                        item.source_document_id = document_id
+                        item.source_document_id = document.document_id
             finally:
                 registry.close()
         return items

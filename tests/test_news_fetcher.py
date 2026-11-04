@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import datetime as dt
+import json
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from bot.news_fetcher import (
     NewsItem,
     _parse_cnyes_item,
+    _save_cache,
     fetch_today_news,
     load_cached_news_only,
 )
@@ -104,3 +109,49 @@ def test_cnyes_publish_time_is_normalized_to_taipei_timezone() -> None:
     })
     assert item is not None
     assert item.published_at.endswith("+08:00")
+
+
+def test_restored_news_cache_uses_its_exact_source_version(tmp_path, monkeypatch):
+    from bot import news_fetcher
+
+    monkeypatch.setattr(news_fetcher, "mirror_file_to_cloud", lambda *a, **kw: None)
+    monkeypatch.setattr(news_fetcher, "restore_file_from_cloud", lambda *a, **kw: None)
+    day = dt.date(2026, 11, 4)
+    old = [NewsItem(news_id="same-id", title="Original headline")]
+    path = _save_cache(old, day, tmp_path)
+    original_bytes = path.read_bytes()
+    newer = [NewsItem(news_id="same-id", title="Corrected headline")]
+    _save_cache(newer, day, tmp_path)
+    db = StockDB.open(root=tmp_path)
+    try:
+        db.conn.execute("UPDATE source_documents SET retrieved_at=? WHERE document_id=?",
+                        ("2026-11-04T18:00:00+08:00", newer[0].source_document_id))
+        db.conn.commit()
+    finally:
+        db.close()
+
+    path.write_bytes(original_bytes)
+    restored = load_cached_news_only(root=tmp_path, date=day)
+    assert restored[0].title == "Original headline"
+    assert restored[0].source_document_id == old[0].source_document_id
+    assert restored[0].source_document_id != newer[0].source_document_id
+
+
+@pytest.mark.parametrize("embedded_id", [False, True])
+def test_modified_news_cache_cannot_borrow_a_registered_source(tmp_path, monkeypatch, embedded_id):
+    from bot import news_fetcher
+
+    monkeypatch.setattr(news_fetcher, "mirror_file_to_cloud", lambda *a, **kw: None)
+    monkeypatch.setattr(news_fetcher, "restore_file_from_cloud", lambda *a, **kw: None)
+    day = dt.date(2026, 11, 4)
+    items = [NewsItem(news_id="same-id", title="Original headline")]
+    path = _save_cache(items, day, tmp_path)
+    payload = json.loads(path.read_bytes())
+    payload["items"][0]["title"] = "Unregistered change"
+    if embedded_id:
+        payload["items"][0]["source_document_id"] = items[0].source_document_id
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    cached = load_cached_news_only(root=tmp_path, date=day)
+    assert cached[0].title == "Unregistered change"
+    assert cached[0].source_document_id == ""
