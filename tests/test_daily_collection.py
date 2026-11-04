@@ -79,7 +79,8 @@ def test_successful_news_refreshes_within_the_same_market_period(tmp_path, monke
 def test_price_fallback_is_not_a_successful_refresh(tmp_path, monkeypatch):
     now = dt.datetime(2026, 10, 27, 11, tzinfo=dt.timezone(dt.timedelta(hours=8)))
     monkeypatch.setattr(collection, "now_tw", lambda: now)
-    frame = pd.DataFrame([{"date": "2026-10-22", "close": 2385.0}])
+    frame = pd.DataFrame([{"date": "2026-10-22", "open": 2380.0, "high": 2390.0,
+                           "low": 2375.0, "close": 2385.0, "volume": 1234.5}])
     monkeypatch.setattr(collection, "fetch_recent_kline", lambda *a, **kw: frame)
     monkeypatch.setattr(collection, "load_kline_from_db", lambda *a, **kw: frame)
     bar = SimpleNamespace(date="2026-10-22", close=2385.0, source_record_id="source",
@@ -114,7 +115,8 @@ def test_price_collection_reads_real_database_and_registered_raw(tmp_path, monke
     from bot.stock_db import PriceBar, StockDB
     now = dt.datetime(2026, 10, 27, 11, tzinfo=dt.timezone(dt.timedelta(hours=8)))
     monkeypatch.setattr(collection, "now_tw", lambda: now)
-    frame = pd.DataFrame([{"date": "2026-10-22", "close": 2385.0}])
+    frame = pd.DataFrame([{"date": "2026-10-22", "open": 2380.0, "high": 2390.0,
+                           "low": 2375.0, "close": 2385.0, "volume": 1234.5}])
     def fetch(*a, **kw):
         with SourceRegistry(tmp_path) as registry:
             source = registry.capture_document("twse_stock_day", '{"close":2385}',
@@ -122,6 +124,7 @@ def test_price_collection_reads_real_database_and_registered_raw(tmp_path, monke
         db = StockDB.open(root=tmp_path)
         try:
             db.upsert_price_bar(PriceBar(symbol="2330", date="2026-10-22", close=2385.0,
+                open=2380.0, high=2390.0, low=2375.0, volume=1234.5,
                 retrieved_at=now.isoformat(), source_record_id=source.document_id))
         finally:
             db.close()
@@ -133,3 +136,44 @@ def test_price_collection_reads_real_database_and_registered_raw(tmp_path, monke
     raw.write_text("corrupt", encoding="utf-8")
     with pytest.raises(ValueError, match="hash mismatch"):
         collection.verify_source(tmp_path, value["source_document_id"])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("title", "different headline"), ("summary", "different summary"),
+    ("published_at", "2026-11-03T09:00:00+08:00"),
+    ("related_tickers", ["0050"]), ("source_document_id", "other-source"),
+])
+def test_news_readback_detects_content_changes_with_the_same_id(tmp_path, monkeypatch, field, value):
+    from dataclasses import replace
+    from bot.news_fetcher import NewsItem
+
+    item = NewsItem(news_id="1", title="original", source_document_id="source",
+                    published_at="2026-11-04T09:00:00+08:00", related_tickers=["2330"])
+    monkeypatch.setattr(collection, "fetch_today_news", lambda **kw: [item])
+    monkeypatch.setattr(collection, "load_cached_news_only", lambda **kw: [replace(item, **{field: value})])
+    monkeypatch.setattr(collection, "verify_source", lambda *a: None)
+    with pytest.raises(ValueError, match="readback"):
+        collection.collect_news(tmp_path, "2026-11-04")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("open", 2381.0), ("high", 2391.0), ("low", 2374.0),
+    ("volume", 1235.5), ("close", float("nan")), ("high", float("inf")),
+])
+def test_price_readback_checks_every_ohlcv_value(tmp_path, monkeypatch, field, value):
+    now = dt.datetime(2026, 11, 4, 17, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    frame = pd.DataFrame([{"date": "2026-11-04", "open": 2380.0, "high": 2390.0,
+                           "low": 2375.0, "close": 2385.0, "volume": 1234.5}])
+    replay = frame.copy()
+    replay.loc[0, field] = value
+    monkeypatch.setattr(collection, "now_tw", lambda: now)
+    monkeypatch.setattr(collection, "fetch_recent_kline", lambda *a, **kw: frame)
+    monkeypatch.setattr(collection, "load_kline_from_db", lambda *a, **kw: replay)
+    bar = SimpleNamespace(date="2026-11-04", close=2385.0, source_record_id="source",
+                          retrieved_at=now.isoformat())
+    monkeypatch.setattr(collection.StockDB, "open", lambda **kw:
+        SimpleNamespace(get_price_history=lambda *a, **kw: [bar], close=lambda: None))
+    monkeypatch.setattr(collection, "verify_source", lambda *a:
+        SimpleNamespace(url="https://example.test", document_id="source"))
+    with pytest.raises(ValueError, match="disagree"):
+        collection.collect_price(tmp_path, "2330")

@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 
 from bot.news_fetcher import fetch_today_news, load_cached_news_only
 from bot.source_registry import SourceRegistry, resolve_source_document_path
@@ -34,7 +35,7 @@ def verify_source(root, document_id):
 def collect_news(root, date):
     items = fetch_today_news(root=root, limit=200, force_refresh=True)
     cached = load_cached_news_only(root=root, date=dt.date.fromisoformat(date), limit=1000)
-    if not items or [i.news_id for i in items] != [i.news_id for i in cached]:
+    if not items or items != cached:
         raise ValueError("news fetch is empty or cache readback differs")
     ids = sorted({i.source_document_id for i in items})
     if not ids or not all(ids):
@@ -59,6 +60,13 @@ def collect_price(root, ticker):
     replay = cached.iloc[-1]
     if str(last["date"]) != str(replay["date"]) or float(last["close"]) != float(replay["close"]):
         raise ValueError("price cache and database disagree")
+    for field in ("open", "high", "low", "close", "volume"):
+        try:
+            expected, actual = float(last[field]), float(replay[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"price cache and database disagree: missing or invalid {field}") from exc
+        if not math.isfinite(expected) or not math.isfinite(actual) or expected != actual:
+            raise ValueError(f"price cache and database disagree: {field}")
     db = StockDB.open(root=root)
     try:
         bar = db.get_price_history(ticker, limit=1, ascending=False)[0]
