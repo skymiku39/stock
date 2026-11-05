@@ -60,3 +60,13 @@ def test_vendor_aliases_with_identical_financials_count_once():
     sources = [fact(100, '2026-04-01', '2026-06-30')]
     assert input_fingerprint({'ticker': 'AAA', 'sources': sources}) == input_fingerprint(
         {'ticker': 'AAA US', 'sources': sources})
+
+
+def test_tpex_native_valuation_row_matches_issuer_and_research_objective():
+    from bot.verified_research_batch import matching_rows
+    raw = {'SecuritiesCompanyCode': '6488', 'PriceEarningRatio': '27.38', 'PriceBookRatio': '2.79'}
+    assert matching_rows([raw], '6488') == [raw]
+    assert matching_rows([raw], '2330') == []
+    item = {'ticker': '6488', 'sources': [{'source_document_id': 'official-tpex', 'row': raw}]}
+    assert 'valuation' not in analyze(item)['missing']
+    assert 'financial_history' in analyze(item)['missing']

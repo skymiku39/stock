@@ -30,7 +30,7 @@ def backlog(run):
 def matching_rows(raw, ticker):
     if not isinstance(raw, list):
         return []
-    keys = ('公司代號', '證券代號', 'Code')
+    keys = ('公司代號', '證券代號', 'Code', 'SecuritiesCompanyCode')
     return [r for r in raw if isinstance(r, dict) and
             any(str(r.get(k, '')).strip() == ticker for k in keys)]
 

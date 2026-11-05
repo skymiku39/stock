@@ -170,7 +170,8 @@ def analyze(item):
         rows = [s['row'] for s in sources]
         objective('monthly_revenue', any('營業收入-當月營收' in r for r in rows))
         objective('financial_statement', any(('季別' in r or 'Season' in r) for r in rows))
-        objective('valuation', any(number(r.get('PEratio')) is not None or number(r.get('PBratio')) is not None for r in rows))
+        objective('valuation', any(number(r.get(key)) is not None for r in rows
+                                   for key in ('PEratio', 'PBratio', 'PriceEarningRatio', 'PriceBookRatio')))
         objective('revenue_comparison', bool(comparisons))
         objective('financial_history', len({(r.get('年度', r.get('Year')), r.get('季別', r.get('Season')))
                                            for r in rows if '季別' in r or 'Season' in r}) >= 2)
