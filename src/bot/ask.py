@@ -152,6 +152,13 @@ class AskResult:
     def verified(self) -> bool:
         return self.status == "answered" and self.verification.valid
 
+    @property
+    def citations(self) -> List[Dict[str, str]]:
+        cited = set(self.verification.cited_evidence_ids)
+        return [{key: str(item.get(key) or '') for key in
+                 ('id', 'title', 'url', 'as_of', 'source_document_id')}
+                for item in self.evidence.items if item.get('id') in cited]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "query": self.query,
@@ -161,6 +168,7 @@ class AskResult:
             "plan": self.plan.to_dict(),
             "evidence": self.evidence.to_dict(),
             "verification": self.verification.to_dict(),
+            "citations": self.citations,
             "llm_info": self.llm_info,
             "pending_resources": list(self.pending_resources),
             "collection_status": self.evidence.collection_status,
@@ -351,6 +359,28 @@ def derive_ask_status(
     return "uncertain"
 
 
+class _QueuedAskClient:
+    """Wait briefly for the shared model slot without bypassing its circuit."""
+
+    def __init__(self, client, wait_seconds):
+        self.client = client
+        self.wait_seconds = wait_seconds
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def generate_raw(self, prompt, **kwargs):
+        started = time.monotonic()
+        while True:
+            raw, info = self.client.generate_raw(prompt, **kwargs)
+            if info.get('error_kind') != 'busy' or not info.get('deferred'):
+                return raw, info
+            remaining = self.wait_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                return raw, info
+            time.sleep(min(.5, remaining))
+
+
 class AskEngine:
     """以 SQLite 為真實來源的問答執行器。"""
 
@@ -363,11 +393,13 @@ class AskEngine:
         use_llm_planner: bool = True,
         enable_live_sources: Optional[bool] = None,
         live_budget_seconds: float = 8.0,
+        model_wait_seconds: float = 60.0,
     ) -> None:
         self.root = Path(root)
         self._owns_db = db is None
         self.db = db or StockDB.open(root=self.root)
         self.client = client
+        self._model_client = _QueuedAskClient(client, max(0.0, float(model_wait_seconds))) if client else None
         self.use_llm_planner = use_llm_planner
         self.enable_live_sources = (
             bool(enable_live_sources)
@@ -419,7 +451,7 @@ class AskEngine:
             return plan, {}, ""
         raw, info = gemini_call(
             "query_plan",
-            client=self.client,
+            client=self._model_client,
             root=self.root,
             metadata={
                 "task": "query_plan",
@@ -660,7 +692,9 @@ class AskEngine:
                     seen.add(item["id"])
                     items.append(item)
 
-        items = [item for item in items if _evidence_matches_ticker(item, plan.ticker)]
+        from bot.query_scope import matches_query_scope
+        items = [item for item in items if _evidence_matches_ticker(item, plan.ticker)
+                 and matches_query_scope(item, plan.query)]
         selected_items: List[Dict[str, Any]] = []
         selected_ids: set[str] = set()
         # 先滿足使用者明確要求的非 memory 資源，再用剩餘 quota 補充相關
@@ -741,6 +775,8 @@ class AskEngine:
                 continue
             if not any(_evidence_matches_resource(item, resource) for item in pack.usable_items):
                 missing.append(resource)
+        from bot.query_scope import missing_requested_periods
+        missing.extend(missing_requested_periods(pack.usable_items, plan.query))
         warnings = []
         warnings.extend(local_warnings)
         for live_result in live_results:
@@ -818,9 +854,12 @@ class AskEngine:
                 ),
             ))
 
-        bars = self.db.get_price_history(plan.ticker, limit=1, ascending=False)
-        if bars:
-            bar = bars[0]
+        from bot.query_scope import requested_dates, requested_quarters
+        dates = requested_dates(plan.query)
+        bars = ([bar for date in dates for bar in self.db.get_price_history(
+                    plan.ticker, start=date, end=date, ascending=False)]
+                if dates else self.db.get_price_history(plan.ticker, limit=1, ascending=False))
+        for bar in bars:
             if bar.quality_status in {"ok", "partial"}:
                 bar_is_normalized_cache = str(bar.source or "").lower() == "yfinance"
                 items.append(make_evidence(
@@ -833,8 +872,8 @@ class AskEngine:
                     as_of=bar.date,
                     retrieved_at=bar.retrieved_at,
                     excerpt=(
-                        f"{bar.symbol} {bar.date} 開 {bar.open:g} 高 {bar.high:g} "
-                        f"低 {bar.low:g} 收 {bar.close:g} 量 {bar.volume:g}"
+                        f"{bar.symbol} {bar.date} 開 {bar.open:.15g} 高 {bar.high:.15g} "
+                        f"低 {bar.low:.15g} 收 {bar.close:.15g} 量 {bar.volume:.15g} 張"
                     ),
                     quality_status=bar.quality_status,
                     source_document_id=_registered_source_document_id(
@@ -930,9 +969,13 @@ class AskEngine:
                 ))
 
             quarterlies = self.db.get_quarterly_report(plan.ticker)
-            if quarterlies:
+            periods = requested_quarters(plan.query)
+            if periods:
+                quarterlies = [row for row in quarterlies if row.period in periods]
+            for target_period in periods or [None]:
                 quarterly = next(
-                    (row for row in quarterlies if row.quality_status in {"ok", "partial"}),
+                    (row for row in quarterlies if row.quality_status in {"ok", "partial"}
+                     and (target_period is None or row.period == target_period)),
                     None,
                 )
                 if quarterly:
@@ -949,7 +992,9 @@ class AskEngine:
                         url=quarterly.source_url,
                         observed_at=quarterly.source_date or quarterly.period,
                         excerpt=(
-                            f"{quarterly.symbol} {quarterly.period} EPS {quarterly.eps:g}，"
+                            f"{quarterly.symbol} {quarterly.period} "
+                            f"{'年度累計' if '累計' in quarterly.note else '單季' if '單季' in quarterly.note else '期間口徑未註明'} "
+                            f"EPS {quarterly.eps:.15g} 元，營收 {quarterly.revenue:.15g} 新台幣千元，"
                             f"毛利率 {quarterly.gross_margin:g}%、營業利益率 "
                             f"{quarterly.op_margin:g}%、淨利率 {quarterly.net_margin:g}%"
                         ),
@@ -961,7 +1006,9 @@ class AskEngine:
                             "exact" if quarterly_source_id else "unresolved"
                         ),
                         source_document_id=quarterly_source_id,
-                        metadata={"cache_only": not bool(quarterly.source_record_id)},
+                        metadata={"cache_only": not bool(quarterly.source_record_id),
+                                  "period": quarterly.period, "note": quarterly.note,
+                                  "revenue_unit": "TWD_thousand"},
                     ))
 
         # 本地 snapshot adapters（技術／籌碼／ETF／macro／基本面快取）
@@ -1210,7 +1257,7 @@ class AskEngine:
             try:
                 raw, answer_info = gemini_call(
                     "ask_answer",
-                    client=self.client,
+                    client=self._model_client,
                     root=self.root,
                     metadata={
                         "task": "ask_answer",
@@ -1228,11 +1275,11 @@ class AskEngine:
             llm_info["answer"] = answer_info
             payload = extract_json(raw or "")
             verification = verify_answer_payload(payload, pack)
-            if not verification.valid:
+            if not verification.valid and not answer_info.get('error') and not answer_info.get('deferred'):
                 try:
                     repair_raw, repair_info = gemini_call(
                         "ask_answer",
-                        client=self.client,
+                        client=self._model_client,
                         root=self.root,
                         metadata={
                             "task": "ask_answer_repair",

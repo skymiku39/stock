@@ -739,6 +739,19 @@ class MonthlyRevenueAdapter:
         self.root = Path(root)
 
     def collect(self, plan: QueryPlan) -> ResourceResult:
+        from bot.query_scope import requested_months
+        periods = requested_months(plan.query)
+        if not periods:
+            return self._collect_one(plan)
+        results = [self._collect_one(plan, period) for period in periods]
+        return ResourceResult(self.resource_name,
+            evidence=[item for result in results for item in result.evidence],
+            warnings=[warning for result in results for warning in result.warnings],
+            status='ok' if all(result.status == 'ok' for result in results) else 'partial',
+            metadata={'requested_periods': periods},
+            elapsed_ms=sum(result.elapsed_ms for result in results))
+
+    def _collect_one(self, plan: QueryPlan, year_month: str = '') -> ResourceResult:
         started = time.monotonic()
         if "fundamental" not in (plan.resource_needs or []):
             return ResourceResult(
@@ -759,7 +772,7 @@ class MonthlyRevenueAdapter:
             db = StockDB.open(root=self.root)
             try:
                 revenues = [
-                    row for row in db.get_monthly_revenue(plan.ticker)
+                    row for row in db.get_monthly_revenue(plan.ticker, year_month or None)
                     if row.quality_status in {"ok", "partial"}
                 ]
                 if not revenues:
@@ -884,8 +897,8 @@ class MonthlyRevenueAdapter:
 
                 excerpt = (
                     f"{revenue.symbol} {revenue.year_month} 月營收 "
-                    f"{revenue.revenue:g}（新台幣千元），"
-                    f"YoY {revenue.yoy_pct:+g}%、MoM {revenue.mom_pct:+g}%"
+                    f"{revenue.revenue:.15g}（新台幣千元），"
+                    f"YoY {revenue.yoy_pct:+.15g}%、MoM {revenue.mom_pct:+.15g}%"
                 )
                 packet = make_evidence(
                     "monthly_revenue",

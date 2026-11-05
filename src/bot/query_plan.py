@@ -271,7 +271,9 @@ def plan_query(
     normalized = re.sub(r"\s+", " ", original)
     detected = (ticker or "").strip().upper()
     if not detected:
-        match = TICKER_RE.search(normalized)
+        # Calendar years placed before the symbol are not stock codes.
+        without_periods = re.sub(r'(?<!\d)(?:19|20)\d{2}(?=\s*(?:年|[-/]|[Qq][1-4]))', '', normalized)
+        match = TICKER_RE.search(without_periods)
         detected = match.group(1).upper() if match else ""
     keywords = _extract_keywords(normalized, detected)
     needs, planner_required, planner_reason = _resource_needs(normalized, detected)

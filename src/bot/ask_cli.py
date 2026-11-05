@@ -69,6 +69,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
             else:
                 print(result.answer)
+                for citation in result.citations:
+                    if citation['url']:
+                        print(f"來源：{citation['title']} {citation['url']}")
                 print(f"status={result.status} trace_id={result.trace_id}")
                 print(f"evidence={len(result.evidence.usable_items)} plan={result.plan.plan_id}")
                 if result.verification.errors:

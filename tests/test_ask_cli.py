@@ -15,6 +15,7 @@ def test_ask_cli_passes_explicit_root_to_engine(monkeypatch, tmp_path, capsys) -
         def ask(self, query, **kwargs):
             return SimpleNamespace(
                 answer="ok",
+                citations=[{'title': '2330 日 K 2026-11-05', 'url': 'https://www.twse.com.tw/'}],
                 status="ok",
                 trace_id="trace-test",
                 evidence=SimpleNamespace(usable_items=[]),
