@@ -443,6 +443,12 @@ class Scheduler:
         """Apply the same due/window/idempotence rules to daemon and --once runs."""
         if job.is_running():
             return False
+        if job.name == "research":
+            from bot.model_recovery import refresh_blocked_model
+            recovered_at = refresh_blocked_model(self.project_root, self.settings)
+            if recovered_at > job.last_run_epoch:
+                job.last_run_epoch = 0
+                job.next_retry_epoch = 0
         if job.run_once_per_day:
             if not self._job_in_window(job, now):
                 return False

@@ -175,6 +175,8 @@ class GeminiClient:
             return None, meta
 
         if self._mode == "codex_app_server":
+            from bot.model_recovery import refresh_blocked_model
+            refresh_blocked_model(Path(getattr(self._client, "cwd", None) or Path.cwd()), self.settings)
             text, codex_meta = self._client.generate(prompt)
             meta.update(codex_meta)
             return (text if text and "error" not in codex_meta else None), meta
