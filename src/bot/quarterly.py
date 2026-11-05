@@ -147,8 +147,10 @@ def cumulative_eps(items: Dict[int, QuarterlyFinancials], last_q: int) -> Option
     anchor = max(anchors, default=0)
     if any(q not in items for q in range(anchor + 1, last_q + 1)):
         return None
-    total = items[anchor].eps if anchor else 0.0
-    return round(total + sum(items[q].eps for q in range(anchor + 1, last_q + 1)), 2)
+    values = ([items[anchor].eps] if anchor else []) + [items[q].eps for q in range(anchor + 1, last_q + 1)]
+    if any(value is None for value in values):
+        return None
+    return round(sum(values), 2)
 
 
 def rolling_eps_series(quarterlies: List[QuarterlyFinancials]) -> List[RollingEpsPoint]:

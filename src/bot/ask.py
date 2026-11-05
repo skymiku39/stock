@@ -56,6 +56,10 @@ from bot.utils import now_tw
 
 UNCERTAIN_ANSWER = "我不確定，目前沒有足夠的可驗證資料。"
 
+
+def _financial_value(label, value, unit):
+    return f'{label} {value:.15g}{unit}' if value is not None else f'{label}未提供／不適用'
+
 # 最終 AskResult.status；collection 與回答結果分離。
 ASK_STATUSES = {
     "answered",
@@ -994,9 +998,11 @@ class AskEngine:
                         excerpt=(
                             f"{quarterly.symbol} {quarterly.period} "
                             f"{'年度累計' if '累計' in quarterly.note else '單季' if '單季' in quarterly.note else '期間口徑未註明'} "
-                            f"EPS {quarterly.eps:.15g} 元，營收 {quarterly.revenue:.15g} 新台幣千元，"
-                            f"毛利率 {quarterly.gross_margin:g}%、營業利益率 "
-                            f"{quarterly.op_margin:g}%、淨利率 {quarterly.net_margin:g}%"
+                            + '，'.join((_financial_value('EPS', quarterly.eps, ' 元'),
+                                        _financial_value('營收', quarterly.revenue, ' 新台幣千元'),
+                                        _financial_value('毛利率', quarterly.gross_margin, '%'),
+                                        _financial_value('營業利益率', quarterly.op_margin, '%'),
+                                        _financial_value('淨利率', quarterly.net_margin, '%')))
                         ),
                         # 使用 canonical 列的 retrieved_at；缺值保持空白，
                         # 不可把 ask 當下時間當成舊快取列的擷取證據。

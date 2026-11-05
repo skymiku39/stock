@@ -60,8 +60,8 @@ def _supported(snippet: str, text: str) -> bool:
     return bool(_normalize(snippet)) and _normalize(snippet) in _normalize(text)
 
 
-def _number(value: float) -> float:
-    return float(value or 0.0)
+def _number(value: Optional[float]) -> Optional[float]:
+    return float(value) if value is not None else None
 
 
 def _payload(report: QuarterlyReport, source_document_id: str) -> Dict[str, Any]:
@@ -101,7 +101,7 @@ def _claims(payload: Dict[str, Any]) -> List[Dict[str, str]]:
 
     symbol = str(payload["symbol"])
     period = str(payload["period"])
-    return [
+    claims = [
         {"text": f"{symbol} 季報期間為 {period}", "snippet": fragment("period")},
         {"text": f"{symbol} {period} EPS 為 {payload['eps']} 元（{payload['period_basis']}）", "snippet": fragment("eps")},
         {"text": f"{symbol} {period} 期間營收為 {payload['revenue']} 千元（{payload['period_basis']}）", "snippet": fragment("revenue")},
@@ -109,6 +109,7 @@ def _claims(payload: Dict[str, Any]) -> List[Dict[str, str]]:
         {"text": f"{symbol} {period} 營業利益率為 {payload['op_margin']}%", "snippet": fragment("op_margin")},
         {"text": f"{symbol} {period} 淨利率為 {payload['net_margin']}%", "snippet": fragment("net_margin")},
     ]
+    return [claim for claim in claims if ': null' not in claim['snippet']]
 
 
 def _raw_is_replayable(root: Path, db: StockDB, source_document_id: str) -> tuple[bool, str]:
@@ -199,6 +200,13 @@ def materialize_quarterly_slice(
         )
         persist_evidence_items(database, [evidence])
         evidence_id = str(evidence["id"])
+        # Retain audit history, but an older materialization must not compete
+        # with corrected facts (including absent fields previously stored as 0).
+        with database.transaction() as conn:
+            conn.execute("UPDATE evidence_items SET quality_status='superseded' "
+                         "WHERE kind='quarterly_report' AND source=? AND source_ref=? "
+                         "AND evidence_id<>? AND retrieved_at<=?",
+                         (SOURCE_NAME, f'{report.symbol}:{report.period}', evidence_id, report.retrieved_at))
 
         run_id = "quarterly-slice:" + hashlib.sha256(
             f"{source_document_id}|{report.symbol}|{report.period}|{text}".encode("utf-8")

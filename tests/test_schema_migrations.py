@@ -14,7 +14,7 @@ def test_legacy_database_upgrade_preserves_rows_and_receipts(tmp_path):
         conn.execute("INSERT INTO schema_migrations VALUES (1,'historical','original-checksum','old-time')")
     db = StockDB.open(path=path)
     assert db.get_watch("2330").note == "keep"
-    assert db.latest_schema_version() == 6
+    assert db.latest_schema_version() == 9
     assert dict(db.conn.execute("SELECT * FROM schema_migrations WHERE version=1").fetchone())["checksum"] == "original-checksum"
     receipt = db.schema_migrations()
     db.close()

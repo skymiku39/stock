@@ -895,10 +895,12 @@ class MonthlyRevenueAdapter:
                         live=False,
                     )
 
+                def growth(label, value):
+                    return f'{label} {value:+.15g}%' if value is not None else f'{label}未提供／無可比較基期'
                 excerpt = (
                     f"{revenue.symbol} {revenue.year_month} 月營收 "
                     f"{revenue.revenue:.15g}（新台幣千元），"
-                    f"YoY {revenue.yoy_pct:+.15g}%、MoM {revenue.mom_pct:+.15g}%"
+                    + growth('YoY', revenue.yoy_pct) + '、' + growth('MoM', revenue.mom_pct)
                 )
                 packet = make_evidence(
                     "monthly_revenue",

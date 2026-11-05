@@ -293,21 +293,25 @@ def _format_fundamentals_quant(fund: Any) -> List[str]:
             streak = int(fund.revenue_yoy_streak())
         except Exception:
             streak = 0
+        def growth(value):
+            return f'{value:+.1f}%' if value is not None else '未提供／無可比較基期'
         lines.append(
             f"- 月營收 {latest_rev.year}/{latest_rev.month:02d}: "
-            f"YoY={latest_rev.yoy:+.1f}% MoM={latest_rev.mom:+.1f}% "
-            f"累計YoY={latest_rev.cum_yoy:+.1f}% "
+            f"YoY={growth(latest_rev.yoy)} MoM={growth(latest_rev.mom)} "
+            f"累計YoY={growth(latest_rev.cum_yoy)} "
             f"(連續 YoY>0：{streak} 月)"
         )
     qs = list(getattr(fund, "quarterlies", None) or [])
     if qs:
         latest_q = sorted(qs, key=lambda q: (q.year, q.quarter))[-1]
+        def metric(value, digits, unit=''):
+            return f'{value:.{digits}f}{unit}' if value is not None else '未提供／不適用'
         lines.append(
             f"- 季報 {latest_q.year}Q{latest_q.quarter}: "
-            f"EPS={latest_q.eps:.2f} "
-            f"毛利率={latest_q.gross_margin:.1f}% "
-            f"營益率={latest_q.operating_margin:.1f}% "
-            f"淨利率={latest_q.net_margin:.1f}%"
+            f"EPS={metric(latest_q.eps, 2)} "
+            f"毛利率={metric(latest_q.gross_margin, 1, '%')} "
+            f"營益率={metric(latest_q.operating_margin, 1, '%')} "
+            f"淨利率={metric(latest_q.net_margin, 1, '%')}"
         )
     divs = list(getattr(fund, "dividends", None) or [])
     if divs:

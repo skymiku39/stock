@@ -16,6 +16,30 @@ MIGRATIONS = (
         "ALTER TABLE watchlist ADD COLUMN restored_from TEXT NOT NULL DEFAULT ''",
         "CREATE TABLE watchlist_state (id INTEGER PRIMARY KEY CHECK(id = 1), initialized_at TEXT NOT NULL)",
     )),
+    (8, "quarterly-unreported-values-remain-null", (
+        """CREATE TABLE quarterly_report_nullable (
+            symbol TEXT NOT NULL, period TEXT NOT NULL,
+            eps REAL, revenue REAL, gross_margin REAL, op_margin REAL, net_margin REAL,
+            note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '', source_date TEXT NOT NULL DEFAULT '',
+            retrieved_at TEXT NOT NULL DEFAULT '', quality_status TEXT NOT NULL DEFAULT 'unknown',
+            source_record_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (symbol, period))""",
+        "INSERT INTO quarterly_report_nullable SELECT symbol,period,eps,revenue,gross_margin,op_margin,net_margin,note,updated_at,source_url,source_date,retrieved_at,quality_status,source_record_id FROM quarterly_report",
+        "DROP TABLE quarterly_report",
+        "ALTER TABLE quarterly_report_nullable RENAME TO quarterly_report",
+    )),
+    (9, "unreported-monthly-growth-remains-null", (
+        """CREATE TABLE monthly_revenue_nullable (
+            symbol TEXT NOT NULL, year_month TEXT NOT NULL, revenue REAL NOT NULL DEFAULT 0,
+            yoy_pct REAL, mom_pct REAL, cumulative REAL NOT NULL DEFAULT 0, cum_yoy_pct REAL,
+            note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '', source_date TEXT NOT NULL DEFAULT '',
+            retrieved_at TEXT NOT NULL DEFAULT '', quality_status TEXT NOT NULL DEFAULT 'unknown',
+            source_record_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (symbol, year_month))""",
+        "INSERT INTO monthly_revenue_nullable SELECT symbol,year_month,revenue,yoy_pct,mom_pct,cumulative,cum_yoy_pct,note,updated_at,source_url,source_date,retrieved_at,quality_status,source_record_id FROM monthly_revenue",
+        "DROP TABLE monthly_revenue",
+        "ALTER TABLE monthly_revenue_nullable RENAME TO monthly_revenue",
+    )),
 )
 
 

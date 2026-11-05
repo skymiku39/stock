@@ -187,10 +187,10 @@ class MonthlyRevenue:
     symbol: str
     year_month: str              # "2026-04"，PK 之一
     revenue: float = 0.0         # 月營收 (新台幣千元)
-    yoy_pct: float = 0.0         # 年增率 %
-    mom_pct: float = 0.0         # 月增率 %
+    yoy_pct: Optional[float] = None         # 年增率 %
+    mom_pct: Optional[float] = None         # 月增率 %
     cumulative: float = 0.0      # 累計營收
-    cum_yoy_pct: float = 0.0
+    cum_yoy_pct: Optional[float] = None
     note: str = ""
     updated_at: str = ""
     source_url: str = ""
@@ -247,11 +247,11 @@ class QuarterlyReport:
 
     symbol: str
     period: str                  # "2026Q1"，PK 之一
-    eps: float = 0.0
-    revenue: float = 0.0         # 季營收
-    gross_margin: float = 0.0    # 毛利率 %
-    op_margin: float = 0.0       # 營業利益率 %
-    net_margin: float = 0.0      # 淨利率 %
+    eps: Optional[float] = None
+    revenue: Optional[float] = None         # 期間營收；缺值不代表零
+    gross_margin: Optional[float] = None    # 毛利率 %
+    op_margin: Optional[float] = None       # 營業利益率 %
+    net_margin: Optional[float] = None      # 淨利率 %
     note: str = ""
     updated_at: str = ""
     source_url: str = ""

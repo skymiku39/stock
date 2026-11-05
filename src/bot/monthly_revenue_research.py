@@ -97,6 +97,10 @@ def _format_number(value: float) -> str:
     return text or "0"
 
 
+def _nullable_number(value):
+    return float(value) if value is not None else None
+
+
 def year_month_from_parts(year: int, month: int) -> str:
     return f"{int(year):04d}-{int(month):02d}"
 
@@ -123,10 +127,10 @@ def build_canonical_payload(
         "revenue": float(revenue),
         "revenue_unit": REVENUE_UNIT,
         "revenue_unit_label": REVENUE_UNIT_LABEL,
-        "yoy_pct": float(yoy_pct),
-        "mom_pct": float(mom_pct),
+        "yoy_pct": _nullable_number(yoy_pct),
+        "mom_pct": _nullable_number(mom_pct),
         "cumulative": float(cumulative),
-        "cum_yoy_pct": float(cum_yoy_pct),
+        "cum_yoy_pct": _nullable_number(cum_yoy_pct),
         "source_document_id": str(source_document_id),
         "retrieved_at": str(retrieved_at or ""),
         "published_at": str(published_at or ""),
@@ -153,7 +157,7 @@ def _extractive_claims(payload: Mapping[str, Any]) -> List[Dict[str, str]]:
     def _json_fragment(key: str, value: Any) -> str:
         return f"{json.dumps(key, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}"
 
-    return [
+    claims = [
         {
             "claim_type": "source_fact",
             "text": (
@@ -165,12 +169,12 @@ def _extractive_claims(payload: Mapping[str, Any]) -> List[Dict[str, str]]:
         {
             "claim_type": "source_fact",
             "text": f"{symbol} {year_month} 營收年增率 YoY {yoy}%",
-            "snippet": _json_fragment("yoy_pct", float(payload.get("yoy_pct") or 0)),
+            "snippet": _json_fragment("yoy_pct", payload.get("yoy_pct")),
         },
         {
             "claim_type": "source_fact",
             "text": f"{symbol} {year_month} 營收月增率 MoM {mom}%",
-            "snippet": _json_fragment("mom_pct", float(payload.get("mom_pct") or 0)),
+            "snippet": _json_fragment("mom_pct", payload.get("mom_pct")),
         },
         {
             "claim_type": "source_fact",
@@ -183,6 +187,7 @@ def _extractive_claims(payload: Mapping[str, Any]) -> List[Dict[str, str]]:
             "snippet": _json_fragment("revenue_unit_label", unit),
         },
     ]
+    return [claim for claim in claims if ': null' not in claim['snippet']]
 
 
 def _parse_iso_ts(value: str) -> str:
@@ -377,10 +382,10 @@ def materialize_monthly_revenue_slice(
             symbol=sym,
             year_month=ym,
             revenue=float(revenue),
-            yoy_pct=float(yoy_pct),
-            mom_pct=float(mom_pct),
+            yoy_pct=_nullable_number(yoy_pct),
+            mom_pct=_nullable_number(mom_pct),
             cumulative=float(cumulative),
-            cum_yoy_pct=float(cum_yoy_pct),
+            cum_yoy_pct=_nullable_number(cum_yoy_pct),
             source_document_id=source_document_id,
             retrieved_at=retrieved,
             published_at=published,
@@ -447,10 +452,10 @@ def materialize_monthly_revenue_slice(
             symbol=sym,
             year_month=ym,
             revenue=float(revenue),
-            yoy_pct=float(yoy_pct),
-            mom_pct=float(mom_pct),
+            yoy_pct=_nullable_number(yoy_pct),
+            mom_pct=_nullable_number(mom_pct),
             cumulative=float(cumulative),
-            cum_yoy_pct=float(cum_yoy_pct),
+            cum_yoy_pct=_nullable_number(cum_yoy_pct),
             note=f"unit={REVENUE_UNIT};pipeline={PIPELINE}",
             source_url=str(payload["source_url"]),
             source_date=published,
@@ -510,6 +515,11 @@ def materialize_monthly_revenue_slice(
         )
         evidence_id = str(evidence_packet["id"])
         persist_evidence_items(database, [evidence_packet])
+        with database.transaction() as conn:
+            conn.execute("UPDATE evidence_items SET quality_status='superseded' "
+                         "WHERE kind='monthly_revenue' AND source=? AND source_ref=? "
+                         "AND evidence_id<>? AND retrieved_at<=?",
+                         (SOURCE_NAME, f'{sym}:{ym}', evidence_id, retrieved))
 
         now = now_tw().isoformat(timespec="seconds")
         database.upsert_llm_run(LlmRunRow(

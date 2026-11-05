@@ -109,10 +109,10 @@ class MonthlyRevenue:
     month: int = 0
     revenue: float = 0.0           # 當月營收（千元）
     revenue_last_year: float = 0.0  # 去年同期
-    yoy: float = 0.0               # 年增率 %
-    mom: float = 0.0               # 月增率 %
+    yoy: Optional[float] = None               # 年增率 %
+    mom: Optional[float] = None               # 月增率 %
     cum_revenue: float = 0.0       # 累計營收
-    cum_yoy: float = 0.0           # 累計年增率
+    cum_yoy: Optional[float] = None           # 累計年增率
 
 
 @dataclass
@@ -160,13 +160,13 @@ class QuarterlyFinancials:
     ticker: str
     year: int = 0
     quarter: int = 0                 # 1-4
-    eps: float = 0.0
-    gross_margin: float = 0.0        # %
-    operating_margin: float = 0.0
-    net_margin: float = 0.0
-    revenue: float = 0.0
-    operating_income: float = 0.0
-    net_income: float = 0.0
+    eps: Optional[float] = None
+    gross_margin: Optional[float] = None        # %；未提供／不適用保持缺值
+    operating_margin: Optional[float] = None
+    net_margin: Optional[float] = None
+    revenue: Optional[float] = None
+    operating_income: Optional[float] = None
+    net_income: Optional[float] = None
     roe: Optional[float] = None
     note: str = ""
     # exact raw provenance；舊手動匯入資料可保持空白，不猜來源。
@@ -213,7 +213,7 @@ class FundamentalSnapshot:
             ordinal = r.year * 12 + r.month
             if previous is not None and ordinal != previous - 1:
                 break
-            if r.yoy > 0:
+            if r.yoy is not None and r.yoy > 0:
                 streak += 1
                 previous = ordinal
             else:
@@ -588,10 +588,10 @@ def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
         month=month,
         revenue=revenue,
         revenue_last_year=_to_float(pick(last_year_keys)),
-        yoy=_to_float(pick(yoy_keys)),
-        mom=_to_float(pick(mom_keys)),
+        yoy=_financial_number(pick(yoy_keys)),
+        mom=_financial_number(pick(mom_keys)),
         cum_revenue=_to_float(pick(cum_keys)),
-        cum_yoy=_to_float(pick(cum_yoy_keys)),
+        cum_yoy=_financial_number(pick(cum_yoy_keys)),
     )
 
 
@@ -1376,6 +1376,15 @@ def _pick_key(raw: Dict[str, Any], includes: List[str], excludes: Optional[List[
     return None
 
 
+def _financial_number(value):
+    """An absent financial field is unknown, while an explicit zero is a fact."""
+    try:
+        number = float(str(value).replace(',', '').strip())
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_quarterly_raw(raw: Dict[str, Any], ticker: str) -> Optional[Dict[str, Any]]:
     """把一筆綜合損益表轉成累計 (cumulative) 原始值 dict。
 
@@ -1398,14 +1407,14 @@ def _parse_quarterly_raw(raw: Dict[str, Any], ticker: str) -> Optional[Dict[str,
 
     # 營業收入只在「一般業 / 保險業」有意義；金融、證券、金控以淨收益概念呈現，
     # 為避免毛利率/營益率誤導，僅在抓得到 "營業收入" 時計算三率。
-    revenue = _to_float(_pick_key(raw, ["營業收入"], excludes=["外"]))
-    gross = _to_float(raw.get("營業毛利（毛損）淨額", _pick_key(raw, ["營業毛利"])))
-    op_income = _to_float(_pick_key(raw, ["營業利益"]))
+    revenue = _financial_number(_pick_key(raw, ["營業收入"], excludes=["外"]))
+    gross = _financial_number(raw.get("營業毛利（毛損）淨額", _pick_key(raw, ["營業毛利"])))
+    op_income = _financial_number(_pick_key(raw, ["營業利益"]))
     # 本期淨利：排除「繼續營業單位」「綜合損益」「歸屬」等變體
-    net_income = _to_float(
+    net_income = _financial_number(
         _pick_key(raw, ["本期淨利", "本期稅後淨利"], excludes=["繼續", "綜合", "歸屬"])
     )
-    eps = _to_float(_pick_key(raw, ["每股盈餘"]))
+    eps = _financial_number(_pick_key(raw, ["每股盈餘"]))
 
     return {
         "year": year,
@@ -1437,15 +1446,22 @@ def _decumulate_quarterlies(
         by_year.setdefault(int(r["year"]), {})[int(r["quarter"])] = r
 
     out: List[QuarterlyFinancials] = []
+    def delta(current, prior):
+        return current - prior if current is not None and prior is not None else None
+
+    def ratio(numerator, denominator):
+        return round(100.0 * numerator / denominator, 2) if numerator is not None and denominator not in (None, 0) else None
+
     for year, quarters in by_year.items():
         for q, rec in quarters.items():
             prev = quarters.get(q - 1) if q > 1 else None
             if prev is not None:
-                rev = rec["cum_revenue"] - prev["cum_revenue"]
-                gross = rec["cum_gross"] - prev["cum_gross"]
-                op_income = rec["cum_op_income"] - prev["cum_op_income"]
-                net_income = rec["cum_net_income"] - prev["cum_net_income"]
-                eps = round(rec["cum_eps"] - prev["cum_eps"], 2)
+                rev = delta(rec["cum_revenue"], prev["cum_revenue"])
+                gross = delta(rec["cum_gross"], prev["cum_gross"])
+                op_income = delta(rec["cum_op_income"], prev["cum_op_income"])
+                net_income = delta(rec["cum_net_income"], prev["cum_net_income"])
+                eps_delta = delta(rec["cum_eps"], prev["cum_eps"])
+                eps = round(eps_delta, 2) if eps_delta is not None else None
                 note = "公開資料自動 (單季)"
             else:
                 # 上一季累計缺漏：Q1 為單季；Q2~Q4 缺前季時只能先用累計值
@@ -1453,12 +1469,12 @@ def _decumulate_quarterlies(
                 gross = rec["cum_gross"]
                 op_income = rec["cum_op_income"]
                 net_income = rec["cum_net_income"]
-                eps = round(rec["cum_eps"], 2)
+                eps = round(rec["cum_eps"], 2) if rec["cum_eps"] is not None else None
                 note = "公開資料自動 (單季)" if q == 1 else "公開資料自動 (累計，缺前季)"
 
-            gross_margin = round(100.0 * gross / rev, 2) if rev > 0 else 0.0
-            operating_margin = round(100.0 * op_income / rev, 2) if rev > 0 else 0.0
-            net_margin = round(100.0 * net_income / rev, 2) if rev > 0 else 0.0
+            gross_margin = ratio(gross, rev)
+            operating_margin = ratio(op_income, rev)
+            net_margin = ratio(net_income, rev)
 
             out.append(QuarterlyFinancials(
                 ticker=ticker,
