@@ -191,8 +191,9 @@ class IntradayBacktester:
         if st.position is None:
             return None
         entry_price, qty, unit, entry_ts = st.position
+        tax = 0.001 if symbol == '0050' else self.settings.day_trade_tax_rate
         pnl_pct = position_net_pnl_pct(
-            entry_price, price, qty, unit, settings=self.settings,
+            entry_price, price, qty, unit, settings=self.settings, sell_tax_rate=tax,
         )
         if pnl_pct > st.peak_net_pnl:
             st.peak_net_pnl = pnl_pct
@@ -216,7 +217,7 @@ class IntradayBacktester:
         if not reason:
             return None
 
-        pnl_twd = net_pnl_twd(entry_price, price, qty, unit, settings=self.settings)
+        pnl_twd = net_pnl_twd(entry_price, price, qty, unit, settings=self.settings, sell_tax_rate=tax)
         trade = BacktestTrade(
             symbol=symbol,
             trade_date=intraday_ts_to_datetime(ts_str).date().isoformat(),

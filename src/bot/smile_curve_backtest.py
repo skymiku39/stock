@@ -210,6 +210,7 @@ class SmileCurveBacktester:
                 for order in orders:
                     log = {k: v for k, v in order.items() if k != "lot"}
                     log.update(symbol=sym, execution_date=date, status="cancelled", filled_quantity=0)
+                    log['unit'] = order['lot'].unit if order['side'] == 'sell' else ('share' if self.settings.use_odd_lot else 'lot')
                     out.orders.append(log)
                     if not valid(bar.open):
                         log["reason"] = "invalid_open"

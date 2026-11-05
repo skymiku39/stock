@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -67,6 +68,11 @@ class DailyBacktester:
     ) -> Optional[float]:
         if prev_close <= 0:
             return None
+        prices = (bar.open, bar.high, bar.low, bar.close)
+        if any(not math.isfinite(float(value)) or float(value) <= 0 for value in prices):
+            return None
+        if bar.low > min(bar.open, bar.close) or bar.high < max(bar.open, bar.close):
+            return None
         lo, hi = resolve_entry_range(symbol, self.settings)
         pct_open = 100.0 * (bar.open - prev_close) / prev_close
         pct_high = 100.0 * (bar.high - prev_close) / prev_close
@@ -80,6 +86,8 @@ class DailyBacktester:
             return None
         pct_entry = 100.0 * (entry - prev_close) / prev_close
         if pct_entry > hi:
+            return None
+        if not bar.low <= entry <= bar.high:
             return None
         return entry
 
@@ -99,19 +107,20 @@ class DailyBacktester:
             return None
 
         pct_entry = 100.0 * (entry - prev_close) / prev_close
+        tax = 0.001 if symbol == '0050' else self.settings.day_trade_tax_rate
         st = _DaySim(entry_price=entry, qty=qty, unit=unit)
         exit_price = float(bar.close)
         reason = "close"
 
         for px in (float(bar.high), float(bar.low), float(bar.close)):
             pnl = position_net_pnl_pct(
-                entry, px, qty, unit, settings=self.settings,
+                entry, px, qty, unit, settings=self.settings, sell_tax_rate=tax,
             )
             if pnl > st.peak_pnl:
                 st.peak_pnl = pnl
 
         pnl_low = position_net_pnl_pct(
-            entry, float(bar.low), qty, unit, settings=self.settings,
+            entry, float(bar.low), qty, unit, settings=self.settings, sell_tax_rate=tax,
         )
         if pnl_low <= self.settings.stop_loss_pct:
             exit_price = float(bar.low)
@@ -119,14 +128,14 @@ class DailyBacktester:
         elif (
             st.peak_pnl >= self.settings.take_profit_pct
             and (st.peak_pnl - position_net_pnl_pct(
-                entry, float(bar.close), qty, unit, settings=self.settings,
+                entry, float(bar.close), qty, unit, settings=self.settings, sell_tax_rate=tax,
             )) >= self.settings.trailing_stop_pct
         ):
             exit_price = float(bar.close)
             reason = "trail"
         else:
             pnl_high = position_net_pnl_pct(
-                entry, float(bar.high), qty, unit, settings=self.settings,
+                entry, float(bar.high), qty, unit, settings=self.settings, sell_tax_rate=tax,
             )
             if (
                 st.peak_pnl >= self.settings.take_profit_pct
@@ -136,9 +145,9 @@ class DailyBacktester:
                 reason = "trail"
 
         pnl_pct = position_net_pnl_pct(
-            entry, exit_price, qty, unit, settings=self.settings,
+            entry, exit_price, qty, unit, settings=self.settings, sell_tax_rate=tax,
         )
-        pnl_twd = net_pnl_twd(entry, exit_price, qty, unit, settings=self.settings)
+        pnl_twd = net_pnl_twd(entry, exit_price, qty, unit, settings=self.settings, sell_tax_rate=tax)
         return BacktestTrade(
             symbol=symbol,
             trade_date=trade_date,
@@ -165,14 +174,19 @@ class DailyBacktester:
     ) -> SymbolBacktestResult:
         bars = db.get_price_history(symbol, start=start, end=end, ascending=True)
         result = SymbolBacktestResult(symbol=symbol, bar_count=len(bars))
-        if len(bars) < 2:
+        previous = []
+        if bars and start:
+            prior_end = (dt.date.fromisoformat(bars[0].date[:10]) - dt.timedelta(days=1)).isoformat()
+            previous = db.get_price_history(symbol, end=prior_end, limit=1, ascending=False)
+        if len(bars) + len(previous) < 2:
             result.skip_reason = "no_daily_bars"
             return result
 
-        result.bar_days = len(bars) - 1
-        for i in range(1, len(bars)):
-            prev_bar = bars[i - 1]
-            bar = bars[i]
+        replay = previous + bars
+        result.bar_days = len(replay) - 1
+        for i in range(1, len(replay)):
+            prev_bar = replay[i - 1]
+            bar = replay[i]
             prev_close = float(prev_bar.close)
             if prev_close <= 0:
                 continue
