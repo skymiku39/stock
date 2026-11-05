@@ -55,7 +55,7 @@ from typing import Dict, List, Literal, Optional, Set, Tuple
 EntryKind = Literal["enter", "reenter", "rebuy"]
 
 from bot.models import QtyUnit, qty_multiplier
-from bot.trade_cost import buy_cash_required, max_affordable_qty, net_pnl_twd
+from bot.trade_cost import buy_cash_required, max_affordable_qty, sell_cash_received
 
 from bot.utils import get_logger, now_tw
 
@@ -91,6 +91,8 @@ class DailyState:
     blocked_attempts: List[Dict[str, str]] = field(default_factory=list)
     fund_used: float = 0.0
     open_positions: int = 0
+    position_costs: Dict[str, float] = field(default_factory=dict)
+    position_shares: Dict[str, int] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------
@@ -127,6 +129,7 @@ class RiskGuard:
         self.state = self._load_today_state()
         self._fund_used = float(self.state.fund_used)
         self._open_positions = int(self.state.open_positions)
+        self._open_symbols = set(self.state.position_shares)
         from bot.ownership import effective_trading_blacklist
 
         self._blacklist = effective_trading_blacklist(settings)
@@ -145,6 +148,19 @@ class RiskGuard:
         today_iso = now_tw().date().isoformat()
         p = self._state_path()
         if not p.exists():
+            # Daily counters reset; acquisition costs of overnight holdings do not.
+            prior = sorted(path for path in self.data_dir.glob(f'{DAILY_STATE_PREFIX}*.json')
+                           if path.name < p.name)
+            if prior:
+                try:
+                    data = json.loads(prior[-1].read_text(encoding='utf-8'))
+                    costs = {k: float(v) for k, v in data.get('position_costs', {}).items()}
+                    shares = {k: int(v) for k, v in data.get('position_shares', {}).items()}
+                    if costs and costs.keys() == shares.keys():
+                        return DailyState(date=today_iso, position_costs=costs, position_shares=shares,
+                                          fund_used=sum(costs.values()), open_positions=len(shares))
+                except (OSError, ValueError, TypeError):
+                    self.logger.warning('無法讀取前日持倉成本', exc_info=True)
             return DailyState(date=today_iso)
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -160,6 +176,8 @@ class RiskGuard:
                 blocked_attempts=data.get("blocked_attempts", []),
                 fund_used=float(data.get("fund_used", 0.0)),
                 open_positions=int(data.get("open_positions", 0)),
+                position_costs={k: float(v) for k, v in data.get("position_costs", {}).items()},
+                position_shares={k: int(v) for k, v in data.get("position_shares", {}).items()},
             )
         except Exception as e:
             self.logger.warning("讀取風控狀態失敗，重設今日狀態: %s", e)
@@ -647,6 +665,8 @@ class RiskGuard:
             self._pending_exposure.pop(symbol, None)
             cost = buy_cash_required(price, lots, unit, settings=self.settings)
             self._fund_used += cost
+            self.state.position_costs[symbol] = self.state.position_costs.get(symbol, 0.0) + cost
+            self.state.position_shares[symbol] = self.state.position_shares.get(symbol, 0) + lots * qty_multiplier(unit)
             if symbol not in self._open_symbols:
                 self._open_symbols.add(symbol)
             self._open_positions = len(self._open_symbols)
@@ -671,21 +691,36 @@ class RiskGuard:
         unit: QtyUnit = "lot",
         position_closed: bool = False,
         sell_tax_rate: Optional[float] = None,
-    ) -> None:
+    ) -> float:
         """成交 (賣出) 後呼叫；自動累計實現損益。"""
         with self._lock:
             released = buy_cash_required(
                 avg_entry_price, lots, unit, settings=self.settings,
             )
+            shares = lots * qty_multiplier(unit)
+            held = self.state.position_shares.get(symbol, 0)
+            if held >= shares and symbol in self.state.position_costs:
+                total_cost = self.state.position_costs[symbol]
+                released = total_cost if position_closed else total_cost * shares / held
+                remaining = held - shares
+                if position_closed or remaining == 0:
+                    self.state.position_costs.pop(symbol, None)
+                    self.state.position_shares.pop(symbol, None)
+                else:
+                    self.state.position_costs[symbol] = total_cost - released
+                    self.state.position_shares[symbol] = remaining
             self._fund_used = max(0.0, self._fund_used - released)
+            if self._fund_used < 1e-8:
+                self._fund_used = 0.0
             if position_closed:
                 self._open_symbols.discard(symbol)
             self._open_positions = len(self._open_symbols)
-            pnl = net_pnl_twd(
-                avg_entry_price, exit_price, lots, unit,
+            proceeds = sell_cash_received(
+                exit_price, lots, unit,
                 settings=self.settings,
                 sell_tax_rate=sell_tax_rate,
             )
+            pnl = proceeds - released
             self.state.realized_pnl_twd += pnl
             if position_closed:
                 self.state.last_exit_ts[symbol] = now_tw().timestamp()
@@ -695,6 +730,7 @@ class RiskGuard:
                 symbol, avg_entry_price, exit_price, lots, pnl,
                 self.state.realized_pnl_twd,
             )
+            return pnl
 
     def update_unrealized_pnl(self, total_unrealized_pnl_twd: float) -> None:
         """策略可定期回報未實現損益（僅供儀表板快照，不參與熔斷）。"""

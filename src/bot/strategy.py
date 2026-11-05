@@ -60,6 +60,7 @@ from bot.trade_cost import (
     net_pnl_twd,
     position_net_pnl_pct,
     rebuy_opportunity,
+    sell_cash_received,
 )
 from bot.utils import get_logger, now_tw, now_tw_time
 
@@ -777,11 +778,14 @@ class BaseStrategy(ABC):
                 unit = self.positions[symbol].unit
                 if symbol in self.positions:
                     closed = self.positions[symbol].reduce(qty)
-                    self.risk.on_exit_filled(
+                    sell_pnl_twd = self.risk.on_exit_filled(
                         symbol, entry_price, price, qty, unit=unit,
                         position_closed=closed,
                         sell_tax_rate=self._sell_tax_rate(symbol),
                     )
+                    released_cost = sell_cash_received(price, qty, unit, settings=self.settings,
+                        sell_tax_rate=self._sell_tax_rate(symbol)) - sell_pnl_twd
+                    sell_pnl_pct = 100 * sell_pnl_twd / released_cost if released_cost else 0.0
                     self._fund_used = self.risk.fund_used
                     publish_if_bus(
                         self._publisher,
@@ -894,11 +898,14 @@ class BaseStrategy(ABC):
                 )
                 del self.positions[symbol]
                 self._peak_net_pnl.pop(symbol, None)
-        self.risk.on_exit_filled(
+        realized_pnl = self.risk.on_exit_filled(
             symbol, entry_price, price, quantity, unit=sell_unit,
             position_closed=closed,
             sell_tax_rate=self._sell_tax_rate(symbol),
         )
+        released_cost = sell_cash_received(price, quantity, sell_unit, settings=self.settings,
+                                          sell_tax_rate=self._sell_tax_rate(symbol)) - realized_pnl
+        pnl_pct = 100 * realized_pnl / released_cost if released_cost > 0 else 0.0
         self._fund_used = self.risk.fund_used
         self._on_fill_applied(symbol, "Sell", price, quantity, sell_unit)
         if closed and reason == "close":
@@ -1279,6 +1286,12 @@ class BaseStrategy(ABC):
         pos = self.positions.get(symbol)
         if pos is None or pos.avg_price <= 0 or price <= 0:
             return None
+        held = self.risk.state.position_shares.get(symbol, 0)
+        cost = self.risk.state.position_costs.get(symbol, 0)
+        if held == pos.quantity * qty_multiplier(pos.unit) and cost > 0:
+            proceeds = sell_cash_received(price, pos.quantity, pos.unit, settings=self.settings,
+                                          sell_tax_rate=self._sell_tax_rate(symbol))
+            return 100 * (proceeds - cost) / cost
         return position_net_pnl_pct(
             pos.avg_price, price, pos.quantity, pos.unit,
             settings=self.settings,

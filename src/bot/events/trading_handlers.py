@@ -69,6 +69,7 @@ class TradeRecordingHandler:
                 unit=event.unit,
                 trade_reason=event.trade_reason,
             )
+            self._recorder.export_csv()
         elif isinstance(event, TradeSellFilled):
             self._recorder.record_deal(
                 event.order_msg,
@@ -78,6 +79,7 @@ class TradeRecordingHandler:
                 pnl_pct=event.pnl_pct,
                 pnl_twd=event.pnl_twd,
             )
+            self._recorder.export_csv()
 
 
 class RiskPostTradeHandler:

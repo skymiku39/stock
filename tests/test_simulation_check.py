@@ -75,6 +75,55 @@ def test_partial_fill_keeps_pending_reservation_and_share_unit(tmp_path):
     assert strategy.engines["0050"].state.tiers_done == {0}
 
 
+def test_partial_fill_full_exit_reconciles_cash_cost_basis_and_recorded_pnl(tmp_path):
+    strategy, api = setup(tmp_path, auto_fill=False)
+    tick(strategy, 100)
+    tick(strategy, 98)
+    api.fill(api.trades[0], 4)
+    api.fill(api.trades[0], 6)
+    assert api.cash == pytest.approx(4018)  # 980 notional + two configured minimum fill fees.
+    assert strategy.risk.fund_used == pytest.approx(982)
+    assert strategy._position_pnl_pct('0050', 102) == pytest.approx(100 * 35.98 / 982)
+    assert strategy._place_stop_sell('0050', 10, 'accuracy_check')
+    api.fill(api.trades[-1], 10, price=102)
+    # Independent ledger: receive 1020 - 1 commission - 1.02 ETF tax; cost 982.
+    assert api.cash == pytest.approx(5035.98)
+    assert strategy.risk.state.realized_pnl_twd == pytest.approx(35.98)
+    assert strategy.risk.fund_used == 0
+    assert not strategy.positions
+    assert strategy.recorder._records[-1]['pnl_twd'] == pytest.approx(35.98)
+
+
+@pytest.mark.parametrize('kind', ['configurable', 'smile_curve'])
+def test_cost_basis_survives_restart_after_partial_fills(tmp_path, kind):
+    strategy, api = setup(tmp_path, auto_fill=False, strategy_type=kind)
+    assert strategy._place_buy('0050', 98, 10, unit='share')
+    api.fill(api.trades[0], 4)
+    api.fill(api.trades[0], 6)
+    restored = _strategy(strategy.settings, strategy.broker, tmp_path)
+    restored._run_startup_safety_and_restore()
+    assert restored._place_stop_sell('0050', 10, 'accuracy_check')
+    api.fill(api.trades[-1], 10, price=102)
+    assert restored.risk.state.realized_pnl_twd == pytest.approx(35.98)
+    assert restored.risk.fund_used == 0
+
+
+def test_overnight_partial_fill_costs_survive_daily_counter_reset(tmp_path):
+    from bot.risk_guard import RiskGuard
+    strategy, api = setup(tmp_path, auto_fill=False)
+    tick(strategy, 100)
+    tick(strategy, 98)
+    api.fill(api.trades[0], 4)
+    api.fill(api.trades[0], 6)
+    with patch('bot.risk_guard.now_tw', return_value=now_tw() + dt.timedelta(days=1)):
+        restored = RiskGuard(strategy.settings, project_root=strategy.risk.project_root)
+        assert restored.state.today_orders == 0
+        assert restored.fund_used == pytest.approx(982)
+        pnl = restored.on_exit_filled('0050', 98, 102, 10, unit='share', position_closed=True, sell_tax_rate=.001)
+        assert pnl == pytest.approx(35.98)
+        assert restored.fund_used == 0
+
+
 def test_duplicate_fill_never_creates_extra_inventory(tmp_path):
     strategy, api = setup(tmp_path)
     tick(strategy, 100)

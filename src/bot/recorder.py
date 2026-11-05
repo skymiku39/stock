@@ -55,7 +55,7 @@ class TradeRecorder:
         if pnl_pct is not None:
             record["pnl_pct"] = round(float(pnl_pct), 4)
         if pnl_twd is not None:
-            record["pnl_twd"] = round(float(pnl_twd), 2)
+            record["pnl_twd"] = float(pnl_twd)
         self._records.append(record)
 
     @property
