@@ -36,6 +36,9 @@ def matching_rows(raw, ticker):
 
 
 def company_rows(source, content):
+    if source.source.startswith(('monthly_revenue_history_', 'quarterly_financials_history_')):
+        from bot.financial_history import source_rows
+        return source_rows(source, content)
     if source.source == 'dividend_tpex' and source.mime_type == 'text/csv':
         reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')), strict=True)
         if not reader.fieldnames or '公司代號' not in reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames):
@@ -73,7 +76,7 @@ def collect(root, tickers):
                 continue
             source = registry.db.get_source_document(row['document_id'])
             try:
-                if urlparse(source.url).hostname not in {'openapi.twse.com.tw', 'www.tpex.org.tw', 'mopsfin.twse.com.tw'}:
+                if urlparse(source.url).hostname not in {'openapi.twse.com.tw', 'www.tpex.org.tw', 'mopsfin.twse.com.tw', 'mopsov.twse.com.tw'}:
                     raise ValueError('unsupported official source host')
                 if source.quality_status not in {'ok', 'partial'}:
                     continue

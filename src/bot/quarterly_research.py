@@ -75,6 +75,8 @@ def _payload(report: QuarterlyReport, source_document_id: str) -> Dict[str, Any]
         "op_margin": _number(report.op_margin),
         "net_margin": _number(report.net_margin),
         "period_basis": basis,
+        "revenue_unit": "TWD_thousand",
+        "eps_unit": "TWD_per_share",
         "note": report.note,
         "source_document_id": source_document_id,
         "source_url": report.source_url,
@@ -85,7 +87,7 @@ def _payload(report: QuarterlyReport, source_document_id: str) -> Dict[str, Any]
         "field_defs": {
             "period": "會計年度與季度，例如 2026Q2",
             "eps": "每股盈餘",
-            "revenue": "期間營收；累計／單季依 period_basis，原始單位依 API 定義",
+            "revenue": "期間營收（新台幣千元）；累計／單季依 period_basis",
             "gross_margin": "毛利率 %",
             "op_margin": "營業利益率 %",
             "net_margin": "淨利率 %",
@@ -101,8 +103,8 @@ def _claims(payload: Dict[str, Any]) -> List[Dict[str, str]]:
     period = str(payload["period"])
     return [
         {"text": f"{symbol} 季報期間為 {period}", "snippet": fragment("period")},
-        {"text": f"{symbol} {period} EPS 為 {payload['eps']}", "snippet": fragment("eps")},
-        {"text": f"{symbol} {period} 期間營收為 {payload['revenue']}（{payload['period_basis']}）", "snippet": fragment("revenue")},
+        {"text": f"{symbol} {period} EPS 為 {payload['eps']} 元（{payload['period_basis']}）", "snippet": fragment("eps")},
+        {"text": f"{symbol} {period} 期間營收為 {payload['revenue']} 千元（{payload['period_basis']}）", "snippet": fragment("revenue")},
         {"text": f"{symbol} {period} 毛利率為 {payload['gross_margin']}%", "snippet": fragment("gross_margin")},
         {"text": f"{symbol} {period} 營業利益率為 {payload['op_margin']}%", "snippet": fragment("op_margin")},
         {"text": f"{symbol} {period} 淨利率為 {payload['net_margin']}%", "snippet": fragment("net_margin")},

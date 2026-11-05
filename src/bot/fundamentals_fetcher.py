@@ -21,6 +21,8 @@ import datetime as dt
 import io
 import json
 import logging
+import math
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -206,9 +208,14 @@ class FundamentalSnapshot:
         """連續幾個月 YoY > 0 (從最新月份向過去算)。"""
         sorted_rev = sorted(self.revenues, key=lambda r: (r.year, r.month), reverse=True)
         streak = 0
+        previous = None
         for r in sorted_rev:
+            ordinal = r.year * 12 + r.month
+            if previous is not None and ordinal != previous - 1:
+                break
             if r.yoy > 0:
                 streak += 1
+                previous = ordinal
             else:
                 break
         return streak
@@ -553,7 +560,12 @@ def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
     yyyymm = str(pick(year_keys) or "").strip()
     year = 0
     month = 0
-    if yyyymm and yyyymm.isdigit() and len(yyyymm) >= 4:
+    separated = re.fullmatch(r"(\d{3,4})[/-](\d{1,2})", yyyymm)
+    if separated:
+        year, month = map(int, separated.groups())
+        if year < 1911:
+            year += 1911
+    elif yyyymm and yyyymm.isdigit() and len(yyyymm) in {5, 6}:
         try:
             year = int(yyyymm[:-2])
             if year < 1911:
@@ -561,12 +573,20 @@ def _parse_one_revenue(raw: Dict[str, Any]) -> Optional[MonthlyRevenue]:
             month = int(yyyymm[-2:])
         except ValueError:
             pass
+    if not (1912 <= year <= 2200 and 1 <= month <= 12):
+        return None
+    try:
+        revenue = float(str(pick(rev_keys)).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(revenue):
+        return None
     return MonthlyRevenue(
         ticker=code,
         name=str(pick(name_keys) or ""),
         year=year,
         month=month,
-        revenue=_to_float(pick(rev_keys)),
+        revenue=revenue,
         revenue_last_year=_to_float(pick(last_year_keys)),
         yoy=_to_float(pick(yoy_keys)),
         mom=_to_float(pick(mom_keys)),
@@ -1379,7 +1399,7 @@ def _parse_quarterly_raw(raw: Dict[str, Any], ticker: str) -> Optional[Dict[str,
     # 營業收入只在「一般業 / 保險業」有意義；金融、證券、金控以淨收益概念呈現，
     # 為避免毛利率/營益率誤導，僅在抓得到 "營業收入" 時計算三率。
     revenue = _to_float(_pick_key(raw, ["營業收入"], excludes=["外"]))
-    gross = _to_float(_pick_key(raw, ["營業毛利"]))
+    gross = _to_float(raw.get("營業毛利（毛損）淨額", _pick_key(raw, ["營業毛利"])))
     op_income = _to_float(_pick_key(raw, ["營業利益"]))
     # 本期淨利：排除「繼續營業單位」「綜合損益」「歸屬」等變體
     net_income = _to_float(
