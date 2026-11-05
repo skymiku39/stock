@@ -75,6 +75,31 @@ def test_workspace_navigation_and_release_notes(workspace):
     assert manager.recent() == []
 
 
+def test_config_changes_survive_a_new_dashboard_session(workspace, tmp_path):
+    from bot.env_io import load_env
+
+    at = AppTest.from_file(str(SCRIPT))
+    at.session_state["page"] = "組態設定"
+    at.run(timeout=20)
+    assert_clean(at)
+    at.selectbox(key="env_RUN_MODE").set_value("report")
+    at.number_input(key="env_MAX_PCT_CHG_ON_ENTRY").set_value(4.5)
+    next(b for b in at.button if b.label == "儲存到 .env").click().run(timeout=20)
+    assert_clean(at)
+    assert not at.error
+    saved = load_env(tmp_path / ".env")
+    assert saved["RUN_MODE"] == "report"
+    assert float(saved["MAX_PCT_CHG_ON_ENTRY"]) == 4.5
+    assert saved["SIMULATION"] == "true"
+
+    reopened = AppTest.from_file(str(SCRIPT))
+    reopened.session_state["page"] = "組態設定"
+    reopened.run(timeout=20)
+    assert_clean(reopened)
+    assert reopened.number_input(key="env_MAX_PCT_CHG_ON_ENTRY").value == 4.5
+    assert reopened.selectbox(key="env_RUN_MODE").value == "report"
+
+
 def test_analysis_survives_navigation_and_browser_session_recreation(workspace):
     manager, entered, release, calls = workspace
     at = AppTest.from_file(str(SCRIPT)).run(timeout=20)
@@ -133,5 +158,25 @@ def test_research_pages_do_not_launch_tasks_or_fetch_when_visited(workspace):
     for page in ("LLM 法說分析", "自動化管線", "今日當沖戰情室", "明日當沖關注", "美股 / 跨市場", "目前持股分析"):
         at.button(key=f"nav_{page}").click().run(timeout=20)
         assert_clean(at)
+    assert calls == []
+    assert manager.recent() == []
+
+
+@pytest.mark.parametrize("page", tuple(importlib.import_module("bot.dashboard.nav").PAGES))
+def test_every_dashboard_page_opens_in_a_new_local_workspace(workspace, page, monkeypatch):
+    """A first-time user can visit every page without data, credentials or network."""
+    import requests
+
+    def disconnected(*args, **kwargs):
+        raise requests.ConnectionError("Offline acceptance test")
+
+    # The calendar and futures views normally refresh on entry. Exercise their
+    # real connection-failure handling, while still preventing any live HTTP.
+    monkeypatch.setattr(requests.sessions.Session, "request", disconnected)
+    manager, _, _, calls = workspace
+    at = AppTest.from_file(str(SCRIPT))
+    at.session_state["page"] = page
+    at.run(timeout=30)
+    assert_clean(at)
     assert calls == []
     assert manager.recent() == []

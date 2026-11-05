@@ -180,11 +180,6 @@ ENV_FIELDS: List[EnvField] = [
         help="configurable 策略全域進場下限",
     ),
     EnvField(
-        "MAX_PCT_CHG_ON_ENTRY", "最高進場漲幅 (%)", "進階風控", "float",
-        default="0",
-        help="0=不限 (風控)；configurable 策略建議設 5",
-    ),
-    EnvField(
         "BUY_ENTRY_TARGETS", "個股進場範圍", "策略", "str",
         default="",
         help="格式 2330:1:5,0050:0.5:3；覆寫全域進場漲幅",
