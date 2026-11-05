@@ -76,6 +76,18 @@ def test_recent_word_uses_seven_day_freshness_window() -> None:
     assert plan_query("2330 最近消息").freshness == "7d"
 
 
+def test_daily_price_questions_use_local_price_evidence_without_web_search() -> None:
+    for query in ("2330 最近一個交易日的日 K 收盤價是多少？", "0050 開盤價",
+                  "2330 日K資料", "2330 OHLCV"):
+        plan = plan_query(query)
+        assert "ticker_snapshot" in plan.resource_needs
+        assert "web_search" not in plan.resource_needs
+        assert "news" not in plan.resource_needs
+        assert not plan.planner_required
+    mixed = plan_query("2330 收盤價與重大公告")
+    assert {"ticker_snapshot", "news", "mops"} <= set(mixed.resource_needs)
+
+
 def test_major_announcements_route_to_news_and_live_mops() -> None:
     plan = plan_query("台積電最近的月營收和重大訊息？", ticker="2330")
     assert "fundamental" in plan.resource_needs
