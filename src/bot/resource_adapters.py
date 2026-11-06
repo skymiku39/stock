@@ -855,6 +855,17 @@ class MonthlyRevenueAdapter:
                     )
 
                 if existing is not None:
+                    # Keep the archived canonical JSON as support, and expose
+                    # its fields as readable facts (including explicit nulls).
+                    excerpt = existing.excerpt
+                    try:
+                        from bot.monthly_revenue_research import canonical_summary_from_payload
+                        canonical = json.loads(excerpt)
+                        if (canonical.get('symbol') == revenue.symbol and canonical.get('year_month') == revenue.year_month
+                                and canonical.get('revenue_unit') == 'TWD_thousand'):
+                            excerpt = canonical_summary_from_payload(canonical) + '\n' + excerpt
+                    except (ValueError, TypeError, AttributeError):
+                        pass
                     try:
                         meta = json.loads(existing.metadata_json or "{}")
                     except (TypeError, ValueError):
@@ -880,7 +891,7 @@ class MonthlyRevenueAdapter:
                         "as_of": existing.as_of,
                         "published_at": existing.published_at,
                         "retrieved_at": existing.retrieved_at,
-                        "excerpt": existing.excerpt,
+                        "excerpt": excerpt,
                         "quality_status": existing.quality_status,
                         "source_document_id": existing.source_document_id,
                         "provenance_status": packet_provenance,

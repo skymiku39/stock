@@ -145,6 +145,17 @@ def canonical_text_from_payload(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
 
 
+def canonical_summary_from_payload(payload: Mapping[str, Any]) -> str:
+    """Readable, lossless field rendering for source-constrained answers."""
+    def value(key, label, unit):
+        number = payload.get(key)
+        return f'{label}未提供' if number is None else f'{label} {_format_number(float(number))}{unit}'
+    return f"{payload['symbol']} {payload['year_month']} " + '，'.join((
+        value('revenue', '月營收', ' 新台幣千元'),
+        value('yoy_pct', '營收年增率', '%'), value('mom_pct', '營收月增率', '%'),
+        value('cumulative', '累計營收', ' 新台幣千元'), value('cum_yoy_pct', '累計營收年增率', '%')))
+
+
 def _extractive_claims(payload: Mapping[str, Any]) -> List[Dict[str, str]]:
     """只產生可由原始欄位直接核對的事實 claim。"""
     symbol = str(payload.get("symbol") or "")

@@ -13,6 +13,15 @@ def test_comparative_columns_are_shifted_without_inventing_growth():
     assert row['營業收入-去年同月增減(%)'] == ''
 
 
+def test_monthly_answer_keeps_full_amount_and_explicit_unknown_rates():
+    from bot.monthly_revenue_research import canonical_summary_from_payload
+    text = canonical_summary_from_payload(dict(symbol='7856', year_month='2025-01',
+        revenue=158741, yoy_pct=None, mom_pct=None, cumulative=158741, cum_yoy_pct=None))
+    assert '月營收 158741 新台幣千元' in text
+    assert '營收年增率未提供' in text
+    assert '0%' not in text
+
+
 def test_reviewed_pdf_keeps_loss_sign_and_checks_hash_and_locator():
     raw = b'%PDF-reviewed-test'
     meta = dict(pdf_sha256=hashlib.sha256(raw).hexdigest(), review_method='rendered_page_transcription',
