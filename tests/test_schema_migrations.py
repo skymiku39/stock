@@ -12,9 +12,20 @@ def test_legacy_database_upgrade_preserves_rows_and_receipts(tmp_path):
         conn.execute("INSERT INTO watchlist(symbol, note) VALUES ('2330', 'keep')")
         conn.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT, checksum TEXT, applied_at TEXT)")
         conn.execute("INSERT INTO schema_migrations VALUES (1,'historical','original-checksum','old-time')")
+        conn.execute("""CREATE TABLE intraday_bars (
+            symbol TEXT NOT NULL, ts TEXT NOT NULL, interval TEXT NOT NULL DEFAULT '1m',
+            open REAL NOT NULL DEFAULT 0, high REAL NOT NULL DEFAULT 0, low REAL NOT NULL DEFAULT 0,
+            close REAL NOT NULL DEFAULT 0, volume REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'shioaji', updated_at TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '', source_date TEXT NOT NULL DEFAULT '',
+            retrieved_at TEXT NOT NULL DEFAULT '', quality_status TEXT NOT NULL DEFAULT 'unknown',
+            source_record_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (symbol, ts, interval))""")
+        conn.execute("INSERT INTO intraday_bars(symbol, ts, interval, close, volume, source_record_id) VALUES ('2330', '2026-11-05 09:00:00', 'tick', 2250, 2, 'original-source')")
     db = StockDB.open(path=path)
     assert db.get_watch("2330").note == "keep"
-    assert db.latest_schema_version() == 9
+    assert db.latest_schema_version() == 10
+    tick = db.get_intraday_bars('2330', interval='tick')[0]
+    assert (tick.close, tick.volume, tick.source_record_id, tick.sequence, tick.bid_price) == (2250, 2, 'original-source', 0, None)
     assert dict(db.conn.execute("SELECT * FROM schema_migrations WHERE version=1").fetchone())["checksum"] == "original-checksum"
     receipt = db.schema_migrations()
     db.close()

@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import time
 from functools import wraps
 from pathlib import Path
@@ -32,29 +33,42 @@ IntervalKind = Literal["1m", "tick"]
 TW_TZ = "Asia/Taipei"
 
 
-def shioaji_ts_to_iso(ts_ns: int) -> str:
+def shioaji_ts_to_iso(ts_ns: int, *, precise: bool = False) -> str:
     """Shioaji Kbars/Ticks 的 ns timestamp → 盤中時間字串。
 
     Shioaji 回傳的 ns 以 UTC 解析後的「鐘面時刻」即台股當地時間
     （勿再 tz_convert +8，否則會變成 17:00 而非 09:00）。
     """
     ts = pd.to_datetime(int(ts_ns), unit="ns", utc=True)
-    return ts.strftime("%Y-%m-%d %H:%M:%S")
+    result = ts.strftime("%Y-%m-%d %H:%M:%S")
+    return result + f'.{int(ts_ns) % 1_000_000_000:09d}' if precise else result
 
 
 def intraday_ts_to_datetime(ts_str: str) -> dt.datetime:
-    """把 DB/CSV 的 ts 字串轉為 datetime，並修正舊版 +8h 偏移資料。"""
-    d = dt.datetime.strptime(str(ts_str)[:19], "%Y-%m-%d %H:%M:%S")
-    if 14 <= d.hour <= 23:
-        d -= dt.timedelta(hours=8)
-    return d
+    """讀取來源時刻；盤後資料不可自動減八小時變成盤中成交。"""
+    return dt.datetime.fromisoformat(str(ts_str))
+
+
+def _validated_columns(raw: Any, fields: Sequence[str]) -> dict:
+    data = raw.model_dump() if hasattr(raw, 'model_dump') else dict(raw)
+    if 'ts' not in data or any(key not in data for key in fields):
+        raise ValueError('incomplete Shioaji response columns')
+    n = len(data['ts'])
+    if any(len(data[key]) != n for key in fields):
+        raise ValueError('Shioaji response column length mismatch')
+    for key in ('ts', *fields):
+        if any(not math.isfinite(float(value)) for value in data[key]):
+            raise ValueError(f'nonfinite Shioaji {key}')
+    if any(int(value) != value for value in data['ts']) or any(a > b for a, b in zip(data['ts'], data['ts'][1:])):
+        raise ValueError('Shioaji timestamps must be ordered integer nanoseconds')
+    return data
 
 
 def kbars_to_bars(symbol: str, kbars: Any) -> List[IntradayBar]:
     """把 Shioaji Kbars 物件轉成 IntradayBar list。"""
     if kbars is None:
         return []
-    data = kbars.model_dump() if hasattr(kbars, "model_dump") else dict(kbars)
+    data = _validated_columns(kbars, ('Open', 'High', 'Low', 'Close', 'Volume', 'Amount'))
     ts_list = data.get("ts") or []
     if not ts_list:
         return []
@@ -67,6 +81,8 @@ def kbars_to_bars(symbol: str, kbars: Any) -> List[IntradayBar]:
     amounts = data.get("Amount") or [0.0] * n
     out: List[IntradayBar] = []
     for i in range(n):
+        if not (0 < lows[i] <= min(opens[i], closes[i]) <= max(opens[i], closes[i]) <= highs[i]) or volumes[i] < 0 or amounts[i] < 0:
+            raise ValueError('invalid Shioaji OHLC/volume/amount')
         out.append(IntradayBar(
             symbol=symbol,
             ts=shioaji_ts_to_iso(ts_list[i]),
@@ -86,26 +102,35 @@ def ticks_to_bars(symbol: str, ticks: Any) -> List[IntradayBar]:
     """把 Shioaji Ticks 物件轉成 IntradayBar list (interval=tick)。"""
     if ticks is None:
         return []
-    data = ticks.model_dump() if hasattr(ticks, "model_dump") else dict(ticks)
+    data = _validated_columns(ticks, ('close', 'volume', 'bid_price', 'bid_volume',
+                                    'ask_price', 'ask_volume', 'tick_type'))
     ts_list = data.get("ts") or []
     if not ts_list:
         return []
     closes = data.get("close") or []
     volumes = data.get("volume") or []
     out: List[IntradayBar] = []
+    occurrences: dict[int, int] = {}
     for i, ts_ns in enumerate(ts_list):
-        px = float(closes[i]) if i < len(closes) else 0.0
-        vol = float(volumes[i]) if i < len(volumes) else 0.0
+        px, vol = float(closes[i]), float(volumes[i])
+        if px <= 0 or vol <= 0 or int(vol) != vol or any(data[key][i] < 0 for key in ('bid_price', 'ask_price', 'bid_volume', 'ask_volume')):
+            raise ValueError('invalid Shioaji tick price/volume')
+        sequence = occurrences.get(ts_ns, 0)
+        occurrences[ts_ns] = sequence + 1
         out.append(IntradayBar(
             symbol=symbol,
-            ts=shioaji_ts_to_iso(ts_ns),
+            ts=shioaji_ts_to_iso(ts_ns, precise=True),
             interval="tick",
             open=px,
             high=px,
             low=px,
             close=px,
             volume=vol,
-            amount=px * vol,
+            amount=px * vol * 1000,
+            sequence=sequence,
+            bid_price=float(data['bid_price'][i]), bid_volume=float(data['bid_volume'][i]),
+            ask_price=float(data['ask_price'][i]), ask_volume=float(data['ask_volume'][i]),
+            tick_type=int(data['tick_type'][i]),
             source="shioaji",
         ))
     return out
@@ -153,6 +178,8 @@ def save_bars_csv(bars: Sequence[IntradayBar], path: Path) -> None:
             "retrieved_at": b.retrieved_at,
             "quality_status": b.quality_status,
             "source_record_id": b.source_record_id,
+            "sequence": b.sequence, "bid_price": b.bid_price, "bid_volume": b.bid_volume,
+            "ask_price": b.ask_price, "ask_volume": b.ask_volume, "tick_type": b.tick_type,
         }
         for b in bars
     ]
@@ -167,27 +194,24 @@ def _capture_intraday_chunk(
     end: dt.date,
     interval: IntervalKind,
     bars: Sequence[IntradayBar],
+    sdk_response: dict,
     db: StockDB,
     logger: logging.Logger,
 ) -> tuple[str, str, str]:
-    """保存 Shioaji 轉換後的分 K/Tick 封套，並明確標成 cache-only。
-
-    Shioaji SDK 已把回應轉成 model，這裡沒有宣稱取得 SDK 底層 HTTP bytes；
-    封套的用途是跨機器重播、hash 驗證與 canonical row 的 exact identity，
-    provenance 則仍標示為 ``cache_only``。
-    """
+    """保留 SDK 原始欄位、時間精度及報價；不宣稱為 HTTP wire bytes。"""
     if root is None or not bars:
         return "", "", ""
     retrieved_at = now_tw().isoformat(timespec="seconds")
     source_url = f"shioaji://{interval}/{symbol}"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "adapter": "shioaji",
         "symbol": symbol,
         "interval": interval,
         "start": start.isoformat(),
         "end": end.isoformat(),
         "retrieved_at": retrieved_at,
+        "sdk_response": sdk_response,
         "rows": [
             {
                 "symbol": bar.symbol,
@@ -210,7 +234,7 @@ def _capture_intraday_chunk(
             source_url=source_url,
             source_ref=f"{symbol}:{interval}:{start.isoformat()}:{end.isoformat()}",
             title=f"Shioaji {interval} {symbol} {start.isoformat()}~{end.isoformat()}",
-            kind="normalized_response",
+            kind="sdk_response",
             suffix="json",
             mime_type="application/json",
             as_of=start.isoformat(),
@@ -218,16 +242,17 @@ def _capture_intraday_chunk(
             quality_status="partial",
             metadata={
                 "adapter": "shioaji",
-                "provenance_status": "cache_only",
-                "normalized": True,
+                "provenance_status": "exact",
+                "representation": "sdk_model_fields",
+                "volume_unit": "lot", "amount_unit": "TWD",
+                "session_reconciled": False,
                 "interval": interval,
                 "row_count": len(bars),
             },
         )
         return document.document_id, source_url, retrieved_at
     except Exception as exc:  # pragma: no cover - filesystem/runtime boundary
-        logger.warning("%s %s raw 封套保存失敗：%s", symbol, interval, exc)
-        return "", source_url, retrieved_at
+        raise RuntimeError(f'{symbol} {interval} SDK archive failed') from exc
 
 
 def fetch_intraday_chunk(
@@ -239,6 +264,7 @@ def fetch_intraday_chunk(
     interval: IntervalKind = "1m",
     timeout_ms: int = 60_000,
     logger: Optional[logging.Logger] = None,
+    raw_callback=None,
 ) -> List[IntradayBar]:
     """抓取單段日期區間 (建議 ≤ 5 個交易日)。"""
     log = logger or get_logger("intraday-history")
@@ -250,6 +276,8 @@ def fetch_intraday_chunk(
     else:
         raw = broker.fetch_kbars(symbol, start_s, end_s, timeout_ms=timeout_ms)
         bars = kbars_to_bars(symbol, raw)
+    if raw_callback is not None:
+        raw_callback(raw.model_dump() if hasattr(raw, 'model_dump') else dict(raw))
     log.info(
         "%s %s %s~%s: %d 筆",
         symbol, interval, start_s, end_s, len(bars),
@@ -291,19 +319,15 @@ def _fetch_and_store_intraday_open_db(
 
         if skip_existing_days and interval == "1m" and chunk_days == 1:
             day = chunk_start
-            existing = database.count_intraday_bars(
-                symbol,
-                interval=interval,
-                start=day.isoformat(),
-                end=day.isoformat(),
-            )
-            if existing >= 200:
-                log.debug("%s %s 已有 %d 筆，跳過", symbol, day, existing)
+            from bot.intraday_reconciliation import reconciled_day_available
+            if root is not None and reconciled_day_available(database, root, symbol, day.isoformat(), interval):
+                log.debug("%s %s 原檔與資料庫對帳相符，跳過", symbol, day)
                 skipped_days += 1
                 i += chunk_days
                 continue
 
         try:
+            captured = []
             bars = fetch_intraday_chunk(
                 broker,
                 symbol,
@@ -312,16 +336,14 @@ def _fetch_and_store_intraday_open_db(
                 interval=interval,
                 timeout_ms=timeout_ms,
                 logger=log,
+                raw_callback=captured.append,
             )
         except Exception:
             log.exception(
                 "抓取失敗 %s %s %s~%s",
                 symbol, interval, chunk_start, chunk_end,
             )
-            i += chunk_days
-            if request_delay_sec > 0:
-                time.sleep(request_delay_sec)
-            continue
+            raise
 
         if bars:
             source_document_id, source_url, retrieved_at = _capture_intraday_chunk(
@@ -331,6 +353,7 @@ def _fetch_and_store_intraday_open_db(
                 end=chunk_end,
                 interval=interval,
                 bars=bars,
+                sdk_response=captured[0],
                 db=database,
                 logger=log,
             )
@@ -394,6 +417,8 @@ def bars_to_dataframe(bars: Sequence[IntradayBar]) -> pd.DataFrame:
             "retrieved_at": b.retrieved_at,
             "quality_status": b.quality_status,
             "source_record_id": b.source_record_id,
+            "sequence": b.sequence, "bid_price": b.bid_price, "bid_volume": b.bid_volume,
+            "ask_price": b.ask_price, "ask_volume": b.ask_volume, "tick_type": b.tick_type,
         }
         for b in bars
     ])

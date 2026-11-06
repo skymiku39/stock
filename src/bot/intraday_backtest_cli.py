@@ -53,7 +53,7 @@ def _pick_granularity(
     start: str,
     end: str,
 ) -> str:
-    if arg in ("daily", "1m"):
+    if arg in ("daily", "1m", "tick"):
         return arg
     span = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
     return "daily" if span > 90 else "1m"
@@ -119,10 +119,8 @@ def _ensure_intraday_data(
     end_d = dt.date.fromisoformat(end)
     for sym in symbols:
         for day in iter_trading_days(start_d, end_d):
-            n = db.count_intraday_bars(
-                sym, interval="1m", start=day.isoformat(), end=day.isoformat(),
-            )
-            if n < 200:
+            from bot.intraday_reconciliation import reconciled_day_available
+            if not reconciled_day_available(db, root, sym, day.isoformat()):
                 need_fetch.append(sym)
                 break
 
@@ -221,9 +219,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--end", help="結束日期 YYYY-MM-DD (預設今天)")
     parser.add_argument(
         "--granularity",
-        choices=("auto", "daily", "1m"),
+        choices=("auto", "daily", "1m", "tick"),
         default="auto",
-        help="auto=長區間用日K、短區間用分K",
+        help="auto=長區間用日K、短區間用分K估算；tick=已對帳逐筆行情及報價撮合",
     )
     parser.add_argument(
         "--fetch", action="store_true",
@@ -235,6 +233,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="匯出交易明細 CSV (預設 data/reports/backtest_YYYY-MM-DD.csv)",
     )
     parser.add_argument("--json", default="", help="另存 JSON 摘要")
+    parser.add_argument("--replay-output", type=Path, help="逐筆模式輸出至新的空目錄")
+    parser.add_argument("--strategy", choices=('configurable', 'smile_curve'), default='configurable', help="逐筆回放策略")
     parser.add_argument(
         "--root", type=Path, default=None,
         help="專案資料／設定根目錄（未指定時使用目前工作目錄）",
@@ -264,6 +264,41 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     db = StockDB.open(path=default_db_path(root))
     try:
+        if granularity == 'tick':
+            from bot.tick_replay import replay_ticks
+            from bot.intraday_reconciliation import reconcile_intraday_session, fetch_volume_components
+            from bot.runtime_state import atomic_json
+            from uuid import uuid4
+            if start != end:
+                raise ValueError('逐筆模式目前要求同一天，避免跨日重設持倉或現金')
+            output = args.replay_output or root/'data/reports'/f'tick_{start}_{uuid4().hex[:8]}'
+            if not output.is_absolute():
+                output = root/output
+            settings = settings.model_copy(update={'strategy_type': args.strategy, 'simulation': True})
+            if args.fetch:
+                fetch_volume_components(db, root, start)
+                from bot.broker import SjBroker
+                broker = SjBroker(settings, simulation_only=True, logger=logger)
+                if not broker.login():
+                    raise RuntimeError('Shioaji 歷史行情登入失敗')
+                try:
+                    for symbol in symbols:
+                        for interval in ('1m', 'tick'):
+                            fetch_and_store_intraday(broker, symbol, dt.date.fromisoformat(start), dt.date.fromisoformat(end),
+                                interval=interval, root=root, db=db, save_csv=False, logger=logger)
+                        reconcile_intraday_session(db, root, symbol, start)
+                finally:
+                    broker.logout()
+            results = [replay_ticks(db, settings, symbol, start, output/symbol, root=root) for symbol in symbols]
+            payload = dict(start=start, end=end, granularity='tick', portfolio_mode='independent_symbol_accounts', results=results)
+            atomic_json(output/'summary.json', payload)
+            if args.json:
+                path = Path(args.json)
+                atomic_json(path if path.is_absolute() else root/path, payload)
+            for row in results:
+                print(f"{row['symbol']} ticks={row['tick_count']} cash={row['final_cash']:.2f} pnl={row['realized_pnl']:.2f} positions={row['positions']} pending={row['pending_orders']}")
+            print(f'逐筆行情回放結果：{output}')
+            return 0
         if args.fetch:
             if granularity == "daily":
                 _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
@@ -304,6 +339,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "pnl_twd": r.total_pnl_twd,
                         "bar_days": r.bar_days,
                         "skip_reason": r.skip_reason,
+                        "open_positions": r.open_positions,
                         "llm_meta": meta.get(r.symbol, {}),
                     }
                     for r in summary.results
@@ -316,7 +352,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             jp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         _print_summary(summary, meta)
-        return 0
+        return 2 if any(r.skip_reason or r.open_positions for r in summary.results) else 0
     finally:
         db.close()
 

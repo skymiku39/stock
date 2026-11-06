@@ -305,10 +305,10 @@ class PriceBar:
 class IntradayBar:
     """盤中分 K 或 Tick 歷史 (Shioaji kbars/ticks)。
 
-    PK = (symbol, ts, interval)。
-    ts 為台北時間 ``YYYY-MM-DD HH:MM:SS``。
+    PK = (symbol, ts, interval, sequence)。
+    ts 保留來源的奈秒精度；sequence 區分同一時間的多筆成交。
     interval: ``1m`` (分 K) 或 ``tick`` (逐筆)。
-    volume 單位為股數 (Shioaji 原始欄位)。
+    台股 volume 單位為張 (Shioaji 原始欄位)，amount 為新台幣元。
     """
 
     symbol: str
@@ -327,6 +327,13 @@ class IntradayBar:
     retrieved_at: str = ""
     quality_status: str = "unknown"
     source_record_id: str = ""
+
+    sequence: int = 0
+    bid_price: Optional[float] = None
+    bid_volume: Optional[float] = None
+    ask_price: Optional[float] = None
+    ask_volume: Optional[float] = None
+    tick_type: Optional[int] = None
 
 
 @dataclass
@@ -2606,6 +2613,7 @@ class StockDB:
                 b.source or "shioaji",
                 b.updated_at or ts_default, b.source_url, b.source_date,
                 b.retrieved_at, b.quality_status, b.source_record_id,
+                b.sequence, b.bid_price, b.bid_volume, b.ask_price, b.ask_volume, b.tick_type,
             ))
         if not rows:
             return 0
@@ -2615,9 +2623,10 @@ class StockDB:
                 INSERT INTO intraday_bars
                   (symbol, ts, interval, open, high, low, close, volume, amount,
                    source, updated_at, source_url, source_date, retrieved_at,
-                   quality_status, source_record_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(symbol, ts, interval) DO UPDATE SET
+                   quality_status, source_record_id, sequence, bid_price, bid_volume,
+                   ask_price, ask_volume, tick_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(symbol, ts, interval, sequence) DO UPDATE SET
                   open = excluded.open,
                   high = excluded.high,
                   low = excluded.low,
@@ -2630,7 +2639,10 @@ class StockDB:
                   source_date = excluded.source_date,
                   retrieved_at = excluded.retrieved_at,
                   quality_status = excluded.quality_status,
-                  source_record_id = excluded.source_record_id
+                  source_record_id = excluded.source_record_id,
+                  bid_price = excluded.bid_price, bid_volume = excluded.bid_volume,
+                  ask_price = excluded.ask_price, ask_volume = excluded.ask_volume,
+                  tick_type = excluded.tick_type
                 """,
                 rows,
             )
@@ -2660,7 +2672,7 @@ class StockDB:
             sql += " AND ts <= ?"
             args.append(end)
         order = "ASC" if ascending else "DESC"
-        sql += f" ORDER BY ts {order}"
+        sql += f" ORDER BY ts {order}, sequence {order}"
         if limit:
             sql += " LIMIT ?"
             args.append(int(limit))
@@ -2669,7 +2681,7 @@ class StockDB:
         if limit and ascending and not (start or end):
             sql2 = (
                 "SELECT * FROM intraday_bars WHERE symbol = ? AND interval = ? "
-                "ORDER BY ts DESC LIMIT ?"
+                "ORDER BY ts DESC, sequence DESC LIMIT ?"
             )
             rows = self.conn.execute(sql2, (symbol, interval, int(limit))).fetchall()
             bars = [_row_to_dc(IntradayBar, r) for r in rows]

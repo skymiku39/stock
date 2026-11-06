@@ -39,6 +39,21 @@ def _seed_day(db: StockDB, symbol: str, day: str, prev_close: float) -> None:
 
 
 class TestIntradayBacktest:
+    def test_truncated_session_does_not_fabricate_closing_fill(self, db: StockDB) -> None:
+        db.bulk_upsert_price_bars([PriceBar(symbol='2330', date='2026-06-09', close=100)])
+        db.bulk_upsert_intraday_bars([IntradayBar(symbol='2330', ts='2026-06-10 09:01:00',
+            interval='1m', open=100, high=100, low=100, close=100, volume=10)])
+        result = IntradayBacktester(Settings(_env_file=None, min_pct_chg_on_entry=-1,
+            max_pct_chg_on_entry=1, max_fund=500000, daily_fund_budget=0)).run_symbol(db, '2330')
+        assert result.trades == []
+        assert result.open_positions[0]['entry_ts'] == '2026-06-10 09:01:00'
+        assert result.skip_reason == 'incomplete_session_open_position'
+
+    def test_first_intraday_close_cannot_replace_previous_close(self, db: StockDB) -> None:
+        db.bulk_upsert_intraday_bars([IntradayBar(symbol='2330', ts='2026-06-10 09:01:00', close=100)])
+        with pytest.raises(ValueError, match='previous daily close missing'):
+            IntradayBacktester(Settings(_env_file=None)).run_symbol(db, '2330')
+
     def test_entry_and_exit_on_rally(self, db: StockDB) -> None:
         symbol = "2330"
         day = "2026-06-10"

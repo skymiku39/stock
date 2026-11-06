@@ -721,7 +721,7 @@ class BaseStrategy(ABC):
                 else:
                     self.positions[symbol] = PositionInfo(
                         symbol=symbol, avg_price=price, quantity=qty,
-                        owner_tag=BOT_OWNER_TAG, unit=unit,
+                        owner_tag=BOT_OWNER_TAG, unit=unit, entry_time=now_tw(),
                     )
                 self.risk.on_entry_filled(symbol, price, qty, unit=unit)
                 if was_pending and ordno in self.pending_orders[symbol]:

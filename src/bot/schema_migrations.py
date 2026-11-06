@@ -40,6 +40,22 @@ MIGRATIONS = (
         "DROP TABLE monthly_revenue",
         "ALTER TABLE monthly_revenue_nullable RENAME TO monthly_revenue",
     )),
+    (10, "intraday-preserve-tick-sequence-and-quotes", (
+        """CREATE TABLE intraday_bars_sequenced (
+            symbol TEXT NOT NULL, ts TEXT NOT NULL, interval TEXT NOT NULL DEFAULT '1m',
+            open REAL NOT NULL DEFAULT 0, high REAL NOT NULL DEFAULT 0,
+            low REAL NOT NULL DEFAULT 0, close REAL NOT NULL DEFAULT 0,
+            volume REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'shioaji', updated_at TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '', source_date TEXT NOT NULL DEFAULT '',
+            retrieved_at TEXT NOT NULL DEFAULT '', quality_status TEXT NOT NULL DEFAULT 'unknown',
+            source_record_id TEXT NOT NULL DEFAULT '', sequence INTEGER NOT NULL DEFAULT 0,
+            bid_price REAL, bid_volume REAL, ask_price REAL, ask_volume REAL, tick_type INTEGER,
+            PRIMARY KEY(symbol,ts,interval,sequence))""",
+        "INSERT INTO intraday_bars_sequenced (symbol,ts,interval,open,high,low,close,volume,amount,source,updated_at,source_url,source_date,retrieved_at,quality_status,source_record_id) SELECT symbol,ts,interval,open,high,low,close,volume,amount,source,updated_at,source_url,source_date,retrieved_at,quality_status,source_record_id FROM intraday_bars",
+        "DROP TABLE intraday_bars",
+        "ALTER TABLE intraday_bars_sequenced RENAME TO intraday_bars",
+    )),
 )
 
 

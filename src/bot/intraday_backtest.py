@@ -45,6 +45,7 @@ class SymbolBacktestResult:
     bar_days: int = 0
     bar_count: int = 0
     skip_reason: str = ""
+    open_positions: List[dict] = field(default_factory=list)
 
     @property
     def total_pnl_twd(self) -> float:
@@ -124,8 +125,6 @@ def _prev_close_for_day(
             break
     if prev and prev > 0:
         return prev
-    if day_bars:
-        return float(day_bars[0].open or day_bars[0].close)
     return None
 
 
@@ -299,7 +298,7 @@ class IntradayBacktester:
         for day, day_bars in sorted(by_day.items()):
             prev_close = _prev_close_for_day(db, symbol, day, day_bars, daily_cache)
             if not prev_close or prev_close <= 0:
-                continue
+                raise ValueError(f'{symbol} {day}: previous daily close missing')
             st = _DayState()
             entry_pct = 0.0
             for bar in day_bars:
@@ -320,15 +319,13 @@ class IntradayBacktester:
                         entry_pct = pct_chg
 
             if st.position is not None:
-                last = day_bars[-1]
-                cur = _parse_time(last.ts)
-                if cur < self.settings.exit_time:
-                    cur = self.settings.exit_time
-                trade = self._try_exit(symbol, float(last.close), last.ts, cur, st)
-                if trade:
-                    trade.entry_pct_chg = entry_pct
-                    trade.exit_reason = "eod"
-                    result.trades.append(trade)
+                entry_price, qty, unit, entry_ts = st.position
+                result.open_positions.append(dict(trade_date=day, entry_ts=entry_ts,
+                    entry_price=entry_price, quantity=qty, unit=unit))
+                result.skip_reason = 'incomplete_session_open_position'
+                # Missing later bars cannot manufacture a closing-time fill or
+                # permit a fresh cash balance on the next day.
+                break
 
         return result
 
@@ -354,7 +351,7 @@ class IntradayBacktester:
             ]
             lo, hi = resolve_entry_range("", self.settings)
             note = (
-                f"entry {lo:.1f}~{hi:.1f}% | sl {self.settings.stop_loss_pct}% | "
+                f"分K收盤價假設成交估算；逐筆驗證請用 --granularity tick | entry {lo:.1f}~{hi:.1f}% | sl {self.settings.stop_loss_pct}% | "
                 f"trail {self.settings.take_profit_pct}%/{self.settings.trailing_stop_pct}% | "
                 f"exit {self.settings.exit_time.strftime('%H:%M')}"
             )

@@ -31,10 +31,10 @@ class TestShioajiConversion:
         iso = shioaji_ts_to_iso(_ns_at_utc("2024-01-02 09:00:00"))
         assert iso == "2024-01-02 09:00:00"
 
-    def test_intraday_ts_legacy_offset(self) -> None:
+    def test_intraday_ts_preserves_after_hours(self) -> None:
         from bot.intraday_history import intraday_ts_to_datetime
         fixed = intraday_ts_to_datetime("2026-06-10 17:01:00")
-        assert fixed.hour == 9 and fixed.minute == 1
+        assert fixed.hour == 17 and fixed.minute == 1
 
     def test_kbars_to_bars(self) -> None:
         kb = Kbars(
@@ -69,6 +69,34 @@ class TestShioajiConversion:
         assert bars[0].interval == "tick"
         assert bars[0].open == bars[0].close == pytest.approx(600.0)
         assert bars[0].volume == pytest.approx(5)
+        assert bars[0].amount == pytest.approx(3_000_000)
+
+    def test_same_nanosecond_ticks_survive_roundtrip(self, tmp_path):
+        ns = _ns_at_utc('2026-11-05 09:00:01') + 123456000
+        payload = dict(ts=[ns, ns, ns+1000], close=[100,101,102], volume=[1,2,3],
+                       bid_price=[99,100,101], bid_volume=[5]*3,
+                       ask_price=[100,101,102], ask_volume=[4]*3, tick_type=[1]*3)
+        bars = ticks_to_bars('2330', payload)
+        db = StockDB.open(root=tmp_path)
+        try:
+            db.bulk_upsert_intraday_bars(bars)
+            db.bulk_upsert_intraday_bars(bars)
+            got = db.get_intraday_bars('2330', interval='tick')
+            assert len(got) == 3
+            assert [b.sequence for b in got] == [0,1,0]
+            assert sum(b.volume for b in got) == 6
+            assert got[0].ts.endswith('.123456000')
+            assert got[1].ask_price == 101
+        finally:
+            db.close()
+
+    def test_missing_values_are_not_fabricated(self):
+        with pytest.raises(ValueError, match='columns'):
+            kbars_to_bars('2330', {'ts':[1]})
+        with pytest.raises(ValueError, match='length'):
+            ticks_to_bars('2330', dict(ts=[1,2], close=[100], volume=[1,2],
+                bid_price=[99]*2, bid_volume=[1]*2, ask_price=[100]*2,
+                ask_volume=[1]*2, tick_type=[1]*2))
 
 
 class TestTradingDays:
@@ -150,5 +178,6 @@ class TestFetchAndStore:
         source = db.get_source_document(bars[0].source_record_id)
         assert source is not None
         assert source.quality_status == "partial"
-        assert json.loads(source.metadata_json)["provenance_status"] == "cache_only"
+        assert json.loads(source.metadata_json)["provenance_status"] == "exact"
         assert json.loads((tmp_path / source.content_path).read_text(encoding="utf-8"))["rows"]
+        assert json.loads((tmp_path / source.content_path).read_text(encoding="utf-8"))["sdk_response"]["ts"]
