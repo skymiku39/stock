@@ -80,6 +80,11 @@ def quarterly_rows(content: bytes, year: int, quarter: int, market: str) -> list
 
 
 def source_rows(source, content: bytes) -> list[dict]:
+    if source.source == 'monthly_revenue_comparative':
+        return comparative_revenue_rows(content)
+    if source.source == 'issuer_quarterly_pdf':
+        from bot.issuer_financials import reviewed_pdf_rows
+        return reviewed_pdf_rows(content, json.loads(source.metadata_json))
     if source.source.startswith('monthly_revenue_history_'):
         return revenue_rows(content)
     if source.source.startswith('quarterly_financials_history_'):
@@ -87,6 +92,24 @@ def source_rows(source, content: bytes) -> list[dict]:
         return quarterly_rows(content, int(meta['year']), int(meta['quarter']), meta['market'])
     payload = json.loads(content)
     return payload.get('rows', [payload]) if isinstance(payload, dict) else payload
+
+
+def comparative_revenue_rows(content: bytes) -> list[dict]:
+    """Replay the explicitly reported prior-year columns, without inventing growth rates."""
+    rows = []
+    for raw in revenue_rows(content):
+        year, month = map(int, raw['資料年月'].split('/'))
+        row = {'公司代號': raw['公司代號'], '公司名稱': raw.get('公司名稱', ''),
+               '資料年月': f'{year-1}/{month:02d}',
+               '營業收入-當月營收': raw['營業收入-去年當月營收'],
+               '累計營業收入-當月累計營收': raw['累計營業收入-去年累計營收'],
+               '營業收入-去年同月增減(%)': '', '營業收入-上月比較增減(%)': '',
+               '累計營業收入-前期比較增減(%)': '',
+               '備註': f"取自 {raw['資料年月']} 官方申報的去年同月及去年累計欄；未提供歷史成長率"}
+        parsed = _parse_one_revenue(row)
+        if parsed is not None:
+            rows.append(row)
+    return rows
 
 
 def months_between(start: str, end: str):

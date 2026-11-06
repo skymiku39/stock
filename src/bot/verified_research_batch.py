@@ -36,7 +36,7 @@ def matching_rows(raw, ticker):
 
 
 def company_rows(source, content):
-    if source.source.startswith(('monthly_revenue_history_', 'quarterly_financials_history_')):
+    if source.source.startswith(('monthly_revenue_history_', 'quarterly_financials_history_')) or source.source in {'monthly_revenue_comparative', 'issuer_quarterly_pdf'}:
         from bot.financial_history import source_rows
         return source_rows(source, content)
     if source.source == 'dividend_tpex' and source.mime_type == 'text/csv':

@@ -113,7 +113,7 @@ def _raw_rows(root: Path, source: SourceDocumentRow) -> List[Dict[str, Any]]:
                 f"raw hash mismatch for {source.document_id}: "
                 f"expected {source.content_hash[:12]} got {digest[:12]}"
             )
-    if source.source.startswith(('monthly_revenue_history_', 'quarterly_financials_history_')):
+    if source.source.startswith(('monthly_revenue_history_', 'quarterly_financials_history_')) or source.source in {'monthly_revenue_comparative', 'issuer_quarterly_pdf'}:
         from bot.financial_history import source_rows
         return source_rows(source, raw)
     payload = json.loads(raw.decode("utf-8"))

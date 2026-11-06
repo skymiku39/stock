@@ -265,10 +265,10 @@ def load_raw_rows_from_source_document(
         return source, [], error
     path = resolve_source_document_path(root, source)
     raw_bytes = path.read_bytes()
-    if source.source.startswith('monthly_revenue_history_'):
-        from bot.financial_history import revenue_rows
+    if source.source.startswith('monthly_revenue_history_') or source.source == 'monthly_revenue_comparative':
+        from bot.financial_history import source_rows
         try:
-            return source, revenue_rows(raw_bytes), ""
+            return source, source_rows(source, raw_bytes), ""
         except (UnicodeDecodeError, ValueError) as exc:
             return source, [], f"raw CSV 解析失敗: {exc}"
     try:
