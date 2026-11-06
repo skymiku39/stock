@@ -74,11 +74,13 @@ class TickPaperApi(PaperApi):
                 side=side, price=price, quantity=qty, unit='lot',
                 bid_price=tick.bid_price, ask_price=tick.ask_price, bid_volume=tick.bid_volume,
                 ask_volume=tick.ask_volume, traded_volume=tick.volume))
+            if getattr(tick, 'book_evidence', None):
+                self.fill_evidence[-1]['book_evidence'] = tick.book_evidence
             if immediate and trade.status.status != Status.Filled:
                 self.cancel_order(trade)
 
 
-def replay_ticks(db, settings, symbol: str, day: str, output: Path, *, root=None) -> dict:
+def replay_ticks(db, settings, symbol: str, day: str, output: Path, *, root=None, runtime_sink=None) -> dict:
     if output.exists() and any(output.iterdir()):
         raise ValueError('replay output must be a fresh directory')
     from bot.intraday_reconciliation import reconcile_intraday_session
@@ -137,6 +139,10 @@ def replay_ticks(db, settings, symbol: str, day: str, output: Path, *, root=None
                         rounding='unrounded model costs, not a broker settlement statement'),
         limitation='Historical quote matching models fills; queue priority is not observable.')
     atomic_json(output/'result.json',result)
+    # A durable follower can continue this exact local account after verifying
+    # the reconstructed result. This never attaches a quote SDK to the broker.
+    if runtime_sink is not None:
+        runtime_sink.update(api=api, strategy=strategy, settings=settings)
     return result
 
 
