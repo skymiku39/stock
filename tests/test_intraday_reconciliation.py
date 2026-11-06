@@ -75,3 +75,29 @@ def test_matching_ohlc_cannot_hide_missing_session_volume(archived_session):
         conn.execute('UPDATE price_history SET volume=4, source_record_id=?', (source.document_id,))
     with pytest.raises(ValueError, match='differs from official daily volume'):
         reconcile_intraday_session(db, root, '2330', day)
+
+
+def test_completed_prefix_excludes_unfinished_minute_and_never_promotes_day(tmp_path):
+    from bot.intraday_reconciliation import reconcile_observed_prefix
+    day = '2026-11-06'
+    ticks = dict(ts=[pd.Timestamp(day+' 09:00:01').value, pd.Timestamp(day+' 09:00:30').value,
+                     pd.Timestamp(day+' 09:01:01').value], close=[100,101,102], volume=[1,2,3],
+                 bid_price=[99,100,101], bid_volume=[1,2,3], ask_price=[100,101,102],
+                 ask_volume=[1,2,3], tick_type=[1,1,1])
+    minutes = dict(ts=[pd.Timestamp(day+' 09:01:00').value], Open=[100],High=[101],Low=[100],
+                   Close=[101],Volume=[3],Amount=[302000])
+    broker = SimpleNamespace(fetch_ticks=lambda *a, **kw:ticks, fetch_kbars=lambda *a, **kw:minutes)
+    db = StockDB.open(root=tmp_path)
+    try:
+        for interval in ('tick','1m'):
+            fetch_and_store_intraday(broker,'2330',dt.date.fromisoformat(day),dt.date.fromisoformat(day),
+                interval=interval,root=tmp_path,db=db,save_csv=False,request_delay_sec=0)
+        checked, receipt = reconcile_observed_prefix(db,tmp_path,'2330',day,observed_at=day+'T09:01:10+08:00')
+        assert len(checked) == 2 and receipt['minutes'] == 1 and not receipt['session_complete']
+        assert not reconciled_day_available(db,tmp_path,'2330',day)
+        with pytest.raises(ValueError,match='future timestamp'):
+            reconcile_observed_prefix(db,tmp_path,'2330',day,observed_at=day+'T09:00:59+08:00')
+        with pytest.raises(ValueError,match='explicit timezone'):
+            reconcile_observed_prefix(db,tmp_path,'2330',day,observed_at=day+'T09:01:10')
+    finally:
+        db.close()

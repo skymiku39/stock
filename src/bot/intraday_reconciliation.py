@@ -115,6 +115,48 @@ def reconciled_day_available(db, root, symbol, day, interval='1m'):
         return False
 
 
+def reconcile_observed_prefix(db, root, symbol, day, *, observed_at):
+    """Validate completed observed minutes; never label an ongoing day complete."""
+    observed = pd.Timestamp(observed_at)
+    if observed.tzinfo is None:
+        raise ValueError('observed_at requires an explicit timezone')
+    local = observed.tz_convert('Asia/Taipei').tz_localize(None)
+    if str(local.date()) != day:
+        raise ValueError('observed prefix is only for the current observed day')
+    ticks, tick_sources = verified_archive_rows(db, root, symbol, day, 'tick')
+    minutes, minute_sources = verified_archive_rows(db, root, symbol, day, '1m')
+    session = [t for t in ticks if f'{day} 09:00:00' <= t.ts <= f'{day} 13:30:00.000000000']
+    if not session or pd.Timestamp(session[-1].ts) > local:
+        raise ValueError('no observed regular-session ticks or future timestamp')
+    cutoff = min(local.floor('min'), pd.Timestamp(session[-1].ts).floor('min'),
+                 max(pd.Timestamp(m.ts) for m in minutes), pd.Timestamp(f'{day} 13:30:00'))
+    eligible = [t for t in session if pd.Timestamp(t.ts) < cutoff]
+    completed = [m for m in minutes if pd.Timestamp(f'{day} 09:00:00') < pd.Timestamp(m.ts) <= cutoff]
+    if not eligible or not completed:
+        raise ValueError('no completed observed minute yet')
+    grouped = defaultdict(list)
+    for tick in eligible:
+        bucket = (pd.Timestamp(tick.ts).floor('min') + pd.Timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M:%S')
+        grouped[bucket].append(tick)
+    if set(grouped) != {m.ts for m in completed}:
+        raise ValueError('observed minute/tick coverage mismatch')
+    for bar in completed:
+        group = grouped[bar.ts]
+        values = dict(open=group[0].close, high=max(t.close for t in group), low=min(t.close for t in group),
+                      close=group[-1].close, volume=sum(Decimal(str(t.volume)) for t in group),
+                      amount=sum(Decimal(str(t.close))*Decimal(str(t.volume))*1000 for t in group))
+        if any(abs(Decimal(str(getattr(bar, key)))-Decimal(str(value))) > Decimal('.001') for key, value in values.items()):
+            raise ValueError(f'observed minute/tick values mismatch at {bar.ts}')
+    # A prefix receipt is attached to the replay; the unfinished full-day rows
+    # and raw manifests deliberately keep their partial quality designation.
+    receipt = dict(symbol=symbol, day=day, scope='completed_observed_minutes', session_complete=False,
+        observed_at=str(observed), exclusive_tick_cutoff=str(cutoff), ticks=len(eligible), minutes=len(completed),
+        numeric_fields_checked=6*len(completed), mismatches=0,
+        source_hashes={k: s.content_hash for k, s in {**tick_sources, **minute_sources}.items()},
+        limitation='Ticks and minute aggregates agree through this cutoff; future minutes and official full-day volume remain unverified.')
+    return eligible, receipt
+
+
 def reconcile_intraday_session(db, root, symbol, day, *, receipt=None):
     ticks, tick_sources = verified_archive_rows(db, root, symbol, day, 'tick')
     minutes, minute_sources = verified_archive_rows(db, root, symbol, day, '1m')
