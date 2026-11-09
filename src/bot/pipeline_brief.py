@@ -93,7 +93,10 @@ def prepare_brief_metadata(*, root: Path, task: str, run_id: str, variables: dic
             quality_status="partial" if verifier.excluded else "ok",
             metadata={"task": task, "pipeline_run_id": run_id, "input_gate_version": 2},
         )
+    from bot.daily_collection import collection_period
+    from bot.utils import now_tw
     return {"task": task, "run_id": run_id, "evidence_ids": evidence_ids,
+            "collection_period": collection_period(now_tw()),
             "input_source_document_id": receipt.document_id,
             "input_content_hash": receipt.content_hash, "input_gate_version": 2,
             "market_verification": "replayed_inputs_only", "excluded_inputs": verifier.excluded}

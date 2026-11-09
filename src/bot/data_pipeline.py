@@ -123,6 +123,7 @@ class PipelineRun:
     us_brief_prompt_id: str = ""
     us_brief_prompt_version: str = ""
     brief_input_metadata: Dict[str, Any] = field(default_factory=dict)
+    source_run_id: str = ""
     macro_summary: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -846,21 +847,59 @@ def run_full_pipeline(
 def _persist_run(run: PipelineRun, out_dir: Path, log: logging.Logger) -> None:
     try:
         run_path = out_dir / "run.json"
-        run_path.write_text(
-            json.dumps(asdict(run), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        from bot.runtime_state import atomic_json, atomic_text
+        atomic_json(run_path, asdict(run))
         mirror_file_to_cloud(run_path)
         if run.daily_brief_md:
             p = out_dir / "daily_brief.md"
-            p.write_text(run.daily_brief_md, encoding="utf-8")
+            atomic_text(p, run.daily_brief_md)
             mirror_file_to_cloud(p)
         if run.us_brief_md:
             p = out_dir / "us_market_brief.md"
-            p.write_text(run.us_brief_md, encoding="utf-8")
+            atomic_text(p, run.us_brief_md)
             mirror_file_to_cloud(p)
     except Exception:
         log.exception("Pipeline run 寫檔失敗")
+        raise
+
+
+def resume_prepared_briefs(root, source_run_id, settings):
+    """A new execution record consumes pinned inputs; no source collection repeats."""
+    from dataclasses import replace
+    from bot.runtime_state import read_json
+    from bot.pipeline_brief import require_brief_text
+    root = Path(root)
+    source = load_pipeline_run(root, source_run_id)
+    if source is None:
+        raise ValueError('source pipeline run is unavailable')
+    run_id = now_tw().strftime('%Y%m%d_%H%M%S_%f') + '_brief'
+    out = root / 'data/pipeline_runs' / run_id
+    out.mkdir(parents=True, exist_ok=True)
+    run = replace(source, run_id=run_id, started_at=now_tw().isoformat(), ended_at='',
+                  output_dir=str(out), source_run_id=source_run_id,
+                  errors=[e for e in source.errors if not e.startswith(('daily_brief:', 'us_brief:'))],
+                  warnings=list(source.warnings), daily_brief_md='', us_brief_md='', brief_input_metadata={})
+    client = GeminiClient(settings=settings, root=root)
+    started = time.time()
+    for task, attr, prefix in (('daily_brief', 'daily_brief_md', 'daily_brief'),
+                               ('us_market_brief', 'us_brief_md', 'us_brief')):
+        try:
+            pending = read_json(root / 'data/brief_pending' / now_tw().date().isoformat() / (task + '.json'))
+            from bot.daily_collection import collection_period
+            if pending.get('metadata', {}).get('collection_period') != collection_period(now_tw()):
+                raise ValueError('no prepared inputs for current collection period')
+            metadata = {**pending['metadata'], 'run_id': run_id, 'source_run_id': source_run_id}
+            raw, info = gemini_call(task, client=client, root=root, metadata=metadata, **pending['variables'])
+            run.brief_input_metadata[task] = info.get('input_provenance', metadata)
+            setattr(run, attr, require_brief_text(raw, info))
+        except Exception as exc:
+            run.errors.append(f'{prefix}: {exc}')
+    run.ended_at = now_tw().isoformat()
+    run.duration_sec = time.time() - started
+    logger = get_logger('pipeline')
+    _persist_run(run, out, logger)
+    _append_manifest(run, root, logger)
+    return run
 
 
 def _append_manifest(run: PipelineRun, root: Path, log: logging.Logger) -> None:

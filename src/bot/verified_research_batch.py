@@ -14,10 +14,8 @@ from bot.research_symbols import sec_symbol, supported_ticker
 
 
 def write_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
-    temporary.replace(path)
+    from bot.runtime_state import atomic_json
+    atomic_json(path, value)
 
 
 def backlog(run):
@@ -318,6 +316,14 @@ def _main(argv=None):
                 metadata={'task': 'verified_research_batch', 'evidence_ids': evidence_ids,
                     'input_source_document_id': receipt.document_id}, **variables)
             write_json(out / ('response-' + attempt_id + '-' + batch_id + '.json'), {'raw': raw, 'info': info})
+            if info.get('deferred') or info.get('error_kind') in {'quota', 'authentication', 'provider'}:
+                for item in pending[offset:]:
+                    state['results'][item['ticker']] = {'status': 'blocked', 'reason': str(info.get('error', 'model paused')),
+                        'input_fingerprint': item['analysis']['input_fingerprint'], 'next_retry_at': info.get('next_retry_at')}
+                state['model_blocked'] = True
+                state['updated_at'] = now_tw().isoformat()
+                write_json(out / 'status.json', state)
+                break
             parsed = extract_json(raw or '')
             reports = parsed.get('reports', []) if isinstance(parsed, dict) else []
             revalidate(root, batch)

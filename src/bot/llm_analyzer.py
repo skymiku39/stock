@@ -112,6 +112,7 @@ class GeminiClient:
                 else Settings()
             )
         self.settings = settings
+        self.root = Path(root).resolve() if root is not None else Path.cwd()
         self.api_key = api_key or settings.gemini_api_key
         self.model = model
         if settings.llm_provider == "codex_app_server":
@@ -177,7 +178,8 @@ class GeminiClient:
         if self._mode == "codex_app_server":
             from bot.model_recovery import refresh_blocked_model
             refresh_blocked_model(Path(getattr(self._client, "cwd", None) or Path.cwd()), self.settings)
-            text, codex_meta = self._client.generate(prompt)
+            from bot.model_availability import ModelAvailability
+            text, codex_meta = ModelAvailability(self.root, self._client).generate(prompt)
             meta.update(codex_meta)
             return (text if text and "error" not in codex_meta else None), meta
 
@@ -294,6 +296,14 @@ def gemini_call(
         info.update({"validation_error": message, "analysis_id": analysis_record_id(record)})
         return None, info
 
+    brief_cache_path = None
+    if prompt_id in {'daily_brief', 'us_market_brief'}:
+        from bot import brief_cache
+        brief_cache_path = brief_cache.prepare(root or Path.cwd(), prompt, vars, record_metadata, client)
+        reused = brief_cache.load(root or Path.cwd(), brief_cache_path)
+        if reused is not None:
+            return reused
+
     if not client.enabled:
         record = log.record(
             prompt_id=prompt.id,
@@ -317,6 +327,9 @@ def gemini_call(
         temperature=prompt.temperature,
     )
     info.update(meta)
+    if meta.get('deferred'):
+        # No model call occurred. Do not manufacture a failed execution receipt.
+        return None, info
     success = text is not None and not meta.get("error")
     record = log.record(
         prompt_id=prompt.id,
@@ -334,6 +347,8 @@ def gemini_call(
     info["analysis_id"] = analysis_record_id(record)
     if "input_provenance" in info:
         info["input_provenance"]["analysis_id"] = info["analysis_id"]
+    if brief_cache_path is not None and success:
+        brief_cache.save(brief_cache_path, text, info)
     return text, info
 
 
