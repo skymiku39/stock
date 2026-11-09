@@ -26,11 +26,12 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
 - 2026-11-09 完整離線測試 `1379 passed`（約 142 秒）。
 
 ## 進行中 / 下一步
-- 工作區有 12 個已修改檔 + 新檔 `src/bot/brief_cache.py`、`src/bot/model_availability.py`、`tests/test_model_availability.py`，未提交。
+- 2026-11-09 已分四個提交落地（817fb10 排程 busy/blocked/partial 重試、d3116c1 模型可用性與簡報快取、841a8a0 記憶索引、470b03a 文件）；僅剩未追蹤的 `work/`。分支領先 origin 51 個提交（含本更新），**尚未推送**。
+- 排程設計備忘：exit 4=busy 60 秒後重試；exit 3=blocked/partial 依 `next_retry_epoch`；重試次數用完只照一般間隔執行，直到成功才歸零。
 - 下一步：
-  1. （已檢視 2026-11-09）`scheduler.py`：exit 4=busy 60 秒後重試、exit 3=blocked/partial 依 `next_retry_epoch`；移除「失敗數超過上限就歸零」後，重試次數用完就只照一般間隔執行，直到成功才歸零（不再每輪重啟快速重試）。判斷為合理，已補 `test_busy_exit_waits_a_minute_without_counting_as_failure`（17 passed）；尚無 rc=3 的 `next_retry_epoch` 專屬測試。
-  2. 確認 `docs/reports/local-module-check-2026-11-06.md` 的改動屬於本批。
-  3. 分組提交（排程重試 / 模型可用性與簡報快取 / 文件）。分支領先 origin 47 個提交，推送前先問使用者。
+  1. 重跑全套測試確認提交後狀態（目前只跑過 scheduler 測試）。
+  2. 補 exit 3 的 `next_retry_epoch` 排程測試。
+  3. 詢問使用者是否推送，以及 P1 計畫（歷史財報、DuckDuckGo 替代）先做哪項。
 
 ## 已知問題與注意事項
 - `work/` 未被 `.gitignore` 排除，提交時不要 `git add -A`。
