@@ -33,11 +33,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from bot.config import Settings
-from bot.runtime_state import code_identity
 from bot.events import SchedulerJobCompleted, SchedulerStarted
 from bot.events.protocols import EventPublisher
 from bot.events.wiring import publish_if_bus
 from bot.job_process import run_with_deadline
+from bot.runtime_state import read_json, code_identity
 from bot.utils import get_logger, now_tw
 
 # 台股交易時段 (含盤前/盤後緩衝)，用於 market_hours_only 判斷。
@@ -130,6 +130,7 @@ class Job:
     last_run_epoch: float = 0.0
     last_run_key: str = ""
     consecutive_failures: int = 0
+    next_retry_epoch: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def is_running(self) -> bool:
@@ -173,11 +174,12 @@ class Scheduler:
             return
         for job in self.jobs:
             prior = jobs.get(job.name, {})
-            if prior.get("state") not in {"succeeded", "failed", "timed_out"}:
+            if prior.get("state") not in {"succeeded", "failed", "timed_out", "partial", "blocked", "busy"}:
                 continue
             try:
                 job.last_run_epoch = dt.datetime.fromisoformat(prior["finished_at"]).timestamp()
                 job.consecutive_failures = int(prior.get("consecutive_failures", 0))
+                job.next_retry_epoch = float(prior.get('next_retry_epoch', 0))
             except (KeyError, ValueError, TypeError):
                 continue
 
@@ -306,6 +308,9 @@ class Scheduler:
                             module="bot.daily_research",
                             interval_min=s.scheduler_daily_all_interval_min,
                             market_hours_only=False, extra_args=['--root', str(self.project_root)]))
+            jobs.append(Job(name='daily_inputs', console_script='stock-daily-collect',
+                            module='bot.daily_collection', interval_min=5, market_hours_only=False,
+                            extra_args=['--root', str(self.project_root)]))
         elif s.scheduler_research_interval_min > 0:
             extra = [a for a in str(s.scheduler_research_args).split() if a]
             if not any(
@@ -466,6 +471,8 @@ class Scheduler:
                 job.last_run_epoch = time.time()
                 return False
         else:
+            if time.time() < getattr(job, 'next_retry_epoch', 0):
+                return False
             retrying = 0 < job.consecutive_failures <= self.settings.scheduler_failure_max_retries
             delay = self.settings.scheduler_failure_retry_seconds if retrying else job.interval_min * 60
             if (not once or retrying) and (time.time() - job.last_run_epoch) < delay:
@@ -524,13 +531,13 @@ class Scheduler:
             self._write_status("running", last_job=job.name, last_error="", job_state="dry_run", job_exit_code=0)
             return 0
 
-        if job.consecutive_failures > self.settings.scheduler_failure_max_retries:
-            job.consecutive_failures = 0
         timeout = (self.settings.scheduler_research_timeout_seconds if job.name == "research"
                    else self.settings.scheduler_job_timeout_seconds)
         env = _child_env(self.project_root)
         error = ""
         job_state = "failed"
+        retryable = True
+        next_retry = 0
         def started(proc):
             from bot.job_process import process_created_at
             self._write_status('running', last_job=job.name, job_state='running', job_details={
@@ -550,6 +557,14 @@ class Scheduler:
             level = self.logger.info if rc == 0 else self.logger.warning
             level("■ 任務 %s 結束 (exit=%s)", job.name, rc)
             job_state = "succeeded" if rc == 0 else "failed"
+            if job.name in {'research', 'daily_inputs'} and rc == 4:
+                job_state, retryable = 'busy', False
+                next_retry = time.time() + 60
+            elif job.name == 'research' and rc == 3:
+                state = read_json(self.project_root / 'data/daily_research' / now_tw().date().isoformat() / 'status.json')
+                job_state = 'blocked' if state.get('outcome') == 'blocked' else 'partial'
+                retryable = False
+                next_retry = float(state.get('next_retry_epoch') or 0)
         except subprocess.TimeoutExpired:
             rc = 124
             job_state = "timed_out"
@@ -560,8 +575,15 @@ class Scheduler:
             rc = -1
             error = f"{type(exc).__name__}: {exc}"
         finally:
-            job.consecutive_failures = job.consecutive_failures + 1 if rc != 0 else 0
+            if retryable and rc != 0:
+                job.consecutive_failures += 1
+            elif job_state in {'succeeded', 'partial'}:
+                job.consecutive_failures = 0
             job.last_run_epoch = time.time()
+            delay = (self.settings.scheduler_failure_retry_seconds
+                     if retryable and 0 < job.consecutive_failures <= self.settings.scheduler_failure_max_retries
+                     else job.interval_min * 60)
+            job.next_retry_epoch = next_retry or job.last_run_epoch + delay
             if job.run_once_per_day and rc == 0:
                 job.last_run_key = self._daily_run_key(job, scheduled_at)
             publish_if_bus(
@@ -572,6 +594,8 @@ class Scheduler:
                     exit_code=rc,
                     dry_run=False,
                     log_path=str(log_path),
+                    outcome=job_state,
+                    retryable=retryable and rc != 0,
                 ),
             )
             self._write_status(
@@ -581,6 +605,8 @@ class Scheduler:
                 last_error="" if rc == 0 else error or f"exit_code={rc}",
                 job_state=job_state,
                 job_exit_code=rc,
+                job_details={'retryable': retryable and rc != 0, 'next_retry_epoch': job.next_retry_epoch,
+                             'next_retry_at': dt.datetime.fromtimestamp(job.next_retry_epoch, now_tw().tzinfo).isoformat()},
             )
         return rc
 

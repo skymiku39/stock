@@ -255,3 +255,22 @@ def test_retry_still_respects_market_window(tmp_path, monkeypatch):
     job.last_run_epoch = 1
     monkeypatch.setattr("bot.scheduler.time.time", lambda: 10000)
     assert not sch._job_eligible(job, dt.datetime(2026, 10, 17, 10), once=False)
+
+
+def test_busy_exit_waits_a_minute_without_counting_as_failure(tmp_path, monkeypatch):
+    from bot.scheduler import Scheduler
+    clock = [dt.datetime(2026, 10, 16, 10, 0).timestamp()]
+    monkeypatch.setattr("bot.scheduler.time.time", lambda: clock[0])
+    monkeypatch.setattr("bot.scheduler.now_tw", lambda: dt.datetime.fromtimestamp(clock[0]))
+    monkeypatch.setattr("bot.scheduler.run_with_deadline", lambda *a, **k: 4)
+    sch = Scheduler(_settings(scheduler_market_hours_only=False), project_root=tmp_path)
+    job = next(j for j in sch.jobs if j.name == "research")
+    assert sch._run_job(job) == 4
+    assert job.consecutive_failures == 0
+    assert job.next_retry_epoch == clock[0] + 60
+    now = dt.datetime.fromtimestamp(clock[0])
+    assert not sch._job_eligible(job, now, once=False)
+    status = json.loads(sch.status_path.read_text(encoding="utf-8"))
+    assert status["jobs"]["research"]["state"] == "busy"
+    sch = Scheduler(_settings(scheduler_market_hours_only=False), project_root=tmp_path)
+    assert next(j for j in sch.jobs if j.name == "research").next_retry_epoch == clock[0] + 60

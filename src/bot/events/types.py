@@ -183,3 +183,5 @@ class SchedulerJobCompleted(DomainEvent):
     exit_code: int = 0
     dry_run: bool = False
     log_path: Optional[str] = None
+    outcome: str = ""
+    retryable: bool = False

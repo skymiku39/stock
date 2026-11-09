@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+from pathlib import Path
 
 from bot.news_fetcher import fetch_today_news, load_cached_news_only
 from bot.source_registry import SourceRegistry, resolve_source_document_path
@@ -12,6 +13,7 @@ from bot.stock_db import StockDB
 from bot.technicals import fetch_recent_kline, load_kline_from_db
 from bot.utils import now_tw
 from bot.verified_research_batch import write_json
+from bot.runtime_state import FileLock, StateBusy, atomic_json, atomic_text, read_json
 
 
 def collection_period(now):
@@ -82,7 +84,12 @@ def collect_price(root, ticker):
             "source_document_id": source.document_id, "retrieved_at": bar.retrieved_at}
 
 
-def collect_daily_inputs(root, settings):
+def collect_daily_inputs(root, settings, *, force=False):
+    with FileLock(Path(root) / 'data/.daily-inputs.lock'):
+        return _collect_daily_inputs(root, settings, force=force)
+
+
+def _collect_daily_inputs(root, settings, *, force=False):
     from bot.watchlist import load
     now = now_tw()
     date, period = now.date().isoformat(), collection_period(now)
@@ -91,7 +98,7 @@ def collect_daily_inputs(root, settings):
         previous = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         previous = {}
-    reuse = previous.get("date") == date and previous.get("period") == period
+    reuse = not force and previous.get("date") == date and previous.get("period") == period
     symbols = sorted(set(settings.symbols) | {i.ticker for i in load(root).items})
     result = {"date": date, "period": period, "attempted_at": now.isoformat(),
               "complete": False, "news": {}, "prices": {}, "errors": []}
@@ -119,15 +126,32 @@ def collect_daily_inputs(root, settings):
             result["prices"][key] = value
         if value.get("status") != "ok":
             result["errors"].append(f"{key}: {value.get('error', 'collection incomplete')}")
-        write_json(path, result)
+        atomic_json(path.with_name('daily-inputs-progress.json'), result)
     result["complete"] = not result["errors"] and now_tw().date().isoformat() == date
     result["finished_at"] = now_tw().isoformat()
-    write_json(path, result)
+    atomic_json(path, result)
     return result
 
 
 def write_daily_summary(root, state):
     """A readable report also exists when the LLM or full research is partial."""
+    path = Path(root) / 'data/daily_research' / state['date'] / 'summary.txt'
+    lock = FileLock(Path(root) / 'data/.daily-summary.lock')
+    if not lock.acquire():
+        return path
+    try:
+        latest = read_json(path.with_name('status.json'))
+        if latest.get('date') == state['date'] and latest.get('attempted_at', '') >= state.get('attempted_at', ''):
+            state = latest
+        inputs = read_json(path.with_name('daily-inputs.json'))
+        if inputs.get('date') == state['date'] and inputs.get('finished_at'):
+            state = {**state, 'daily_inputs': inputs}
+        return _write_daily_summary(root, state)
+    finally:
+        lock.release()
+
+
+def _write_daily_summary(root, state):
     date = state["date"]
     inputs = state.get("daily_inputs", {})
     news = inputs.get("news", {})
@@ -157,7 +181,28 @@ def write_daily_summary(root, state):
     if gaps:
         lines += ["", "缺口與限制"] + [f"- {gap}" for gap in gaps]
     path = root / "data/daily_research" / date / "summary.txt"
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_text(path, "\n".join(lines) + "\n")
     return path
+
+
+def main(argv=None):
+    import argparse
+    from bot.config import Settings
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', type=Path, default=Path.cwd())
+    parser.add_argument('--force-refresh', action='store_true')
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    try:
+        result = collect_daily_inputs(root, Settings(_env_file=str(root / '.env')), force=args.force_refresh)
+        state = read_json(root / 'data/daily_research' / result['date'] / 'status.json')
+        state = state or {'date': result['date'], 'phase': 'awaiting_research', 'complete': False}
+        write_daily_summary(root, {**state, 'daily_inputs': result})
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result['complete'] else 2
+    except StateBusy:
+        return 4
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
