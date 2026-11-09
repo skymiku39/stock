@@ -16,6 +16,9 @@ MIGRATIONS = (
         "ALTER TABLE watchlist ADD COLUMN restored_from TEXT NOT NULL DEFAULT ''",
         "CREATE TABLE watchlist_state (id INTEGER PRIMARY KEY CHECK(id = 1), initialized_at TEXT NOT NULL)",
     )),
+    (7, "memory-status-update-preserves-search-index", (
+        "DROP TRIGGER IF EXISTS memory_items_au",
+    )),
     (8, "quarterly-unreported-values-remain-null", (
         """CREATE TABLE quarterly_report_nullable (
             symbol TEXT NOT NULL, period TEXT NOT NULL,

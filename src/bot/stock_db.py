@@ -1900,7 +1900,8 @@ class StockDB:
                 "VALUES (new.memory_id, new.content, new.summary, new.keywords, new.subject); END"
             )
             conn.execute(
-                "CREATE TRIGGER IF NOT EXISTS memory_items_au AFTER UPDATE ON memory_items "
+                "CREATE TRIGGER IF NOT EXISTS memory_items_au AFTER UPDATE OF "
+                "memory_id, content, summary, keywords, subject ON memory_items "
                 "BEGIN DELETE FROM memory_items_fts WHERE memory_id = old.memory_id; "
                 "INSERT INTO memory_items_fts(memory_id, content, summary, keywords, subject) "
                 "VALUES (new.memory_id, new.content, new.summary, new.keywords, new.subject); END"

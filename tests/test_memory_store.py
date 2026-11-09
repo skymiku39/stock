@@ -291,6 +291,15 @@ def test_capacity_includes_llm_calls_hidden_by_retrieval_policy(tmp_path):
     assert store.archive_expired() == 1
 
 
+def test_status_updates_do_not_reindex_unchanged_prompt_text(tmp_path):
+    store = _store(tmp_path)
+    item = store.put_short('searchable original text', quality_status='ok')
+    before = store.db.conn.total_changes
+    store.db.update_memory_status(item.memory_id, 'archived')
+    assert store.db.conn.total_changes - before == 1
+    assert store.db.conn.execute("SELECT content FROM memory_items_fts WHERE memory_id=?", (item.memory_id,)).fetchone()[0] == item.content
+
+
 def test_llm_call_memory_preserves_prompt_and_output(tmp_path: Path) -> None:
     store = _store(tmp_path)
     row = store.record_llm_call(SimpleNamespace(
