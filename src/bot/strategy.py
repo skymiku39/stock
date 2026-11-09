@@ -648,6 +648,7 @@ class BaseStrategy(ABC):
         self._order_meta[key] = dict(
             symbol=symbol, action=action, custom_field=reason, quantity=quantity,
             filled_quantity=0, unit=unit,
+            submitted_at=time.monotonic(),
             price=float(trade.order.price),
             aliases=[str(getattr(trade.order, k, "") or "").strip()
                      for k in ("ordno", "seqno", "id")
@@ -954,11 +955,46 @@ class BaseStrategy(ABC):
                 self.broker.update_status()
                 self._drain_order_events()
                 for trade in self.broker.list_trades():
+                    self._cancel_if_stale(trade)
                     self._refresh_order_state(trade)
             except Exception:
                 self.logger.exception("委託狀態更新例外")
 
             time.sleep(3)
+
+    def _order_timeout_seconds(self) -> Optional[float]:
+        """未成交委託逾時取消秒數；None 表示不取消（基底預設）。"""
+        return None
+
+    def _cancel_if_stale(self, trade) -> None:
+        timeout = self._order_timeout_seconds()
+        if timeout is None or timeout <= 0:
+            return
+        with self._submission_lock:
+            status = trade.status.status.value
+            if status in ("Filled", "Cancelled", "Failed"):
+                return
+            symbol = getattr(trade.contract, "code", "")
+            action = str(getattr(trade.order, "action", ""))
+            key = self._match_order({k: getattr(trade.order, k, "")
+                                     for k in ("ordno", "seqno", "id", "action", "custom_field")},
+                                    symbol, action)
+            meta = self._order_meta.get(key)
+            if meta is None or meta.get("cancel_requested"):
+                return
+            elapsed = time.monotonic() - meta.get("submitted_at", time.monotonic())
+            if elapsed < timeout:
+                return
+            meta["cancel_requested"] = True
+            self.logger.warning(
+                "委託逾時取消: %s %s 已成交/委託=%s/%s 已等待 %.0f 秒",
+                symbol, action, meta.get("filled_quantity", 0),
+                meta.get("quantity", 0), elapsed,
+            )
+            try:
+                self.broker.cancel_order(trade)
+            except Exception:
+                self.logger.exception("逾時取消委託失敗: %s %s", symbol, action)
 
     def _refresh_order_state(self, trade):
         with self._submission_lock:

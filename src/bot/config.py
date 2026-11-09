@@ -244,6 +244,15 @@ class Settings(BaseSettings):
     smile_buy_tiers: str = "1:1,3:2,5:3,8:4"
     smile_base_lot: int = 1
     smile_regular_tax_rate: float = 0.003  # 一般證交稅（非當沖）
+    smile_order_timeout_seconds: int = 120  # 未成交限價單逾時取消秒數；0 停用
+
+    @field_validator("smile_order_timeout_seconds")
+    @classmethod
+    def _validate_smile_order_timeout(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("smile_order_timeout_seconds must be >= 0")
+        return v
+
     smile_reference_prices: Annotated[Dict[str, float], NoDecode] = Field(
         default_factory=dict,
     )

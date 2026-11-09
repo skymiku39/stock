@@ -50,6 +50,9 @@ class SmileCurveStrategy(BaseStrategy):
         temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
         temp.replace(self._smile_state_path)
 
+    def _order_timeout_seconds(self):
+        return self.settings.smile_order_timeout_seconds or None
+
     def _sell_tax_rate(self, symbol):
         return self._engine(symbol).sell_tax
 

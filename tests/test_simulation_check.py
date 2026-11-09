@@ -159,6 +159,86 @@ def test_cancel_partially_filled_buy_releases_only_remaining_reservation(tmp_pat
     assert strategy.positions["0050"].quantity == 4
 
 
+def _timeout_buy(tmp_path, **overrides):
+    """Place one unfilled buy at monotonic t=1000; return (strategy, api, clock)."""
+    strategy, api = setup(tmp_path, auto_fill=False, **overrides)
+    clock = [1000.0]
+    with patch("bot.strategy.time.monotonic", side_effect=lambda: clock[0]):
+        tick(strategy, 100)
+        tick(strategy, 98)
+    assert len(api.trades) == 1
+    return strategy, api, clock
+
+
+def _update_at(strategy, clock, now):
+    clock[0] = now
+    with patch("bot.strategy.time.monotonic", side_effect=lambda: clock[0]):
+        update_once(strategy)
+
+
+def test_stale_buy_not_cancelled_before_timeout(tmp_path):
+    strategy, api, clock = _timeout_buy(tmp_path)
+    _update_at(strategy, clock, 1119.0)
+    assert api.trades[0].status.status.value != "Cancelled"
+    assert strategy._has_pending("0050")
+
+
+def test_stale_buy_cancelled_releases_reservation_and_allows_retry(tmp_path):
+    strategy, api, clock = _timeout_buy(tmp_path)
+    _update_at(strategy, clock, 1121.0)
+    assert api.trades[0].status.status.value == "Cancelled"
+    assert not strategy._has_pending("0050")
+    assert strategy.risk.effective_fund_remaining() == 5000
+    assert not strategy.engines["0050"].state.tiers_done
+    tick(strategy, 98)
+    assert len(api.trades) == 2
+
+
+def test_stale_partially_filled_buy_cancels_only_remainder(tmp_path):
+    strategy, api, clock = _timeout_buy(tmp_path)
+    api.fill(api.trades[0], 4)
+    _update_at(strategy, clock, 1121.0)
+    assert api.trades[0].status.status.value == "Cancelled"
+    assert not strategy._has_pending("0050")
+    assert strategy.positions["0050"].quantity == 4
+    assert strategy.risk.effective_fund_remaining() == pytest.approx(
+        5000 - buy_cash_required(98, 4, "share", settings=strategy.settings))
+
+
+def test_stale_sell_cancelled_keeps_position_and_can_resell(tmp_path):
+    strategy, api = setup(tmp_path, auto_fill=False)
+    tick(strategy, 100)
+    tick(strategy, 98)
+    api.fill(api.trades[0], 10)
+    assert strategy.positions["0050"].quantity == 10
+    clock = [1000.0]
+    with patch("bot.strategy.time.monotonic", side_effect=lambda: clock[0]):
+        assert strategy._place_stop_sell("0050", 10, "accuracy_check")
+    assert len(api.trades) == 2
+    assert strategy._has_pending("0050")
+    _update_at(strategy, clock, 1121.0)
+    assert api.trades[1].status.status.value == "Cancelled"
+    assert not strategy._has_pending("0050")
+    assert strategy.positions["0050"].quantity == 10
+    assert strategy._place_stop_sell("0050", 10, "accuracy_check")
+    assert len(api.trades) == 3
+
+
+def test_stale_cancel_requested_only_once(tmp_path):
+    strategy, api, clock = _timeout_buy(tmp_path)
+    with patch.object(strategy.broker, "cancel_order") as cancel:
+        _update_at(strategy, clock, 1121.0)
+        _update_at(strategy, clock, 1130.0)
+    assert cancel.call_count == 1
+
+
+def test_stale_cancel_disabled_when_timeout_zero(tmp_path):
+    strategy, api, clock = _timeout_buy(tmp_path, smile_order_timeout_seconds=0)
+    _update_at(strategy, clock, 100000.0)
+    assert api.trades[0].status.status.value != "Cancelled"
+    assert strategy._has_pending("0050")
+
+
 def test_no_sale_at_rebound_if_fees_still_make_batch_unprofitable(tmp_path):
     strategy, api = setup(tmp_path, smile_base_lot=1)
     tick(strategy, 100)
@@ -314,7 +394,7 @@ def test_shioaji_acceptance_requires_both_fills_and_cancels_timeout(tmp_path, mo
 
     monkeypatch.setattr(check, "SjBroker", factory)
     if not auto_fill:
-        monkeypatch.setattr(check.time, "monotonic", MagicMock(side_effect=[0, 2]))
+        monkeypatch.setattr(check.time, "monotonic", MagicMock(side_effect=[0, 0, 2]))
     result = check.run_shioaji(tmp_path / "output", tmp_path, 1)
     assert result["final_test_position_shares"] == 0
     assert result["production_orders"] == 0
