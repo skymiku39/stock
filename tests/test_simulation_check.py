@@ -275,6 +275,40 @@ def test_smile_state_and_records_restore_after_restart(tmp_path):
     assert len(pd.read_csv(restored._state_root / "data" / f"trades_{now_tw().date()}.csv")) == 2
 
 
+def test_smile_forces_auto_merge_off(tmp_path):
+    strategy, _ = setup(tmp_path)
+    s2 = SmileCurveStrategy(strategy.broker, strategy.settings.model_copy(
+        update={"symbols_auto_merge": True}), tmp_path)
+    assert s2.settings.symbols_auto_merge is False
+
+
+def test_smile_unsupported_symbol_raises_at_construction(tmp_path):
+    with pytest.raises(ValueError, match="不支援"):
+        setup(tmp_path, symbols=["00878"])
+
+
+@pytest.mark.parametrize("content", ["{broken", '{"0050": {"reference": 100}}'])
+def test_smile_corrupt_state_fails_closed(tmp_path, content):
+    strategy, _ = setup(tmp_path)
+    path = strategy._smile_state_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(RuntimeError) as err:
+        _strategy(strategy.settings, strategy.broker, tmp_path)
+    assert str(path.resolve()) in str(err.value) and ".bak" in str(err.value)
+
+
+def test_smile_state_save_keeps_previous_backup(tmp_path):
+    strategy, _ = setup(tmp_path)
+    strategy._save_smile_state()
+    first = strategy._smile_state_path.read_text(encoding="utf-8")
+    strategy.engines["0050"].state.reference = 123.0
+    strategy._save_smile_state()
+    bak = strategy._smile_state_path.with_name("smile_state.json.bak")
+    assert bak.read_text(encoding="utf-8") == first
+    assert strategy._smile_state_path.read_text(encoding="utf-8") != first
+
+
 def test_smile_never_applies_day_trade_forced_close(tmp_path):
     strategy, _ = setup(tmp_path)
     tick(strategy, 100)

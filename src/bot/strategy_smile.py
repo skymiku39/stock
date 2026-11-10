@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import shutil
 import time
 from dataclasses import asdict
 
@@ -19,7 +20,12 @@ class SmileCurveStrategy(BaseStrategy):
     def __init__(self, broker, settings, *args, **kwargs):
         if settings.run_mode == "trade" and not settings.simulation:
             raise ValueError("Smile trading requires SIMULATION=true")
+        auto_merge_was_on = bool(getattr(settings, "symbols_auto_merge", True))
+        if auto_merge_was_on:
+            settings = settings.model_copy(update={"symbols_auto_merge": False})
         super().__init__(broker, settings, *args, **kwargs)
+        if auto_merge_was_on:
+            self.logger.warning("微笑策略不支援觀察池自動併入代號，已強制關閉 symbols_auto_merge")
         self.engines: dict[str, SmileCurveEngine] = {}
         self._smile_intent: dict[str, tuple[int | None, str]] = {}
         self._smile_lock = self._submission_lock
@@ -27,16 +33,29 @@ class SmileCurveStrategy(BaseStrategy):
         for symbol in settings.symbols:
             self._engine(symbol)
         if self._smile_state_path.exists():
-            for symbol, row in json.loads(self._smile_state_path.read_text(encoding="utf-8")).items():
+            try:
+                data = json.loads(self._smile_state_path.read_text(encoding="utf-8"))
+                loaded = {}
+                for symbol, row in data.items():
+                    loaded[symbol] = (row["reference"], set(row["tiers_done"]),
+                                      set(row["bottom_dates"]),
+                                      [SmileLot(**lot) for lot in row["lots"]])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
+                path = self._smile_state_path.resolve()
+                raise RuntimeError(
+                    f"smile_state.json 損毀：{path}（{type(exc).__name__}: {exc}）。"
+                    "可從同目錄 smile_state.json.bak 還原（最後一次成功寫入前的版本）；"
+                    "若確定沒有微笑持倉與未結委託，可刪除此檔讓策略重建標準價") from exc
+            for symbol, (ref, tiers, dates, lots) in loaded.items():
                 e = self._engine(symbol)
-                e.state.reference = row["reference"]
-                e.state.tiers_done = set(row["tiers_done"])
-                e.state.bottom_dca_done_dates = set(row["bottom_dates"])
-                e.state.lots = [SmileLot(**lot) for lot in row["lots"]]
+                e.state.reference = ref
+                e.state.tiers_done = tiers
+                e.state.bottom_dca_done_dates = dates
+                e.state.lots = lots
 
     def _engine(self, symbol):
         if symbol != "0050" and (not symbol.isdigit() or len(symbol) != 4 or symbol.startswith("0")):
-            raise ValueError(f"Unsupported smile instrument: {symbol}")
+            raise ValueError(f"不支援的微笑策略代號：{symbol}。支援範圍：普通股 4 碼數字（非 0 開頭）與 0050")
         if symbol not in self.engines:
             self.engines[symbol] = SmileCurveEngine(symbol, self.settings)
         return self.engines[symbol]
@@ -48,6 +67,8 @@ class SmileCurveStrategy(BaseStrategy):
                            lots=[asdict(lot) for lot in e.state.lots]) for s, e in self.engines.items()}
         temp = self._smile_state_path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        if self._smile_state_path.exists():
+            shutil.copy2(self._smile_state_path, self._smile_state_path.with_name("smile_state.json.bak"))
         temp.replace(self._smile_state_path)
 
     def _order_timeout_seconds(self):

@@ -298,6 +298,14 @@ Select-String -Path "log\strategy_*.log" -Pattern "2330"
 3. 手動平倉（當沖策略不應留隔夜）
 4. 檢查 log 定位問題原因
 
+### 4.6 微笑策略狀態檔損毀
+
+啟動時若出現 `smile_state.json 損毀` 的 RuntimeError（策略不會自動重置，fail closed）：
+1. 確認路徑：`data/simulation/data/smile_state.json`（訊息內也會列出絕對路徑）。
+2. 可從同目錄 `smile_state.json.bak` 還原（最後一次成功寫入前的版本）：複製 `.bak` 覆蓋主檔後重啟。
+3. 若確定沒有微笑持倉與未結委託，可刪除主檔，讓策略重建標準價。
+4. 重啟後確認持倉與微笑批次對帳通過。
+
 ## 五、定期維護
 
 ### 每週
