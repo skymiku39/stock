@@ -114,3 +114,55 @@ class TestSmileCurveBacktest:
                 settings=settings,
                 sell_tax_rate=settings.smile_regular_tax_rate,
             ) > 0
+
+
+def _avg_cost_engine(**overrides):
+    from bot.smile_curve import SmileLot
+    params = dict(smile_buy_tiers="1:1", smile_base_lot=1, max_fund=500_000,
+                  max_lot_per_symbol=10, broker_fee_discount=0, broker_min_fee=0,
+                  smile_regular_tax_rate=0, smile_reference_prices={"2330": 100.0},
+                  _env_file=None)
+    params.update(overrides)
+    engine = SmileCurveEngine("2330", Settings(**params))
+    engine.state.reference = 100.0
+    return engine, SmileLot
+
+
+def test_average_cost_sells_all_when_position_profitable_despite_one_losing_lot() -> None:
+    engine, SmileLot = _avg_cost_engine()
+    engine.state.lots = [SmileLot(90.0, 1, "lot", "d1"), SmileLot(105.0, 1, "lot", "d2")]
+    # lot 2 loses (105 -> 101) but the whole position is net positive (+11 -4 per share).
+    assert engine._position_profitable(101.0)
+    actions = engine._rebound_sell("d3", 101.0)
+    assert [a.kind for a in actions] == ["sell", "sell", "reset"]
+    assert engine.state.lots == []
+    assert len(engine.round_trips) == 2
+    assert engine.state.cycle_index == 1
+    assert engine.state.reference == 100.0
+
+
+@pytest.mark.parametrize("fees", [False, True])
+def test_average_cost_sells_nothing_when_net_pnl_not_positive(fees: bool) -> None:
+    from bot.smile_curve import SmileLot
+    if fees:
+        engine, _ = _avg_cost_engine(broker_fee_discount=1.0, broker_min_fee=20,
+                                     smile_regular_tax_rate=0.003)
+        # Gross profit of 0.1 per share on 1 lot is eaten by fees and tax.
+        lots = [SmileLot(100.0, 1, "lot", "d1")]
+        price = 100.1
+    else:
+        engine, _ = _avg_cost_engine()
+        # +10 and -10 per share: net exactly zero.
+        lots = [SmileLot(90.0, 1, "lot", "d1"), SmileLot(110.0, 1, "lot", "d2")]
+        price = 100.0
+    engine.state.lots = list(lots)
+    assert not engine._position_profitable(price)
+    assert engine._rebound_sell("d3", price) == []
+    assert engine.state.lots == lots
+    assert engine.round_trips == []
+    assert engine.state.cycle_index == 0
+
+
+def test_position_profitable_false_without_lots() -> None:
+    engine, _ = _avg_cost_engine()
+    assert not engine._position_profitable(150.0)

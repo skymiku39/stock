@@ -160,6 +160,20 @@ class SmileCurveEngine:
             sell_tax_rate=self.sell_tax,
         ) > 0.0
 
+    def _position_profitable(self, price: float, lots=None) -> bool:
+        """平均成本法：整個部位扣手續費與證交稅後淨利 > 0。"""
+        lots = list(self.state.lots if lots is None else lots)
+        if not lots:
+            return False
+        return sum(
+            net_pnl_twd(
+                lot.entry_price, price, lot.quantity, lot.unit,
+                settings=self.settings,
+                sell_tax_rate=self.sell_tax,
+            )
+            for lot in lots
+        ) > 0
+
     def _record_sell(self, lot: SmileLot, price: float, date: str, reason: str) -> SmileAction:
         pnl_pct = net_pnl_pct(
             lot.entry_price, price, lot.quantity, lot.unit,
@@ -251,21 +265,12 @@ class SmileCurveEngine:
 
     def _rebound_sell(self, date: str, price: float) -> List[SmileAction]:
         actions: List[SmileAction] = []
-        sold_any = False
-        remaining: List[SmileLot] = []
-        for lot in self.state.lots:
-            if self._is_profitable_sell(lot, price):
-                actions.append(self._record_sell(lot, price, date, "rebound"))
-                sold_any = True
-            else:
-                remaining.append(lot)
-        self.state.lots = remaining
-
-        if sold_any and not self.state.lots:
-            actions.append(self._reset_cycle(price, date))
-        elif sold_any:
-            self.state.tiers_done.clear()
-            self.state.bottom_dca_done_dates.clear()
+        if not self._position_profitable(price):
+            return actions
+        for lot in list(self.state.lots):
+            actions.append(self._record_sell(lot, price, date, "rebound"))
+        self.state.lots = []
+        actions.append(self._reset_cycle(price, date))
         return actions
 
     def _dip_buy(self, date: str, price: float) -> List[SmileAction]:

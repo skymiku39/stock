@@ -422,3 +422,36 @@ def test_startup_failure_logs_out_and_releases_instance_lock(tmp_path, monkeypat
             main.main(["--root", str(tmp_path)])
         broker.return_value.logout.assert_called_once()
         release.assert_called_once()
+
+
+def _two_lot_position(tmp_path, **overrides):
+    """Fixed reference 100; lot A bought at 99 (10 shares), lot B at 94 (20 shares)."""
+    strategy, api = setup(tmp_path, smile_reference_prices={"0050": 100.0}, **overrides)
+    tick(strategy, 100)
+    tick(strategy, 99)
+    tick(strategy, 94)
+    assert len(api.trades) == 2
+    assert strategy.positions["0050"].quantity == 30
+    return strategy, api
+
+
+def test_whole_position_sold_in_one_order_when_overall_profit_despite_losing_lot(tmp_path):
+    # Min fee 5 per trade: lot A (gain 10) loses after fees, lot B (gain 120) carries the position.
+    strategy, api = _two_lot_position(tmp_path, broker_min_fee=5)
+    e = strategy.engines["0050"]
+    assert not e._is_profitable_sell(e.open_lots[0], 100)
+    assert e._position_profitable(100)
+    tick(strategy, 100)
+    assert len(api.trades) == 3
+    assert api.trades[2].order.quantity == 30
+    assert not strategy.positions
+
+
+def test_no_sell_order_when_whole_position_not_profitable(tmp_path):
+    # A large minimum fee makes the 130 gross profit lose money overall.
+    strategy, api = _two_lot_position(tmp_path, broker_min_fee=100)
+    e = strategy.engines["0050"]
+    assert not e._position_profitable(100)
+    tick(strategy, 100)
+    assert len(api.trades) == 2
+    assert strategy.positions["0050"].quantity == 30

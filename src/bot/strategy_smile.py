@@ -136,7 +136,7 @@ class SmileCurveStrategy(BaseStrategy):
                 return
             pos = self.positions.get(symbol)
             if price >= e.state.reference:
-                if (pos and e.open_lots and all(e._is_profitable_sell(lot, price) for lot in e.open_lots)):
+                if (pos and e.open_lots and e._position_profitable(price)):
                     self._place_stop_sell(symbol, pos.quantity, "smile",
                                           limit_price=round_tick(price, True, symbol))
                 return

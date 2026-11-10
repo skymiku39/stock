@@ -8,11 +8,11 @@
 |----|------|----------|
 | `configurable`（預設） | ConfigurableStrategy | env 驅動漲幅區間 + LLM 進場閘門 + 回落買回 |
 | `etf_follow` | EtfFollowStrategy | ETF 共識訊號 + 漲幅 -1%~4% |
-| `smile_curve` | SmileCurveStrategy | 跌幅分階買進、回到標準價且各批扣費稅後獲利才送限價賣單；目前僅支援模擬 |
+| `smile_curve` | SmileCurveStrategy | 跌幅分階買進、回到標準價、整個部位以平均成本扣費稅後有淨利才全部送限價賣單；目前僅支援模擬 |
 
 > 舊值 `default` 會自動對應為 `configurable`（向後相容）。
 
-**當沖出場規則**（停損、移動停利、收盤全出、AI 標籤授權）由 `BaseStrategy._evaluate_standard_exits()` 共用。微笑策略保留批次部位，不套用當沖收盤強平。
+**當沖出場規則**（停損、移動停利、收盤全出、AI 標籤授權）由 `BaseStrategy._evaluate_standard_exits()` 共用。微笑策略保留批次部位，不套用當沖收盤強平；出場採平均成本法：價格回到標準價時，整個部位（所有批次）扣手續費與證交稅後淨利 > 0 才一次全部賣出並重設標準價，否則一批都不賣（盤中與回測一致）。
 
 ## 模擬買賣驗證
 

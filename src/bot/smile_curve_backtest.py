@@ -207,6 +207,7 @@ class SmileCurveBacktester:
                 e, bar = engines[sym], today[sym]
                 available_shares = self.execution.capacity(previous_volumes.get(sym))
                 orders, pending[sym] = pending[sym], []
+                sell_group_reason = "unset"
                 for order in orders:
                     log = {k: v for k, v in order.items() if k != "lot"}
                     log.update(symbol=sym, execution_date=date, status="cancelled", filled_quantity=0)
@@ -225,25 +226,28 @@ class SmileCurveBacktester:
                         continue
                     log["execution_price"] = px
                     if order["side"] == "sell":
+                        # Whole-position all-or-nothing: judge the whole sell group once.
+                        if sell_group_reason == "unset":
+                            group = [o["lot"] for o in orders if o["side"] == "sell"]
+                            group_shares = sum(l.quantity * qty_multiplier(l.unit) for l in group)
+                            if group_shares > available_shares:
+                                sell_group_reason = "volume_limit_whole_position_sell"
+                            elif not e._position_profitable(px, group):
+                                sell_group_reason = "unprofitable_open"
+                            else:
+                                sell_group_reason = None
+                        if sell_group_reason:
+                            log["reason"] = sell_group_reason
+                            continue
                         lot = order["lot"]
-                        shares = lot.quantity * qty_multiplier(lot.unit)
-                        if shares > available_shares:
-                            log["reason"] = "volume_limit_whole_lot_sell"
-                            continue
-                        if not e._is_profitable_sell(lot, px):
-                            log["reason"] = "unprofitable_open"
-                            continue
                         e._record_sell(lot, px, date, "close_signal_next_open")
                         e.state.lots.remove(lot)
                         out.cash += sell_cash_received(px, lot.quantity, lot.unit,
                                                       settings=self.settings, sell_tax_rate=e.sell_tax)
                         log.update(status="filled", filled_quantity=lot.quantity)
-                        available_shares -= shares
+                        available_shares -= lot.quantity * qty_multiplier(lot.unit)
                         if not e.open_lots:
                             e._reset_cycle(px, date)
-                        else:
-                            e.state.tiers_done.clear()
-                            e.state.bottom_dca_done_dates.clear()
                     else:
                         unit = "share" if self.settings.use_odd_lot else "lot"
                         want = order["quantity"]
@@ -286,7 +290,7 @@ class SmileCurveBacktester:
                     continue
                 if close >= e.state.reference:
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity)
-                                    for l in e.open_lots if e._is_profitable_sell(l, close)]
+                                    for l in e.open_lots] if e._position_profitable(close) else []
                 else:
                     drop = e._drop_pct(close)
                     for idx, tier in enumerate(e.tiers):

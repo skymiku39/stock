@@ -129,7 +129,7 @@ else:
         scenario = st.selectbox("查看情境",list(payload["results"]))
         detail = payload["results"][scenario]
         reasons = {"cash_or_position_limit":"資金或持倉上限","volume_limit":"成交量上限",
-                   "volume_limit_whole_lot_sell":"成交量不足以賣出整筆部位","unprofitable_open":"扣除成本後不獲利",
+                   "volume_limit_whole_position_sell":"成交量不足以賣出整筆部位","unprofitable_open":"扣除成本後不獲利",
                    "limit_up_buy_blocked":"漲停買進封鎖","limit_down_sell_blocked":"跌停賣出封鎖",
                    "outside_proxy_band_requires_reference":"超出代理漲跌停範圍",
                    "slippage_outside_price_band":"滑價後超出價格範圍","invalid_open":"開盤價無效",

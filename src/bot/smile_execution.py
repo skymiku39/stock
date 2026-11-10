@@ -48,7 +48,7 @@ class SmileExecution:
     def to_dict(self):
         return dict(**asdict(self), volume_basis="previous_session_lots",
                     limit_basis="previous_close_proxy_not_official_reference",
-                    partial_sell_policy="whole_entry_lot_or_cancel")
+                    partial_sell_policy="whole_position_or_cancel")
 
     def capacity(self, previous_volume):
         if not self.volume_guard:

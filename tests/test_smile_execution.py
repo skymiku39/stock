@@ -47,7 +47,7 @@ def test_capacity_shared_across_tiers():
 def test_sell_insufficient_volume_keeps_whole_lot_and_cash():
     bars=history([(100,100),(100,98),(99,102),(103,103)],[100000,100000,10,100000])
     result=run(bars)
-    assert result.orders[-1]["reason"] == "volume_limit_whole_lot_sell"
+    assert result.orders[-1]["reason"] == "volume_limit_whole_position_sell"
     assert result.results[0].open_lots == 1
     assert result.total_pnl_twd == 0
 
@@ -98,3 +98,39 @@ def test_0050_uses_etf_ticks_and_tax():
     assert SmileCurveEngine("0050", Settings(_env_file=None)).sell_tax == .001
     r = SmileCurveBacktester(Settings(_env_file=None)).run_histories({"0050": []})
     assert r.results[0].skip_reason == "no_daily_bars"
+
+
+TWO_LOTS = dict(smile_buy_tiers="1:1,3:1,50:1")
+# Lots are bought at 98 and 96; close of day 4 signals a whole-position sell.
+TWO_LOT_PRICES = [(100,100),(100,98),(98,96),(96,101)]
+
+
+def test_whole_position_sell_cancelled_together_when_volume_fits_only_part():
+    bars=history(TWO_LOT_PRICES+[(101,101)],[100000,100000,100000,1500,100000])
+    result=run(bars,**TWO_LOTS)
+    sells=[o for o in result.orders if o["side"]=="sell"]
+    assert len(sells)==2
+    assert all(o["status"]=="cancelled" and o["reason"]=="volume_limit_whole_position_sell" for o in sells)
+    assert result.results[0].open_lots==2
+    assert result.total_pnl_twd==0
+
+
+def test_whole_position_sell_cancelled_together_when_position_not_profitable():
+    # Open 97: lot@98 loses 1, lot@96 gains 1 -> net 0, so nothing is sold.
+    bars=history(TWO_LOT_PRICES+[(97,97)],[100000]*5)
+    result=run(bars,execution=SmileExecution.ideal(),**TWO_LOTS)
+    sells=[o for o in result.orders if o["side"]=="sell"]
+    assert len(sells)==2
+    assert all(o["status"]=="cancelled" and o["reason"]=="unprofitable_open" for o in sells)
+    assert result.results[0].open_lots==2
+    assert result.total_pnl_twd==0
+
+
+def test_whole_position_sell_fills_every_lot_and_resets_cycle():
+    bars=history(TWO_LOT_PRICES+[(101,101)],[100000]*5)
+    result=run(bars,execution=SmileExecution.ideal(),**TWO_LOTS)
+    sells=[o for o in result.orders if o["side"]=="sell"]
+    assert len(sells)==2 and all(o["status"]=="filled" for o in sells)
+    assert result.results[0].open_lots==0
+    assert len(result.all_round_trips)==2
+    assert result.results[0].cycle_count>=2
