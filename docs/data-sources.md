@@ -17,7 +17,8 @@
 | 估值 (上櫃) | `tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis` | 估值面 (上櫃) | 否 | 本地 cache |
 | **股利分派 (上市)** | `openapi.twse.com.tw/v1/opendata/t187ap45_L` | 現金/股票股利 (依股利年度彙總) | 否 | 舊端點 `t187ap46_L_ex` 已失效；本地 history 累積舊年度 |
 | **股利分派 (上櫃)** | `mopsfin.twse.com.tw/opendata/t187ap45_O.csv` | 股利 (上櫃 CSV) | 否 | 本地 cache |
-| 季報 EPS/三率 | `openapi.twse.com.tw/v1/opendata/t187ap06_L_*` (+ TPEx) | EPS、毛利率/營益率/淨利率 | 否 | 手動匯入 `data/fundamentals_manual/<ticker>.json` |
+| 季報 EPS/三率 | `openapi.twse.com.tw/v1/opendata/t187ap06_L_*` (+ TPEx) | EPS、毛利率/營益率/淨利率（只有最新一季，累計值轉單季） | 否 | 本地 cache `data/fundamentals/<ticker>/quarterlies_raw.json` |
+| 歷史月營收／季報（回補） | `mopsov.twse.com.tw/nas/t21/{sii,otc}/t21sc03_{民國年}_{月}.csv`、`mopsov.twse.com.tw/mops/web/ajax_t163sb04`（POST） | 指定期間的月營收與累計損益表 | 否 | `python -m bot.financial_history`；預設每次請求間隔 3 秒、重試 3 次；原始檔留在 `data/raw/*_history_*` |
 | 日 K 線 | TWSE `STOCK_DAY` / TPEx | 技術面 K 線 | 否 | 本地 SQLite `price_history` |
 | 全市場收盤均價 | `openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL` | ADR 溢價算現貨 | 否 | yfinance `.TW` |
 | 三大法人籌碼 | TWSE OpenAPI (法人/借券/融資) | 籌碼面 | 否 | 本地 cache |

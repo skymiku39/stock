@@ -64,3 +64,97 @@ def test_margin_uses_net_gross_profit_after_unrealized_adjustments():
 
 def test_month_range_includes_year_boundary():
     assert months_between('2024-12', '2025-02') == [(2024, 12), (2025, 1), (2025, 2)]
+
+
+# --- throttle / retry for _fetch (fake session and sleep; no network) ---
+import requests
+
+from bot.financial_history import _fetch
+from bot.source_registry import SourceRegistry
+
+_CSV = '公司代號,資料年月,營業收入-當月營收\n2330,114/9,100\n'.encode('utf-8')
+
+
+class _Resp:
+    def __init__(self, status=200, content=_CSV):
+        self.status_code, self.content = status, content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f'HTTP {self.status_code}', response=self)
+
+
+class _Session:
+    def __init__(self, *items):
+        self.items, self.calls = list(items), 0
+
+    def get(self, url, timeout=None):
+        self.calls += 1
+        item = self.items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _runs(registry, source):
+    return [r[0] for r in registry.db.conn.execute(
+        'SELECT status FROM ingestion_runs WHERE source=? ORDER BY started_at', (source,))]
+
+
+def _call(registry, session, sleeps, parser=lambda raw: raw, **kw):
+    return _fetch(registry, session, 'monthly_revenue_history_sii', '2025-09', 'http://x/a.csv', {},
+                  parser, sleep=sleeps.append, **kw)
+
+
+def test_fetch_retries_503_then_succeeds(tmp_path):
+    sleeps = []
+    session = _Session(_Resp(503), requests.ConnectionError('boom'), _Resp(200))
+    with SourceRegistry(tmp_path) as registry:
+        document, rows = _call(registry, session, sleeps, delay_seconds=2.0, retries=3)
+        assert rows == _CSV and session.calls == 3
+        assert _runs(registry, 'monthly_revenue_history_sii') == ['succeeded']
+    # pre-request delay on every attempt, plus exponential backoff before each retry
+    assert sleeps == [2.0, 2.0, 2.0, 4.0, 2.0]
+
+
+def test_fetch_does_not_retry_404(tmp_path):
+    sleeps = []
+    session = _Session(_Resp(404))
+    with SourceRegistry(tmp_path) as registry:
+        with pytest.raises(requests.HTTPError):
+            _call(registry, session, sleeps, delay_seconds=2.0, retries=3)
+        assert session.calls == 1 and sleeps == [2.0]
+        assert _runs(registry, 'monthly_revenue_history_sii') == ['failed']
+
+
+def test_fetch_does_not_retry_parser_error(tmp_path):
+    sleeps = []
+    session = _Session(_Resp(200))
+
+    def bad(raw):
+        raise ValueError('content invalid')
+    with SourceRegistry(tmp_path) as registry:
+        with pytest.raises(ValueError, match='content invalid'):
+            _call(registry, session, sleeps, parser=bad, delay_seconds=2.0, retries=3)
+        assert session.calls == 1 and sleeps == [2.0]
+        assert _runs(registry, 'monthly_revenue_history_sii') == ['failed']
+
+
+def test_fetch_exhausts_retries_and_fails_once(tmp_path):
+    sleeps = []
+    session = _Session(_Resp(500), _Resp(429))
+    with SourceRegistry(tmp_path) as registry:
+        with pytest.raises(requests.HTTPError):
+            _call(registry, session, sleeps, retries=1)
+        assert session.calls == 2 and sleeps == [1.0]
+        assert _runs(registry, 'monthly_revenue_history_sii') == ['failed']
+
+
+def test_fetch_reuse_raw_does_not_sleep(tmp_path):
+    sleeps = []
+    with SourceRegistry(tmp_path) as registry:
+        _call(registry, _Session(_Resp(200)), sleeps, delay_seconds=2.0)
+        sleeps.clear()
+        session = _Session()
+        document, rows = _call(registry, session, sleeps, delay_seconds=2.0, retries=3)
+        assert rows == _CSV and session.calls == 0 and sleeps == []

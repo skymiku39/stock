@@ -13,6 +13,7 @@ import io
 import json
 from pathlib import Path
 import re
+import time
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
@@ -126,7 +127,8 @@ def months_between(start: str, end: str):
     return [(n // 12, n % 12 + 1) for n in range(a, b + 1)]
 
 
-def _fetch(registry, session, source, period, url, metadata, parser, *, refresh=False, data=None):
+def _fetch(registry, session, source, period, url, metadata, parser, *, refresh=False, data=None,
+           delay_seconds=0.0, retries=0, sleep=time.sleep):
     if not refresh:
         prior = registry.db.conn.execute(
             'SELECT document_id FROM source_documents WHERE source=? AND as_of=? '
@@ -139,9 +141,27 @@ def _fetch(registry, session, source, period, url, metadata, parser, *, refresh=
             return document, parser(raw)
     run = registry.start_ingestion(source, source_url=url, metadata=metadata)
     try:
-        response = (session.post(url, data=data, timeout=30) if data is not None
-                    else session.get(url, timeout=30))
-        response.raise_for_status()
+        attempt = 0
+        while True:
+            if delay_seconds > 0:
+                sleep(delay_seconds)
+            try:
+                response = (session.post(url, data=data, timeout=30) if data is not None
+                            else session.get(url, timeout=30))
+                status = getattr(response, 'status_code', 200)
+                if isinstance(status, int) and (status == 429 or status >= 500):
+                    raise requests.HTTPError(f'retryable HTTP status {status}', response=response)
+                response.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                # Retryable: timeouts, connection errors, 429 and 5xx. Other 4xx
+                # surface as HTTPError from raise_for_status and are not retried.
+                status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                retryable = not (isinstance(status, int) and 400 <= status < 500 and status != 429)
+                if not retryable or attempt >= retries:
+                    raise
+                sleep(max(1.0, delay_seconds * 2 ** attempt))
+                attempt += 1
         rows = parser(response.content)
         document = registry.register_document(
             source, response.content, url=url, source_ref=period, as_of=period,
@@ -156,7 +176,8 @@ def _fetch(registry, session, source, period, url, metadata, parser, *, refresh=
 
 
 def backfill_history(root: Path, symbols: list[str], start: str, end: str, *,
-                     markets=('sii', 'otc'), refresh=False, session=None, progress=None, quarterly_end=None):
+                     markets=('sii', 'otc'), refresh=False, session=None, progress=None, quarterly_end=None,
+                     delay_seconds=0.0, retries=0, sleep=None):
     from bot.monthly_revenue_research import materialize_monthly_revenue_slice
     from bot.quarterly_research import materialize_quarterly_slice
     root = Path(root)
@@ -182,7 +203,8 @@ def backfill_history(root: Path, symbols: list[str], start: str, end: str, *,
                             raise ValueError('monthly response contains invalid values or wrong period')
                         return rows
                     document, rows = _fetch(registry, sess, 'monthly_revenue_history_' + market, period,
-                        url, {'year': year, 'month': month, 'market': market}, parse_month, refresh=refresh)
+                        url, {'year': year, 'month': month, 'market': market}, parse_month, refresh=refresh,
+                        delay_seconds=delay_seconds, retries=retries, sleep=sleep or time.sleep)
                     parsed_rows = [_parse_one_revenue(row) for row in rows]
                     for parsed in parsed_rows:
                         if parsed.ticker not in targets:
@@ -214,7 +236,8 @@ def backfill_history(root: Path, symbols: list[str], start: str, end: str, *,
                     url = f'{HOST}/mops/web/ajax_t163sb04?' + urlencode(data)
                     document, rows = _fetch(registry, sess, 'quarterly_financials_history_' + market, period,
                         url, {'year': year, 'quarter': quarter, 'market': market, 'request_method': 'POST'},
-                        lambda raw: quarterly_rows(raw, year, quarter, market), refresh=refresh, data=data)
+                        lambda raw: quarterly_rows(raw, year, quarter, market), refresh=refresh, data=data,
+                        delay_seconds=delay_seconds, retries=retries, sleep=sleep or time.sleep)
                     for raw in rows:
                         symbol = raw['公司代號']
                         if symbol not in targets:
@@ -276,10 +299,13 @@ def main(argv=None):
     parser.add_argument('--end', required=True)
     parser.add_argument('--refresh', action='store_true')
     parser.add_argument('--quarterly-end', help='Explicit last required quarterly period, e.g. 2026Q2')
+    parser.add_argument('--delay-seconds', type=float, default=3.0)
+    parser.add_argument('--retries', type=int, default=3)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
     result = backfill_history(args.root.resolve(), args.symbols.split(','), args.start, args.end,
                               refresh=args.refresh, quarterly_end=args.quarterly_end,
+                              delay_seconds=args.delay_seconds, retries=args.retries,
                               progress=lambda row: print(json.dumps(row), flush=True))
     atomic_json(args.output, result)
     print(json.dumps({'complete': result['complete'], 'monthly': len(result['monthly']),
