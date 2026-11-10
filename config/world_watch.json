@@ -1,0 +1,29 @@
+{
+  "_note": "國際與地緣政治新聞的篩選關鍵字。人名與職位會更換，請定期確認；英文關鍵字以字詞邊界比對，大小寫不拘。",
+  "updated": "2026-11-10",
+  "leaders": {
+    "US": ["Donald Trump", "Trump", "川普", "JD Vance", "范斯", "Scott Bessent", "Bessent", "貝森特", "Howard Lutnick", "Lutnick", "盧特尼克", "Jamieson Greer", "葛里爾", "Marco Rubio", "盧比歐", "Fed Chair", "聯準會主席"],
+    "China": ["Xi Jinping", "習近平", "Li Qiang", "李強", "He Lifeng", "何立峰", "Wang Yi", "王毅"],
+    "Russia": ["Vladimir Putin", "Putin", "普丁"],
+    "Taiwan": ["Lai Ching-te", "賴清德", "Cho Jung-tai", "卓榮泰"],
+    "Japan": ["Sanae Takaichi", "Takaichi", "高市早苗"],
+    "South Korea": ["Lee Jae-myung", "李在明"],
+    "UK": ["Keir Starmer", "Starmer", "施凱爾", "施紀賢", "Rachel Reeves"],
+    "Germany": ["Friedrich Merz", "Merz", "梅爾茨", "梅爾茲"],
+    "France": ["Emmanuel Macron", "Macron", "馬克宏"],
+    "EU": ["Ursula von der Leyen", "von der Leyen", "范德賴恩", "馮德萊恩", "Christine Lagarde", "Lagarde", "拉加德"],
+    "India": ["Narendra Modi", "Modi", "莫迪"],
+    "Ukraine": ["Volodymyr Zelensky", "Zelensky", "澤倫斯基"]
+  },
+  "topics": [
+    "Taiwan", "台灣", "Taiwan Strait", "台海",
+    "tariff", "tariffs", "關稅", "trade war", "貿易戰", "Section 232", "232條款",
+    "export control", "export controls", "出口管制", "entity list", "實體清單",
+    "sanction", "sanctions", "制裁", "rare earth", "rare earths", "稀土",
+    "semiconductor", "semiconductors", "半導體", "chipmaker", "chipmakers", "晶片",
+    "TSMC", "台積電", "Nvidia", "輝達", "AI chip", "AI chips",
+    "Federal Reserve", "FOMC", "聯準會", "rate cut", "rate hike", "降息", "升息",
+    "ECB", "歐洲央行", "Bank of Japan", "日本央行", "Bank of England", "英國央行",
+    "Ukraine", "烏克蘭", "Middle East", "中東"
+  ]
+}

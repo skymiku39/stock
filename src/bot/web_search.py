@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import html
+import collections
 import json
 import logging
 import re
@@ -97,6 +98,7 @@ class WebMaterial:
     pages: List[PageContent] = field(default_factory=list)
     fetched_at: str = ""
     source_status: Dict[str, str] = field(default_factory=dict)
+    world_results: List[SearchResult] = field(default_factory=list)
 
     def compact_text(self, max_chars: int = 10000) -> str:
         """壓成緊湊文字餵 LLM。"""
@@ -121,6 +123,13 @@ class WebMaterial:
                 if r.snippet:
                     line += f" — {r.snippet[:180]}"
                 parts.append(line)
+        if self.world_results:
+            parts.append("\n【國際與地緣政治】")
+            for r in self.world_results[:15]:
+                line = f"- ({r.site or r.source}) {r.title}"
+                if r.snippet:
+                    line += f" — {r.snippet[:160]}"
+                parts.append(line)
         if self.pages:
             parts.append("\n【部分網頁原文】")
             for p in self.pages:
@@ -138,6 +147,7 @@ class WebMaterial:
 _SOURCE_LABELS = {
     "ddg": "DuckDuckGo 網頁搜尋",
     "google_news": "Google News",
+    "world": "國際與地緣政治",
 }
 
 
@@ -414,17 +424,104 @@ def _extract_xml_tag(s: str, tag: str) -> str:
 # 財經 RSS 訂閱
 # ----------------------------------------------------------------------
 
-RSS_FEEDS: tuple[tuple[str, str], ...] = (
-    ("yahoo_tw_stock", "https://tw.stock.yahoo.com/rss?category=tw-market"),
-    ("yahoo_tw_finance", "https://tw.news.yahoo.com/rss/finance"),
-    ("udn_money_stock", "https://money.udn.com/rssfeed/news/1001/5590?ch=money"),
-    ("udn_money_industry", "https://money.udn.com/rssfeed/news/1001/5591?ch=money"),
-    ("ltn_business", "https://news.ltn.com.tw/rss/business.xml"),
-    ("ctee_stock", "https://www.ctee.com.tw/rss_web/livenews/stock"),
-    ("moneydj", "https://www.moneydj.com/KMDJ/RssCenter.aspx?svc=NR&fno=1&arg=MB010000"),
-    ("cna_finance", "https://feeds.feedburner.com/rsscna/finance"),
-    ("technews", "https://technews.tw/feed/"),
-    ("digitimes", "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_10_0.xml"),
+
+@dataclass(frozen=True)
+class Feed:
+    """一個 RSS/Atom 來源。region: tw/us/uk/eu/asia；lang: zh/en。"""
+
+    name: str
+    url: str
+    region: str
+    lang: str
+
+
+def _feeds(region: str, lang: str, pairs: tuple[tuple[str, str], ...]) -> tuple[Feed, ...]:
+    return tuple(Feed(n, u, region, lang) for n, u in pairs)
+
+
+_CNBC = "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id="
+
+RSS_FEEDS: tuple[Feed, ...] = (
+    *_feeds("tw", "zh", (
+        ("yahoo_tw_stock", "https://tw.stock.yahoo.com/rss?category=tw-market"),
+        ("yahoo_tw_finance", "https://tw.news.yahoo.com/rss/finance"),
+        ("udn_money_stock", "https://money.udn.com/rssfeed/news/1001/5590?ch=money"),
+        ("udn_money_industry", "https://money.udn.com/rssfeed/news/1001/5591?ch=money"),
+        ("ltn_business", "https://news.ltn.com.tw/rss/business.xml"),
+        ("ctee_stock", "https://www.ctee.com.tw/rss_web/livenews/stock"),
+        ("moneydj", "https://www.moneydj.com/KMDJ/RssCenter.aspx?svc=NR&fno=1&arg=MB010000"),
+        ("cna_finance", "https://feeds.feedburner.com/rsscna/finance"),
+        ("technews", "https://technews.tw/feed/"),
+        ("digitimes", "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_10_0.xml"),
+        ("cna_tech", "https://feeds.feedburner.com/rsscna/technology"),
+        ("cna_intl", "https://feeds.feedburner.com/rsscna/intworld"),
+        ("cna_politics", "https://feeds.feedburner.com/rsscna/politics"),
+        ("cna_china", "https://feeds.feedburner.com/rsscna/mainland"),
+        ("udn_money_global", "https://money.udn.com/rssfeed/news/1001/5588?ch=money"),
+        ("ltn_world", "https://news.ltn.com.tw/rss/world.xml"),
+        ("ltn_politics", "https://news.ltn.com.tw/rss/politics.xml"),
+        ("ettoday_finance", "https://feeds.feedburner.com/ettoday/finance"),
+        ("ithome", "https://www.ithome.com.tw/rss"),
+        ("cw", "https://www.cw.com.tw/RSS/cw_content.xml"),
+        ("yahoo_tw_intl", "https://tw.stock.yahoo.com/rss?category=intl-markets"),
+        ("yahoo_tw_tech", "https://tw.stock.yahoo.com/rss?category=tech"),
+    )),
+    *_feeds("us", "en", (
+        ("cnbc_top", _CNBC + "100003114"),
+        ("cnbc_markets", _CNBC + "15839069"),
+        ("cnbc_tech", _CNBC + "19854910"),
+        ("cnbc_asia", _CNBC + "19832390"),
+        ("cnbc_politics", _CNBC + "10000113"),
+        ("marketwatch_top", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+        ("marketwatch_pulse", "https://feeds.content.dowjones.io/public/rss/mw_marketpulse"),
+        ("wsj_markets", "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain"),
+        ("wsj_tech", "https://feeds.content.dowjones.io/public/rss/RSSWSJD"),
+        ("wsj_world", "https://feeds.content.dowjones.io/public/rss/RSSWorldNews"),
+        ("bloomberg_markets", "https://feeds.bloomberg.com/markets/news.rss"),
+        ("bloomberg_tech", "https://feeds.bloomberg.com/technology/news.rss"),
+        ("bloomberg_politics", "https://feeds.bloomberg.com/politics/news.rss"),
+        ("nasdaq_markets", "https://www.nasdaq.com/feed/rssoutbound?category=Markets"),
+        ("seekingalpha", "https://seekingalpha.com/market_currents.xml"),
+        ("investing", "https://www.investing.com/rss/news.rss"),
+        ("nyt_business", "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml"),
+        ("nyt_tech", "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml"),
+        ("nyt_politics", "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml"),
+        ("fortune", "https://fortune.com/feed/"),
+        ("businessinsider", "https://feeds.businessinsider.com/custom/all"),
+        ("politico", "https://rss.politico.com/politics-news.xml"),
+        ("thehill", "https://thehill.com/news/feed/"),
+        ("npr_business", "https://feeds.npr.org/1006/rss.xml"),
+        ("fed_press", "https://www.federalreserve.gov/feeds/press_all.xml"),
+        ("techcrunch", "https://techcrunch.com/feed/"),
+        ("eetimes", "https://www.eetimes.com/feed/"),
+        ("tomshardware", "https://www.tomshardware.com/feeds/all"),
+    )),
+    *_feeds("uk", "en", (
+        ("bbc_business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
+        ("bbc_world", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+        ("bbc_asia", "https://feeds.bbci.co.uk/news/world/asia/rss.xml"),
+        ("guardian_business", "https://www.theguardian.com/uk/business/rss"),
+        ("guardian_world", "https://www.theguardian.com/world/rss"),
+        ("ft_markets", "https://www.ft.com/markets?format=rss"),
+        ("ft_world", "https://www.ft.com/world?format=rss"),
+        ("economist_finance", "https://www.economist.com/finance-and-economics/rss.xml"),
+        ("economist_asia", "https://www.economist.com/asia/rss.xml"),
+        ("sky_business", "https://feeds.skynews.com/feeds/rss/business.xml"),
+        ("boe_news", "https://www.bankofengland.co.uk/rss/news"),
+    )),
+    *_feeds("eu", "en", (
+        ("dw_business", "https://rss.dw.com/rdf/rss-en-bus"),
+        ("dw_asia", "https://rss.dw.com/rdf/rss-en-asia"),
+        ("euronews_business", "https://www.euronews.com/rss?level=vertical&name=business"),
+        ("france24_business", "https://www.france24.com/en/business/rss"),
+        ("politico_eu", "https://www.politico.eu/feed/"),
+        ("ecb_press", "https://www.ecb.europa.eu/rss/press.html"),
+    )),
+    *_feeds("asia", "en", (
+        ("nikkei_asia", "https://asia.nikkei.com/rss/feed/nar"),
+        ("scmp_business", "https://www.scmp.com/rss/92/feed"),
+        ("scmp_china", "https://www.scmp.com/rss/4/feed"),
+    )),
 )
 
 
@@ -466,11 +563,188 @@ def parse_feed_items(content: bytes) -> List[Dict[str, str]]:
     return items
 
 
+# ---- 抓取：硬性時限 + 共用快取 -----------------------------------------
+
+RSS_CACHE_REL = "data/cache/rss"
+RSS_MAX_BYTES = 5 * 1024 * 1024
+_RSS_MEM: Dict[tuple[str, str], tuple[float, bytes, str]] = {}
+
+
+class FeedFetchError(RuntimeError):
+    """RSS 抓取失敗（訊息即可讀原因，例如 ``HTTP 503``）。"""
+
+
+def _feed_reason(exc: BaseException) -> str:
+    if isinstance(exc, FeedFetchError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _feed_cache_paths(root: Path, name: str) -> tuple[Path, Path]:
+    base = Path(root) / RSS_CACHE_REL
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    return base / f"{safe}.xml", base / f"{safe}.json"
+
+
+def _read_feed_cache(
+    feed: Feed, root: Optional[Path],
+) -> Optional[tuple[float, bytes, str]]:
+    """讀快取（不論是否過期）；回傳 (fetched_at, content, raw_document_id)。"""
+    if root is None:
+        return _RSS_MEM.get((feed.name, feed.url))
+    xml_p, meta_p = _feed_cache_paths(root, feed.name)
+    try:
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        content = xml_p.read_bytes()
+        if not content:
+            return None
+        return float(meta.get("fetched_at", 0)), content, str(meta.get("raw_document_id", ""))
+    except Exception:
+        return None
+
+
+def _write_feed_cache(
+    feed: Feed, root: Optional[Path], content: bytes, raw_id: str, fetched_at: float,
+) -> None:
+    if root is None:
+        _RSS_MEM[(feed.name, feed.url)] = (fetched_at, content, raw_id)
+        return
+    xml_p, meta_p = _feed_cache_paths(root, feed.name)
+    mk_folder(str(xml_p.parent))
+    xml_p.write_bytes(content)
+    meta_p.write_text(
+        json.dumps({"fetched_at": fetched_at, "raw_document_id": raw_id, "url": feed.url},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _fetch_feed(
+    feed: Feed,
+    *,
+    session: Optional[requests.Session] = None,
+    root: Optional[Path] = None,
+    ttl_seconds: float = 1800,
+    deadline: float = 20,
+    log: Optional[logging.Logger] = None,
+) -> tuple[bytes, str, bool]:
+    """抓單一 feed，回傳 (content, raw_document_id, from_cache)。
+
+    TTL 內直接讀快取（不發請求、不重複保存 raw）。真的下載時用 stream + 硬性
+    總時限 ``deadline`` 與 5MB 上限，避免慢速回傳讓程式卡死；失敗丟出例外。
+    """
+    logger_ = log or get_logger("web-search")
+    cached = _read_feed_cache(feed, root)
+    if cached is not None and ttl_seconds > 0 and (time.time() - cached[0]) < ttl_seconds:
+        return cached[1], cached[2], True
+
+    sess = session or _new_session()
+    started = time.monotonic()
+    resp = sess.get(feed.url, timeout=(8, 8), stream=True)
+    try:
+        if resp.status_code != 200:
+            raise FeedFetchError(f"HTTP {resp.status_code}")
+        chunks: List[bytes] = []
+        size = 0
+        for chunk in resp.iter_content(chunk_size=16384):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > RSS_MAX_BYTES:
+                raise FeedFetchError(f"response too large (>{RSS_MAX_BYTES} bytes)")
+            if time.monotonic() - started > deadline:
+                raise FeedFetchError(f"deadline exceeded ({deadline}s)")
+        if time.monotonic() - started > deadline:
+            raise FeedFetchError(f"deadline exceeded ({deadline}s)")
+    finally:
+        close = getattr(resp, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    content = b"".join(chunks)
+    if not content:
+        raise FeedFetchError("empty response")
+
+    raw_document_id = ""
+    if root is not None:
+        try:
+            raw_document = SourceRegistry(Path(root)).capture_document(
+                "rss_feed",
+                content,
+                source_url=feed.url,
+                source_ref=feed.name,
+                title=f"RSS: {feed.name}",
+                kind="search_response",
+                suffix="xml",
+                mime_type="application/rss+xml",
+                metadata={"feed": feed.name, "region": feed.region, "lang": feed.lang},
+            )
+            raw_document_id = raw_document.document_id
+        except Exception:
+            logger_.debug("RSS raw 保存失敗: %s", feed.name, exc_info=True)
+    try:
+        _write_feed_cache(feed, root, content, raw_document_id, time.time())
+    except Exception:
+        logger_.debug("RSS 快取寫入失敗: %s", feed.name, exc_info=True)
+    return content, raw_document_id, False
+
+
+def _load_feed(
+    feed: Feed,
+    *,
+    session: Optional[requests.Session],
+    root: Optional[Path],
+    log: logging.Logger,
+    ttl_seconds: float = 1800,
+    deadline: float = 20,
+    pace: bool = True,
+) -> tuple[Optional[bytes], str, str]:
+    """``_fetch_feed`` + 失敗退回過期快取。回傳 (content|None, raw_id, state)。
+
+    state：``ok`` / ``stale cache (<原因>)`` / ``unavailable: <原因>``。
+    真的發出請求後 sleep 0.3 秒；讀快取不 sleep。
+    """
+    try:
+        content, raw_id, from_cache = _fetch_feed(
+            feed, session=session, root=root, ttl_seconds=ttl_seconds,
+            deadline=deadline, log=log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        reason = _feed_reason(exc)
+        log.debug("RSS %s 失敗", feed.name, exc_info=True)
+        if pace:
+            time.sleep(0.3)
+        stale = _read_feed_cache(feed, root)
+        if stale is not None:
+            return stale[1], stale[2], f"stale cache ({reason})"
+        return None, "", f"unavailable: {reason}"
+    if not from_cache and pace:
+        time.sleep(0.3)
+    return content, raw_id, "ok"
+
+
+# ---- 比對 -------------------------------------------------------------
+
+
+def _is_ascii_text(s: str) -> bool:
+    return bool(s) and s.isascii()
+
+
+def _en_matcher(term: str) -> "re.Pattern[str]":
+    """字詞邊界比對；長度 <=4 的全大寫縮寫（TSMC、ASE）區分大小寫。"""
+    flags = 0 if (len(term) <= 4 and term.isupper()) else re.IGNORECASE
+    return re.compile(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", flags)
+
+
 def search_feeds(
     ticker: str,
     name: str = "",
     *,
-    feeds: tuple[tuple[str, str], ...] = RSS_FEEDS,
+    english_name: str = "",
+    feeds: tuple[Feed, ...] = RSS_FEEDS,
     session: Optional[requests.Session] = None,
     logger: Optional[logging.Logger] = None,
     root: Optional[Path] = None,
@@ -478,64 +752,193 @@ def search_feeds(
 ) -> tuple[List[SearchResult], Dict[str, str]]:
     """抓財經 RSS/Atom 訂閱，保留標題或摘要含代號/名稱的項目。
 
+    zh feed 用代號或中文名稱子字串比對；en feed 用英文簡稱（及純 ASCII 的 name）
+    字詞邊界比對，沒有英文名稱時 en feed 記 ``skipped (no english name)``。
     回傳 (results, status)；status 以 feed 名稱為 key，單一 feed 失敗不影響其他。
     """
     log = logger or get_logger("web-search")
     sess = session or _new_session()
     results: List[SearchResult] = []
     status: Dict[str, str] = {}
-    needles = [x for x in (str(ticker or "").strip(), str(name or "").strip()) if x]
-    for idx, (feed_name, url) in enumerate(feeds):
-        if idx:
-            time.sleep(0.3)
+    zh_needles = [x for x in (str(ticker or "").strip(), str(name or "").strip()) if x]
+    en_terms: List[str] = []
+    for cand in (str(english_name or "").strip(), str(name or "").strip()):
+        if cand and _is_ascii_text(cand) and cand not in en_terms:
+            en_terms.append(cand)
+    en_matchers = [_en_matcher(t) for t in en_terms]
+    per_lang: Dict[str, int] = collections.defaultdict(int)
+    for feed in feeds:
+        if feed.lang == "en" and not en_matchers:
+            status[feed.name] = "skipped (no english name)"
+            continue
+        content, raw_document_id, state = _load_feed(feed, session=sess, root=root, log=log)
+        if content is None:
+            status[feed.name] = state
+            continue
         try:
-            resp = sess.get(url, timeout=12)
-            if resp.status_code != 200:
-                status[feed_name] = f"unavailable: HTTP {resp.status_code}"
-                continue
-            content = resp.content
-            raw_document_id = ""
-            if root is not None and content:
-                try:
-                    raw_document = SourceRegistry(Path(root)).capture_document(
-                        "rss_feed",
-                        content,
-                        source_url=url,
-                        source_ref=feed_name,
-                        title=f"RSS: {feed_name}",
-                        kind="search_response",
-                        suffix="xml",
-                        mime_type="application/rss+xml",
-                        metadata={"feed": feed_name, "ticker": ticker},
-                    )
-                    raw_document_id = raw_document.document_id
-                except Exception:
-                    log.debug("RSS raw 保存失敗: %s", feed_name, exc_info=True)
             matched = 0
             for item in parse_feed_items(content):
                 if not item["title"] or not item["url"]:
                     continue
                 hay = f"{item['title']} {item['desc']}"
-                if not any(n in hay for n in needles):
+                if feed.lang == "en":
+                    hit = any(m.search(hay) for m in en_matchers)
+                else:
+                    hit = any(n in hay for n in zh_needles)
+                if not hit:
                     continue
                 matched += 1
-                if len(results) >= max_results:
+                # 中文與英文來源各自計上限，避免排在前面的中文來源佔滿名額。
+                if per_lang[feed.lang] >= max_results:
                     continue
+                per_lang[feed.lang] += 1
                 results.append(SearchResult(
                     title=item["title"],
                     url=item["url"],
                     snippet=item["desc"][:300],
                     source="rss",
-                    site=feed_name,
+                    site=feed.name,
                     published_at=item["published"],
                     source_document_id=raw_document_id,
                 ))
-            status[feed_name] = "ok" if matched else "ok (0 matched)"
+            if state != "ok":
+                status[feed.name] = state
+            else:
+                status[feed.name] = "ok" if matched else "ok (0 matched)"
         except Exception as exc:  # noqa: BLE001
-            status[feed_name] = f"unavailable: {type(exc).__name__}: {exc}"
-            log.debug("RSS %s 失敗", feed_name, exc_info=True)
+            status[feed.name] = f"unavailable: {_feed_reason(exc)}"
+            log.debug("RSS %s 解析失敗", feed.name, exc_info=True)
     # rss_feed 不在 web_search_research.SUPPORTED_SOURCES，故只保存 raw，不 materialize。
     log.info("RSS ticker=%s -> %d 筆", ticker, len(results))
+    return results, status
+
+
+# ---- 國際與地緣政治 -----------------------------------------------------
+
+WORLD_WATCH_REL = "config/world_watch.json"
+
+
+def load_world_watch(root: Optional[Path] = None) -> Dict[str, Any]:
+    """讀 ``config/world_watch.json``；不存在時回傳空 leaders/topics。"""
+    # root 是資料根目錄（測試或副本可能沒有 config/），找不到時退回程式所在 repo。
+    repo = Path(__file__).resolve().parents[2]
+    candidates = [Path(root) / WORLD_WATCH_REL] if root is not None else []
+    candidates.append(repo / WORLD_WATCH_REL)
+    path = next((c for c in candidates if c.exists()), None)
+    if path is None:
+        return {"leaders": {}, "topics": []}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return {"leaders": {}, "topics": []}
+    data.setdefault("leaders", {})
+    data.setdefault("topics", [])
+    return data
+
+
+def _flatten_leaders(leaders: Any) -> List[str]:
+    if isinstance(leaders, dict):
+        names = [n for v in leaders.values() for n in (v or [])]
+    else:
+        names = list(leaders or [])
+    return [str(n).strip() for n in names if str(n).strip()]
+
+
+def _term_hits(text: str, terms: List[str]) -> List[str]:
+    """英文字詞邊界、不分大小寫；中文子字串。別名重疊（Trump 與 Donald Trump）只算一個。"""
+    hits: List[str] = []
+    for term in terms:
+        if term in hits:
+            continue
+        if _is_ascii_text(term):
+            ok = re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", text, re.IGNORECASE,
+            ) is not None
+        else:
+            ok = term in text
+        if ok:
+            hits.append(term)
+    return [
+        h for h in hits
+        if not any(h != o and h.lower() in o.lower() for o in hits)
+    ]
+
+
+def _published_epoch(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        from email.utils import parsedate_to_datetime
+
+        return parsedate_to_datetime(value).timestamp()
+    except Exception:
+        pass
+    try:
+        d = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return d.timestamp()
+    except Exception:
+        return 0.0
+
+
+def search_world_news(
+    *,
+    root: Optional[Path] = None,
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+    feeds: tuple[Feed, ...] = RSS_FEEDS,
+    watch: Optional[Dict[str, Any]] = None,
+    max_results: int = 30,
+) -> tuple[List[SearchResult], Dict[str, str]]:
+    """用領導人與主題關鍵字篩選國際/地緣政治新聞。
+
+    分數 = 命中領導人數 * 2 + 命中主題數，>=2 才收；依分數降冪、發布時間新到舊排序，
+    URL 去重。回傳 (results, status)，status 以 feed 名稱為 key。
+    """
+    log = logger or get_logger("web-search")
+    sess = session or _new_session()
+    cfg = watch if watch is not None else load_world_watch(root)
+    leaders = _flatten_leaders(cfg.get("leaders"))
+    topics = [str(t).strip() for t in (cfg.get("topics") or []) if str(t).strip()]
+    status: Dict[str, str] = {}
+    best: Dict[str, tuple[int, float, SearchResult]] = {}
+    for feed in feeds:
+        content, raw_document_id, state = _load_feed(feed, session=sess, root=root, log=log)
+        if content is None:
+            status[feed.name] = state
+            continue
+        try:
+            kept = 0
+            for item in parse_feed_items(content):
+                if not item["title"] or not item["url"]:
+                    continue
+                hay = f"{item['title']} {item['desc']}"
+                lead_hits = _term_hits(hay, leaders)
+                topic_hits = _term_hits(hay, topics)
+                score = len(lead_hits) * 2 + len(topic_hits)
+                if score < 2:
+                    continue
+                kept += 1
+                result = SearchResult(
+                    title=item["title"],
+                    url=item["url"],
+                    snippet=f"[{', '.join(lead_hits + topic_hits)}] {item['desc'][:300]}".strip(),
+                    source="rss_world",
+                    site=feed.name,
+                    published_at=item["published"],
+                    source_document_id=raw_document_id,
+                )
+                key = (score, _published_epoch(item["published"]))
+                prev = best.get(result.url)
+                if prev is None or key > (prev[0], prev[1]):
+                    best[result.url] = (score, key[1], result)
+            status[feed.name] = state if state != "ok" else ("ok" if kept else "ok (0 matched)")
+        except Exception as exc:  # noqa: BLE001
+            status[feed.name] = f"unavailable: {_feed_reason(exc)}"
+            log.debug("RSS world %s 解析失敗", feed.name, exc_info=True)
+    ordered = sorted(best.values(), key=lambda t: (t[0], t[1]), reverse=True)
+    results = [r for _, _, r in ordered[:max_results]]
+    log.info("RSS world -> %d 筆", len(results))
     return results, status
 
 
@@ -679,6 +1082,7 @@ def research_ticker(
     force_refresh: bool = False,
     max_age_hours: int = DEFAULT_AGE_HOURS,
     logger: Optional[logging.Logger] = None,
+    english_name: str = "",
 ) -> WebMaterial:
     """對 ``ticker`` 自動跑「DDG + Google News + 抓網頁原文」研究流程。
 
@@ -700,6 +1104,7 @@ def research_ticker(
                     pages=[PageContent(**p) for p in cached.get("pages", []) or []],
                     fetched_at=cached.get("fetched_at", ""),
                     source_status=dict(cached.get("source_status") or {}),
+                    world_results=[SearchResult(**r) for r in cached.get("world_results", []) or []],
                 )
                 log.info("[%s] web research 命中快取", ticker)
                 return material
@@ -742,8 +1147,15 @@ def research_ticker(
         time.sleep(0.6)
     source_status["google_news"] = "ok" if news_count else "ok (0 results)"
 
+    if not english_name:
+        try:
+            from bot.company_info import english_name_for
+
+            english_name = english_name_for(ticker, root) or ""
+        except Exception:
+            english_name = ""
     rss_results, rss_status = search_feeds(
-        ticker, name, session=sess, logger=log, root=root,
+        ticker, name, english_name=english_name, session=sess, logger=log, root=root,
     )
     for feed_name, st in rss_status.items():
         source_status[f"rss:{feed_name}"] = st
@@ -752,6 +1164,20 @@ def research_ticker(
             continue
         seen_urls.add(r.url)
         all_results.append(r)
+
+    world_results: List[SearchResult] = []
+    try:
+        world_results, world_status = search_world_news(session=sess, logger=log, root=root)
+        if world_status and all(
+            str(v).startswith("unavailable") for v in world_status.values()
+        ):
+            reasons = sorted({str(v).split("unavailable:", 1)[-1].strip() for v in world_status.values()})
+            source_status["world"] = f"unavailable: all {len(world_status)} feeds failed ({reasons[0]})"
+        else:
+            source_status["world"] = f"ok ({len(world_results)})"
+    except Exception as exc:  # noqa: BLE001
+        source_status["world"] = f"unavailable: {type(exc).__name__}: {exc}"
+        log.warning("[%s] 國際與地緣政治來源失敗: %s", ticker, exc)
 
     pages: List[PageContent] = []
     fetch_candidates = [r for r in all_results if r.source == "ddg"] + [
@@ -777,6 +1203,7 @@ def research_ticker(
         pages=pages,
         fetched_at=now_tw().isoformat(timespec="seconds"),
         source_status=source_status,
+        world_results=world_results,
     )
     try:
         _save_cache(key, root, {
@@ -787,6 +1214,7 @@ def research_ticker(
             "search_results": [asdict(r) for r in material.search_results],
             "pages": [asdict(p) for p in material.pages],
             "source_status": material.source_status,
+            "world_results": [asdict(r) for r in material.world_results],
         })
     except Exception:
         log.exception("[%s] web research 快取寫入失敗", ticker)
@@ -794,6 +1222,7 @@ def research_ticker(
 
 
 __all__ = [
+    "Feed",
     "PageContent",
     "SearchResult",
     "WebMaterial",
@@ -801,7 +1230,9 @@ __all__ = [
     "RSS_FEEDS",
     "SearchUnavailable",
     "research_ticker",
+    "load_world_watch",
     "search_feeds",
     "search_news",
+    "search_world_news",
     "search_web",
 ]

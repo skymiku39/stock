@@ -168,3 +168,32 @@ def test_company_update_cli_honors_explicit_root(monkeypatch, tmp_path) -> None:
     assert company_update.main(["--root", str(tmp_path), "--refresh"]) == 0
     assert seen["load_root"] == tmp_path.resolve()
     assert seen["backfill_root"] == tmp_path.resolve()
+
+
+def test_english_short_name_twse_and_tpex() -> None:
+    twse = ci._parse_twse([{
+        "公司代號": "2330", "公司名稱": "台灣積體電路製造股份有限公司",
+        "公司簡稱": "台積電", "英文簡稱": "\u3000TSMC \u3000", "產業別": "24",
+    }])
+    assert twse["2330"].english_short_name == "TSMC"
+    tpex = ci._parse_tpex([{
+        "SecuritiesCompanyCode": "6488", "CompanyName": "環球晶圓股份有限公司",
+        "CompanyAbbreviation": "環球晶", "Symbol": " GlobalWafers\u3000",
+        "SecuritiesIndustryCode": "24",
+    }])
+    assert tpex["6488"].english_short_name == "GlobalWafers"
+
+
+def test_english_name_for_reads_cache_and_legacy(tmp_path) -> None:
+    import json
+
+    meta = tmp_path / "data" / "meta"
+    meta.mkdir(parents=True)
+    (meta / "company_info.json").write_text(json.dumps({"date": "2024-01-01", "map": {
+        "2330": {"symbol": "2330", "name": "台積電", "english_short_name": "TSMC"},
+        "2317": {"symbol": "2317", "name": "鴻海"},  # legacy cache: no field
+    }}, ensure_ascii=False), encoding="utf-8")
+    assert ci.english_name_for("2330", tmp_path) == "TSMC"
+    assert ci.english_name_for("2317", tmp_path) == ""
+    assert ci.english_name_for("9999", tmp_path) == ""
+    assert ci.english_name_for("2330", tmp_path / "nope") == ""

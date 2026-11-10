@@ -160,6 +160,7 @@ class StockInfo:
     retrieved_at: str = ""
     quality_status: str = "unknown"
     source_record_id: str = ""
+    english_short_name: str = ""  # 英文簡稱 (僅公司名冊 JSON 快取使用，不寫入 DB)
 
 
 @dataclass

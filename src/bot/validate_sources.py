@@ -544,26 +544,43 @@ def check_web_search(root: Optional[Path] = None) -> CheckResult:
 
 
 def check_rss_feeds(root: Optional[Path] = None) -> CheckResult:
-    from bot.web_search import RSS_FEEDS, _new_session, parse_feed_items
+    """平行抓取全部 RSS（ttl=0 強制抓取；每個 feed 各有 20 秒硬性時限）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from bot.web_search import RSS_FEEDS, _fetch_feed, _new_session, parse_feed_items
+
     r = CheckResult(name="財經 RSS 訂閱", layer="parse")
-    sess = _new_session()
+
+    def probe(feed: Any) -> tuple[Any, int, str]:
+        try:
+            content, _raw_id, _cached = _fetch_feed(
+                feed, session=_new_session(), root=root, ttl_seconds=0, deadline=20,
+            )
+            return feed, len(parse_feed_items(content)), ""
+        except Exception as e:  # noqa: BLE001
+            return feed, 0, f"{type(e).__name__}: {e}"
+
+    with ThreadPoolExecutor(6) as pool:
+        outcomes = list(pool.map(probe, RSS_FEEDS))
+
     unavailable: Dict[str, str] = {}
+    by_region: Dict[str, Dict[str, int]] = {}
     usable = 0
     total = 0
-    for feed_name, url in RSS_FEEDS:
-        try:
-            resp = sess.get(url, timeout=12)
-            if resp.status_code != 200:
-                unavailable[feed_name] = f"HTTP {resp.status_code}"
-                continue
-            total += len(parse_feed_items(resp.content))
-            usable += 1
-        except Exception as e:  # noqa: BLE001
-            unavailable[feed_name] = f"{type(e).__name__}: {e}"
+    for feed, count, err in outcomes:
+        stat = by_region.setdefault(feed.region, {"usable": 0, "total": 0})
+        stat["total"] += 1
+        if err:
+            unavailable[feed.name] = err
+            continue
+        stat["usable"] += 1
+        usable += 1
+        total += count
     r.rows = total
     r.ok = usable > 0
     r.details["usable"] = usable
     r.details["unavailable"] = unavailable
+    r.details["by_region"] = by_region
     if not r.ok:
         r.error = "所有 RSS 來源皆不可用"
     return r

@@ -109,6 +109,11 @@ def _map_path(root: Optional[Path]) -> Path:
     return base / "company_info.json"
 
 
+def _clean_english_name(raw: object) -> str:
+    """去除全形與半形空白。"""
+    return str(raw or "").replace("　", " ").strip()
+
+
 def _parse_twse(rows: list, *, source_record_id: str = "", source_url: str = URL_TWSE_COMPANY) -> Dict[str, StockInfo]:
     out: Dict[str, StockInfo] = {}
     for r in rows or []:
@@ -126,6 +131,7 @@ def _parse_twse(rows: list, *, source_record_id: str = "", source_url: str = URL
             retrieved_at=now_tw().isoformat(timespec="seconds"),
             quality_status="ok",
             source_record_id=str(source_record_id or ""),
+            english_short_name=_clean_english_name(r.get("英文簡稱")),
         )
     return out
 
@@ -147,6 +153,7 @@ def _parse_tpex(rows: list, *, source_record_id: str = "") -> Dict[str, StockInf
             retrieved_at=now_tw().isoformat(timespec="seconds"),
             quality_status="ok",
             source_record_id=str(source_record_id or ""),
+            english_short_name=_clean_english_name(r.get("Symbol")),
         )
     return out
 
@@ -267,6 +274,7 @@ def load_company_map(
                     "retrieved_at": v.retrieved_at,
                     "quality_status": v.quality_status,
                     "source_record_id": v.source_record_id,
+                    "english_short_name": v.english_short_name,
                 }
                 for k, v in mp.items()
             }
@@ -315,7 +323,31 @@ def lookup_company_info(
         source_url=info.source_url, source_date=info.source_date,
         retrieved_at=info.retrieved_at, quality_status=info.quality_status,
         source_record_id=info.source_record_id,
+        english_short_name=info.english_short_name,
     )
+
+
+def english_name_for(symbol: str, root: Optional[Path] = None) -> str:
+    """從現有公司名冊快取讀英文簡稱；舊快取沒有此欄位或查無時回傳 ''。
+
+    只讀 ``data/meta/company_info.json``，不發任何網路請求。
+    """
+    code = str(symbol or "").strip()
+    if not code:
+        return ""
+    key = _root_key(root)
+    mem = _COMPANY_MAP_CACHE.get(key)
+    if mem is not None and code in mem:
+        return _clean_english_name(getattr(mem[code], "english_short_name", ""))
+    path = (root or Path.cwd()) / "data" / "meta" / "company_info.json"
+    try:
+        if not path.exists():
+            return ""
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        rec = (cached.get("map") or {}).get(code) or {}
+        return _clean_english_name(rec.get("english_short_name"))
+    except Exception:
+        return ""
 
 
 def _normalize_company_name(name: str) -> str:
@@ -416,6 +448,7 @@ def _merge(existing: Optional[StockInfo], fetched: StockInfo) -> StockInfo:
             else fetched.quality_status
         ),
         source_record_id=existing.source_record_id or fetched.source_record_id,
+        english_short_name=existing.english_short_name or fetched.english_short_name,
     )
 
 
@@ -424,6 +457,7 @@ __all__ = [
     "URL_TWSE_COMPANY",
     "URL_TPEX_COMPANY",
     "backfill_stock_info",
+    "english_name_for",
     "industry_label",
     "load_company_map",
     "lookup_company_info",
