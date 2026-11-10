@@ -1,6 +1,6 @@
 # PROGRESS
 
-最後更新：2026-11-10（分支 `codex/evidence-and-raw-recovery`）
+最後更新：2026-11-10（分支 `master`；`codex/evidence-and-raw-recovery` 已由使用者在 2026-11-10 快轉合併進 master 並刪除）
 
 ## 專案目標
 Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財務、籌碼、ETF 持股、新聞與法說資料存入 SQLite，保留原始來源與引用，提供查詢、AI 研究問答、圖表、回測與模擬交易。目前 `RUN_MODE=watch`、`SIMULATION=true`；當沖實單模組已封存（2026-06-11）。
