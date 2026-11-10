@@ -155,3 +155,25 @@ def test_cli_json_uses_explicit_cap_and_contains_equity(tmp_path, capsys):
     assert len(payload["equity_curve"]) == 3
     assert payload["unrealized_pnl_twd"] < 0
     assert payload["net_pnl_twd"] == payload["realized_pnl_twd"] + payload["unrealized_pnl_twd"]
+
+
+def test_unrealized_loss_guard_halts_buys_from_trigger_date():
+    hist = {"A": bars("A", [(100,100),(100,98),(95,60),(60,60),(60,60)])}
+    kw = dict(smile_buy_tiers="1:1,5:1", max_lot_per_symbol=5, smile_max_bottom_dca_days=0)
+    r = run(hist, smile_max_unrealized_loss_pct=5, **kw)
+    assert r.halted_date == "2026-01-03"
+    assert r.to_dict()["halted_date"] == "2026-01-03"
+    assert not [o for o in r.orders if o["side"] == "buy" and o["execution_date"] > "2026-01-03"]
+    baseline = run(hist, smile_max_unrealized_loss_pct=0, **kw)
+    assert baseline.halted_date is None
+    assert [o for o in baseline.orders if o["side"] == "buy" and o["execution_date"] > "2026-01-03"]
+
+
+def test_bottom_dca_day_cap_in_portfolio_backtest():
+    hist = {"A": bars("A", [(100,100)] + [(90,90)] * 7)}
+    kw = dict(smile_buy_tiers="1:1,5:1", max_lot_per_symbol=5, smile_max_unrealized_loss_pct=0)
+    def fills(**o):
+        r = run(hist, **kw, **o)
+        return [x for x in r.orders if x.get("label") == "bottom_dca" and x["status"] == "filled"]
+    assert len(fills(smile_max_bottom_dca_days=2)) == 2
+    assert len(fills(smile_max_bottom_dca_days=0)) > 2

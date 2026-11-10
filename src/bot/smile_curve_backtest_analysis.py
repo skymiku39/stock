@@ -173,6 +173,7 @@ def run_scenario(
                                 return_pct=summary.return_pct,
                                 max_drawdown_pct=summary.max_drawdown_pct,
                                 max_drawdown_twd=summary.max_drawdown_twd,
+                                halted_date=summary.halted_date,
                                 symbols=[r.symbol for r in summary.results])
         report.notes = [summary.settings_note, "portfolio 為共用帳戶指標，不可逐檔加總"]
         return report

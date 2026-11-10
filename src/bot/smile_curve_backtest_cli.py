@@ -88,6 +88,8 @@ def _print_summary(summary: SmileBacktestSummary) -> None:
     print(f"已實現: {summary.total_pnl_twd:,.0f} 元 | 未實現(含出清成本): {summary.unrealized_pnl_twd:,.0f} 元")
     print(f"總損益: {summary.net_pnl_twd:,.0f} 元 | 本金報酬: {summary.return_pct:.2f}%")
     print(f"最大日終回撤: {summary.max_drawdown_pct:.2f}% / {summary.max_drawdown_twd:,.0f} 元")
+    if summary.halted_date:
+        print(f"浮虧護欄觸發: {summary.halted_date} 起停止買進")
     print(f"已平倉勝率: {summary.win_rate:.1f}%（只賣獲利單，不代表總報酬）")
     print()
     for r in summary.results:

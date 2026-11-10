@@ -11,7 +11,7 @@ from bot.models import MarketTick, qty_multiplier
 from bot.smile_curve import SmileCurveEngine, SmileLot
 from bot.smile_execution import round_tick
 from bot.strategy import BaseStrategy
-from bot.trade_cost import max_affordable_qty
+from bot.trade_cost import max_affordable_qty, net_pnl_twd
 from bot.utils import now_tw_time
 
 
@@ -116,6 +116,24 @@ class SmileCurveStrategy(BaseStrategy):
         return max_affordable_qty(price, self.risk.effective_fund_remaining(), unit,
                                   max_qty=want, settings=self.settings), unit
 
+    def _unrealized_loss_guard(self) -> bool:
+        """全部微笑持倉浮虧達上限時回傳 True（不買），並拉一次 Kill Switch。"""
+        pct = self.settings.smile_max_unrealized_loss_pct
+        if pct <= 0:
+            return False
+        pnl = sum(
+            net_pnl_twd(lot.entry_price, self._last_price.get(s, lot.entry_price),
+                        lot.quantity, lot.unit, settings=self.settings,
+                        sell_tax_rate=eng.sell_tax)
+            for s, eng in self.engines.items() for lot in eng.state.lots
+        )
+        limit = pct / 100.0 * float(self.settings.effective_fund_cap())
+        if pnl > -limit:
+            return False
+        if not self.risk.is_kill_switch_engaged():
+            self.risk.engage_kill_switch(f"smile_unrealized_loss {pnl:.0f} <= -{limit:.0f}")
+        return True
+
     def on_tick(self, tick: MarketTick):
         if self._is_trade_mode and (not self.settings.simulation or
                                    getattr(self.broker.api, "simulation", False) is not True):
@@ -140,11 +158,16 @@ class SmileCurveStrategy(BaseStrategy):
                     self._place_stop_sell(symbol, pos.quantity, "smile",
                                           limit_price=round_tick(price, True, symbol))
                 return
+            if self._unrealized_loss_guard():
+                return
             drop = e._drop_pct(price)
             day = tick.ts.date().isoformat()
+            max_days = self.settings.smile_max_bottom_dca_days
             candidates = [(idx, tier.multiplier) for idx, tier in enumerate(e.tiers)
                           if idx not in e.state.tiers_done and drop + 1e-9 >= tier.drop_pct]
-            if not candidates and drop + 1e-9 >= e.tiers[-1].drop_pct and day not in e.state.bottom_dca_done_dates:
+            if (not candidates and drop + 1e-9 >= e.tiers[-1].drop_pct
+                    and day not in e.state.bottom_dca_done_dates
+                    and (max_days == 0 or len(e.state.bottom_dca_done_dates) < max_days)):
                 candidates = [(None, 1)]
             if candidates:
                 tier, multiplier = candidates[0]

@@ -121,6 +121,7 @@ class SmileCurveEngine:
                          float(getattr(settings, "smile_regular_tax_rate", 0.003)))
         self.round_trips: List[SmileRoundTrip] = []
         self._cash_used = 0.0
+        self.halted = False  # 浮虧護欄觸發後不再買進（模擬 Kill Switch，需人工解除）
 
     def _fund_remaining(self) -> float:
         cap = float(self.settings.effective_fund_cap())
@@ -273,6 +274,25 @@ class SmileCurveEngine:
         actions.append(self._reset_cycle(price, date))
         return actions
 
+    def bottom_dca_allowed(self) -> bool:
+        max_days = int(getattr(self.settings, "smile_max_bottom_dca_days", 0))
+        return max_days == 0 or len(self.state.bottom_dca_done_dates) < max_days
+
+    def unrealized_pnl(self, price: float, lots=None) -> float:
+        """以 price 計的未實現淨損益（含費稅，不含滑價）。"""
+        return sum(
+            net_pnl_twd(l.entry_price, price, l.quantity, l.unit,
+                        settings=self.settings, sell_tax_rate=self.sell_tax)
+            for l in (self.state.lots if lots is None else lots)
+        )
+
+    def _unrealized_loss_breached(self, price: float) -> bool:
+        pct = float(getattr(self.settings, "smile_max_unrealized_loss_pct", 0.0))
+        if pct <= 0 or not self.state.lots:
+            return False
+        limit = pct / 100.0 * float(self.settings.effective_fund_cap())
+        return self.unrealized_pnl(price) <= -limit
+
     def _dip_buy(self, date: str, price: float) -> List[SmileAction]:
         actions: List[SmileAction] = []
         drop = self._drop_pct(price)
@@ -293,7 +313,8 @@ class SmileCurveEngine:
                 self.state.tiers_done.add(idx)
 
         deepest = self.tiers[-1].drop_pct
-        if drop + 1e-9 >= deepest and date not in self.state.bottom_dca_done_dates:
+        if (drop + 1e-9 >= deepest and date not in self.state.bottom_dca_done_dates
+                and self.bottom_dca_allowed()):
             act = self._record_buy(
                 price, self.base_lot, unit, date,
                 reason=f"bottom_dca_{deepest:.1f}%",
@@ -327,7 +348,9 @@ class SmileCurveEngine:
             return self._init_reference(close, date)
 
         ref = self.state.reference
-        if low < ref:
+        if not self.halted and self._unrealized_loss_breached(low):
+            self.halted = True
+        if low < ref and not self.halted:
             actions.extend(self._dip_buy(date, low))
         if high >= ref:
             actions.extend(self._rebound_sell(date, high))

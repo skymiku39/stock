@@ -64,6 +64,7 @@ class SmileBacktestSummary:
     max_drawdown_twd: float = 0.0
     max_drawdown_pct: float = 0.0
     execution: dict = field(default_factory=dict)
+    halted_date: Optional[str] = None  # 浮虧護欄觸發日；未觸發為 None
 
     @property
     def unrealized_pnl_twd(self) -> float:
@@ -274,9 +275,23 @@ class SmileCurveBacktester:
                         available_shares -= qty * qty_multiplier(unit)
                         if order["tier"] is not None:
                             e.state.tiers_done.add(order["tier"])
+                        else:
+                            e.state.bottom_dca_done_dates.add(date)
                         log.update(status="filled", filled_quantity=qty)
 
             # Only now is today's close available to the strategy.
+            for sym in sorted(today):
+                if valid(today[sym].close):
+                    marks[sym] = float(today[sym].close)
+            loss_pct = float(getattr(self.settings, "smile_max_unrealized_loss_pct", 0.0))
+            if loss_pct > 0 and out.halted_date is None:
+                guard_pnl = sum(net_pnl_twd(l.entry_price, marks.get(s, l.entry_price), l.quantity,
+                                            l.unit, settings=self.settings, sell_tax_rate=e.sell_tax)
+                                for s, e in engines.items() for l in e.open_lots)
+                if guard_pnl <= -loss_pct / 100.0 * cap:
+                    out.halted_date = date
+                    for s in pending:  # Kill switch: drop queued buys, keep queued sells.
+                        pending[s] = [o for o in pending[s] if o["side"] == "sell"]
             for sym in sorted(today):
                 e, bar = engines[sym], today[sym]
                 previous_volumes[sym] = float(bar.volume) if bar.volume is not None else 0.0
@@ -291,14 +306,14 @@ class SmileCurveBacktester:
                 if close >= e.state.reference:
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity)
                                     for l in e.open_lots] if e._position_profitable(close) else []
-                else:
+                elif out.halted_date is None:
                     drop = e._drop_pct(close)
                     for idx, tier in enumerate(e.tiers):
                         if idx not in e.state.tiers_done and drop + 1e-9 >= tier.drop_pct:
                             pending[sym].append(dict(side="buy", signal_date=date, tier=idx,
                                                     quantity=e.base_lot * tier.multiplier,
                                                     label=f"dip_{tier.drop_pct:.1f}%"))
-                    if drop + 1e-9 >= e.tiers[-1].drop_pct:
+                    if drop + 1e-9 >= e.tiers[-1].drop_pct and e.bottom_dca_allowed():
                         pending[sym].append(dict(side="buy", signal_date=date, tier=None,
                                                 quantity=e.base_lot, label="bottom_dca"))
             realized = sum(e.realized_pnl_twd for e in engines.values())

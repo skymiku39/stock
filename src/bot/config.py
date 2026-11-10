@@ -253,6 +253,16 @@ class Settings(BaseSettings):
             raise ValueError("smile_order_timeout_seconds must be >= 0")
         return v
 
+    smile_max_unrealized_loss_pct: float = 20.0  # 全部持倉浮虧 >= 此 % 資金上限即停買並拉 Kill Switch；0 停用
+    smile_max_bottom_dca_days: int = 20  # 每輪跌破最深階後每日加碼最多天數；0 不限
+
+    @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days")
+    @classmethod
+    def _validate_smile_guards(cls, v):
+        if v < 0:
+            raise ValueError("smile guard settings must be >= 0")
+        return v
+
     smile_reference_prices: Annotated[Dict[str, float], NoDecode] = Field(
         default_factory=dict,
     )

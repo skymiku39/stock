@@ -455,3 +455,54 @@ def test_no_sell_order_when_whole_position_not_profitable(tmp_path):
     tick(strategy, 100)
     assert len(api.trades) == 2
     assert strategy.positions["0050"].quantity == 30
+
+
+def test_live_kill_switch_file_blocks_simulation_buy(tmp_path):
+    strategy, api = setup(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / ".kill_switch").write_text("manual", encoding="utf-8")
+    tick(strategy, 100)
+    tick(strategy, 98)
+    assert strategy.risk.is_kill_switch_engaged()
+    assert api.trades == []
+
+
+def _tick_on(strategy, price, days=0):
+    with patch("bot.strategy_smile.now_tw_time", return_value=dt.time(10)):
+        strategy.on_tick(MarketTick(now_tw() + dt.timedelta(days=days), "0050", price, 1, 0, 100, "local_paper"))
+
+
+def test_unrealized_loss_guard_blocks_buy_engages_kill_switch_but_allows_average_cost_sell(tmp_path):
+    strategy, api = _two_lot_position(tmp_path)
+    strategy.settings.smile_max_unrealized_loss_pct = 2.0  # limit 100 TWD of 5000
+    assert not strategy.risk.is_kill_switch_engaged()
+    tick(strategy, 90)  # unrealized about -170 TWD, tier 2 would otherwise buy
+    assert len(api.trades) == 2
+    assert strategy.risk.is_kill_switch_engaged()
+    assert "smile_unrealized_loss" in strategy.risk.kill_switch_path.read_text(encoding="utf-8")
+    tick(strategy, 101)  # average-cost sell still allowed
+    assert len(api.trades) == 3
+    assert api.trades[2].order.quantity == 30
+    assert not strategy.positions
+
+
+def test_unrealized_loss_guard_disabled_with_zero(tmp_path):
+    strategy, api = _two_lot_position(tmp_path)
+    strategy.settings.smile_max_unrealized_loss_pct = 0.0
+    tick(strategy, 90)
+    assert len(api.trades) == 3
+    assert not strategy.risk.is_kill_switch_engaged()
+
+
+def test_bottom_dca_day_cap_stops_third_day(tmp_path):
+    strategy, api = setup(tmp_path, smile_reference_prices={"0050": 100.0}, max_fund=100000,
+                          smile_max_unrealized_loss_pct=0, smile_max_bottom_dca_days=2)
+    _tick_on(strategy, 100)
+    for _ in range(5):  # four tiers, then bottom DCA of day 0
+        _tick_on(strategy, 90)
+    assert len(api.trades) == 5
+    _tick_on(strategy, 90, days=1)
+    assert len(api.trades) == 6
+    _tick_on(strategy, 90, days=2)
+    assert len(api.trades) == 6
+    assert len(strategy.engines["0050"].state.bottom_dca_done_dates) == 2
