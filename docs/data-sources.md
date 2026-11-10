@@ -28,7 +28,8 @@
 | **量化證據** | 本地 fundamentals / chips / etf_holdings | `research_ticker` 的 `quant_block` | 否 | 基本面先讀 cache，空才補抓；籌碼用傳入或近 5 日；ETF 共識只讀本地持股 |
 | **重大訊息** | `openapi.twse.com.tw/v1/opendata/t187ap04_L` (每日全市場) | 個股重大訊息 | 否 | fallback 走 `mopsov` 個股歷史 `ajax_t05st02`；遇安全性阻擋會明確標記失敗 |
 | 新聞 | 鉅亨網 cnyes | 題材/情緒 | 否 | 空清單 |
-| 網路搜尋 | DuckDuckGo HTML | 法說/題材研究 | 否 | 空清單 (DDG 偶回 202 限流) |
+| 網路搜尋 | DuckDuckGo HTML | 法說/題材研究 | 否 | DDG 目前一律回 HTTP 202 驗證頁；研究流程以 strict 模式偵測，熔斷後略過並在 `WebMaterial.source_status` 與 LLM 素材【來源狀態】標示不可用 |
+| 財經 RSS 訂閱 | yahoo_tw_stock、yahoo_tw_finance、udn_money_stock、udn_money_industry、ltn_business、ctee_stock、moneydj、cna_finance、technews、digitimes | 個股新聞補料與原文抓取 (DDG 替代來源) | 否 | 單一 feed 失敗不影響其他；各 feed 狀態記於 `source_status['rss:<名稱>']`；raw 以 `rss_feed` 保存 |
 | 美股/指數/VIX/ADR | yfinance | 跨市場連動 | 否 | TWSE 收盤 fallback；未安裝則「無資料」 |
 | **台指期正逆價差** | `openapi.taifex.com.tw/v1/DailyMarketReportFut` | 期貨領先指標 (正逆價差) | 否 | 抓不到則 macro note 標記、不影響其他分析 |
 

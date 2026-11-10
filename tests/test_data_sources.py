@@ -769,6 +769,7 @@ def test_validate_run_all_forwards_isolated_root_to_collectors(tmp_path: Path) -
         "check_distribution",
         "check_news",
         "check_web_search",
+        "check_rss_feeds",
         "check_macro",
         "check_futures_basis",
         "check_etf_urls",

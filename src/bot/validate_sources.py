@@ -543,6 +543,32 @@ def check_web_search(root: Optional[Path] = None) -> CheckResult:
     return r
 
 
+def check_rss_feeds(root: Optional[Path] = None) -> CheckResult:
+    from bot.web_search import RSS_FEEDS, _new_session, parse_feed_items
+    r = CheckResult(name="財經 RSS 訂閱", layer="parse")
+    sess = _new_session()
+    unavailable: Dict[str, str] = {}
+    usable = 0
+    total = 0
+    for feed_name, url in RSS_FEEDS:
+        try:
+            resp = sess.get(url, timeout=12)
+            if resp.status_code != 200:
+                unavailable[feed_name] = f"HTTP {resp.status_code}"
+                continue
+            total += len(parse_feed_items(resp.content))
+            usable += 1
+        except Exception as e:  # noqa: BLE001
+            unavailable[feed_name] = f"{type(e).__name__}: {e}"
+    r.rows = total
+    r.ok = usable > 0
+    r.details["usable"] = usable
+    r.details["unavailable"] = unavailable
+    if not r.ok:
+        r.error = "所有 RSS 來源皆不可用"
+    return r
+
+
 def check_macro(root: Path) -> CheckResult:
     from bot.market_macro import fetch_macro_snapshot
     r = CheckResult(name="總經 (yfinance: 美股/SOX/VIX/加權 + ADR 溢價)", layer="parse")
@@ -988,6 +1014,7 @@ def _run_all_checks(
         lambda: check_distribution(root),
         lambda: check_news(root),
         lambda: check_web_search(root),
+        lambda: check_rss_feeds(root),
         lambda: check_macro(root),
         lambda: check_futures_basis(root),
     ]

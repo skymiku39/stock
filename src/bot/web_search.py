@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -95,10 +96,24 @@ class WebMaterial:
     search_results: List[SearchResult] = field(default_factory=list)
     pages: List[PageContent] = field(default_factory=list)
     fetched_at: str = ""
+    source_status: Dict[str, str] = field(default_factory=dict)
 
     def compact_text(self, max_chars: int = 10000) -> str:
         """壓成緊湊文字餵 LLM。"""
         parts: List[str] = []
+        unavailable = {
+            k: v for k, v in (self.source_status or {}).items()
+            if "unavailable" in str(v)
+        }
+        if unavailable:
+            parts.append("【來源狀態】")
+            for k, v in unavailable.items():
+                label = _SOURCE_LABELS.get(k) or (
+                    f"RSS {k[4:]}" if k.startswith("rss:") else k
+                )
+                reason = str(v).split("unavailable:", 1)[-1].strip() or str(v)
+                parts.append(f"- {label}：不可用（{reason}），本次缺少該來源的搜尋結果")
+            parts.append("")
         if self.search_results:
             parts.append("【網頁搜尋摘要】")
             for r in self.search_results[:25]:
@@ -118,6 +133,12 @@ class WebMaterial:
         if len(joined) > max_chars:
             joined = joined[:max_chars] + "\n...(已截斷)"
         return joined
+
+
+_SOURCE_LABELS = {
+    "ddg": "DuckDuckGo 網頁搜尋",
+    "google_news": "Google News",
+}
 
 
 # ----------------------------------------------------------------------
@@ -390,6 +411,135 @@ def _extract_xml_tag(s: str, tag: str) -> str:
 
 
 # ----------------------------------------------------------------------
+# 財經 RSS 訂閱
+# ----------------------------------------------------------------------
+
+RSS_FEEDS: tuple[tuple[str, str], ...] = (
+    ("yahoo_tw_stock", "https://tw.stock.yahoo.com/rss?category=tw-market"),
+    ("yahoo_tw_finance", "https://tw.news.yahoo.com/rss/finance"),
+    ("udn_money_stock", "https://money.udn.com/rssfeed/news/1001/5590?ch=money"),
+    ("udn_money_industry", "https://money.udn.com/rssfeed/news/1001/5591?ch=money"),
+    ("ltn_business", "https://news.ltn.com.tw/rss/business.xml"),
+    ("ctee_stock", "https://www.ctee.com.tw/rss_web/livenews/stock"),
+    ("moneydj", "https://www.moneydj.com/KMDJ/RssCenter.aspx?svc=NR&fno=1&arg=MB010000"),
+    ("cna_finance", "https://feeds.feedburner.com/rsscna/finance"),
+    ("technews", "https://technews.tw/feed/"),
+    ("digitimes", "https://www.digitimes.com.tw/tech/rss/xml/xmlrss_10_0.xml"),
+)
+
+
+def _local(tag: Any) -> str:
+    return str(tag).rsplit("}", 1)[-1].lower()
+
+
+def _child_text(el: "ET.Element", *names: str) -> str:
+    for child in el:
+        if _local(child.tag) in names:
+            text = "".join(child.itertext()).strip()
+            if text:
+                return text
+    return ""
+
+
+def parse_feed_items(content: bytes) -> List[Dict[str, str]]:
+    """解析 RSS <item> 與 Atom <entry>，回傳 title/url/desc/published。"""
+    root_el = ET.fromstring(content)
+    items: List[Dict[str, str]] = []
+    for el in root_el.iter():
+        kind = _local(el.tag)
+        if kind not in ("item", "entry"):
+            continue
+        link = ""
+        if kind == "entry":
+            for child in el:
+                if _local(child.tag) == "link" and child.get("href"):
+                    if not link or child.get("rel", "alternate") == "alternate":
+                        link = child.get("href", "")
+        if not link:
+            link = _child_text(el, "link", "guid")
+        items.append({
+            "title": _clean_text(_child_text(el, "title")),
+            "url": link.strip(),
+            "desc": _clean_text(_child_text(el, "description", "summary", "content", "encoded")),
+            "published": _child_text(el, "pubdate", "updated", "published", "date"),
+        })
+    return items
+
+
+def search_feeds(
+    ticker: str,
+    name: str = "",
+    *,
+    feeds: tuple[tuple[str, str], ...] = RSS_FEEDS,
+    session: Optional[requests.Session] = None,
+    logger: Optional[logging.Logger] = None,
+    root: Optional[Path] = None,
+    max_results: int = 20,
+) -> tuple[List[SearchResult], Dict[str, str]]:
+    """抓財經 RSS/Atom 訂閱，保留標題或摘要含代號/名稱的項目。
+
+    回傳 (results, status)；status 以 feed 名稱為 key，單一 feed 失敗不影響其他。
+    """
+    log = logger or get_logger("web-search")
+    sess = session or _new_session()
+    results: List[SearchResult] = []
+    status: Dict[str, str] = {}
+    needles = [x for x in (str(ticker or "").strip(), str(name or "").strip()) if x]
+    for idx, (feed_name, url) in enumerate(feeds):
+        if idx:
+            time.sleep(0.3)
+        try:
+            resp = sess.get(url, timeout=12)
+            if resp.status_code != 200:
+                status[feed_name] = f"unavailable: HTTP {resp.status_code}"
+                continue
+            content = resp.content
+            raw_document_id = ""
+            if root is not None and content:
+                try:
+                    raw_document = SourceRegistry(Path(root)).capture_document(
+                        "rss_feed",
+                        content,
+                        source_url=url,
+                        source_ref=feed_name,
+                        title=f"RSS: {feed_name}",
+                        kind="search_response",
+                        suffix="xml",
+                        mime_type="application/rss+xml",
+                        metadata={"feed": feed_name, "ticker": ticker},
+                    )
+                    raw_document_id = raw_document.document_id
+                except Exception:
+                    log.debug("RSS raw 保存失敗: %s", feed_name, exc_info=True)
+            matched = 0
+            for item in parse_feed_items(content):
+                if not item["title"] or not item["url"]:
+                    continue
+                hay = f"{item['title']} {item['desc']}"
+                if not any(n in hay for n in needles):
+                    continue
+                matched += 1
+                if len(results) >= max_results:
+                    continue
+                results.append(SearchResult(
+                    title=item["title"],
+                    url=item["url"],
+                    snippet=item["desc"][:300],
+                    source="rss",
+                    site=feed_name,
+                    published_at=item["published"],
+                    source_document_id=raw_document_id,
+                ))
+            status[feed_name] = "ok" if matched else "ok (0 matched)"
+        except Exception as exc:  # noqa: BLE001
+            status[feed_name] = f"unavailable: {type(exc).__name__}: {exc}"
+            log.debug("RSS %s 失敗", feed_name, exc_info=True)
+    # rss_feed 不在 web_search_research.SUPPORTED_SOURCES，故只保存 raw，不 materialize。
+    log.info("RSS ticker=%s -> %d 筆", ticker, len(results))
+    return results, status
+
+
+# ----------------------------------------------------------------------
 # 抓取單一網頁主要文字
 # ----------------------------------------------------------------------
 
@@ -549,6 +699,7 @@ def research_ticker(
                     search_results=[SearchResult(**r) for r in cached.get("search_results", []) or []],
                     pages=[PageContent(**p) for p in cached.get("pages", []) or []],
                     fetched_at=cached.get("fetched_at", ""),
+                    source_status=dict(cached.get("source_status") or {}),
                 )
                 log.info("[%s] web research 命中快取", ticker)
                 return material
@@ -560,6 +711,9 @@ def research_ticker(
     all_results: List[SearchResult] = []
     seen_urls: set[str] = set()
 
+    source_status: Dict[str, str] = {}
+    ddg_tripped = False
+    news_count = 0
     for q in queries:
         for r in search_news(
             q, max_results=max_results_per_query, session=sess, logger=log, root=root,
@@ -568,20 +722,42 @@ def research_ticker(
                 continue
             seen_urls.add(r.url)
             all_results.append(r)
+            news_count += 1
         time.sleep(0.5)
-        for r in search_web(
-            q, max_results=max_results_per_query, session=sess, logger=log, root=root,
-        ):
-            if r.url in seen_urls:
-                continue
-            seen_urls.add(r.url)
-            all_results.append(r)
+        if not ddg_tripped:
+            try:
+                for r in search_web(
+                    q, max_results=max_results_per_query, session=sess, logger=log,
+                    root=root, strict=True,
+                ):
+                    if r.url in seen_urls:
+                        continue
+                    seen_urls.add(r.url)
+                    all_results.append(r)
+                source_status.setdefault("ddg", "ok")
+            except SearchUnavailable as exc:
+                ddg_tripped = True
+                source_status["ddg"] = f"unavailable: {exc}"
+                log.warning("[%s] DDG 不可用，本輪略過: %s", ticker, exc)
         time.sleep(0.6)
+    source_status["google_news"] = "ok" if news_count else "ok (0 results)"
+
+    rss_results, rss_status = search_feeds(
+        ticker, name, session=sess, logger=log, root=root,
+    )
+    for feed_name, st in rss_status.items():
+        source_status[f"rss:{feed_name}"] = st
+    for r in rss_results:
+        if r.url in seen_urls:
+            continue
+        seen_urls.add(r.url)
+        all_results.append(r)
 
     pages: List[PageContent] = []
-    for r in all_results:
-        if r.source != "ddg":
-            continue
+    fetch_candidates = [r for r in all_results if r.source == "ddg"] + [
+        r for r in all_results if r.source == "rss"
+    ]
+    for r in fetch_candidates:
         if not r.url.startswith("http"):
             continue
         host = _site_from_url(r.url)
@@ -600,6 +776,7 @@ def research_ticker(
         search_results=all_results,
         pages=pages,
         fetched_at=now_tw().isoformat(timespec="seconds"),
+        source_status=source_status,
     )
     try:
         _save_cache(key, root, {
@@ -609,6 +786,7 @@ def research_ticker(
             "fetched_at": material.fetched_at,
             "search_results": [asdict(r) for r in material.search_results],
             "pages": [asdict(p) for p in material.pages],
+            "source_status": material.source_status,
         })
     except Exception:
         log.exception("[%s] web research 快取寫入失敗", ticker)
@@ -620,7 +798,10 @@ __all__ = [
     "SearchResult",
     "WebMaterial",
     "fetch_page_text",
+    "RSS_FEEDS",
+    "SearchUnavailable",
     "research_ticker",
+    "search_feeds",
     "search_news",
     "search_web",
 ]
