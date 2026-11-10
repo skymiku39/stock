@@ -274,3 +274,60 @@ def test_busy_exit_waits_a_minute_without_counting_as_failure(tmp_path, monkeypa
     assert status["jobs"]["research"]["state"] == "busy"
     sch = Scheduler(_settings(scheduler_market_hours_only=False), project_root=tmp_path)
     assert next(j for j in sch.jobs if j.name == "research").next_retry_epoch == clock[0] + 60
+
+
+def _write_research_status(root, day, payload):
+    path = root / "data/daily_research" / day.isoformat() / "status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_blocked_exit_waits_until_reported_next_retry_epoch(tmp_path, monkeypatch):
+    from bot.scheduler import Scheduler
+    start = dt.datetime(2026, 10, 16, 10, 0)
+    clock = [start.timestamp()]
+    retry_at = clock[0] + 1800
+    monkeypatch.setattr("bot.scheduler.time.time", lambda: clock[0])
+    monkeypatch.setattr("bot.scheduler.now_tw", lambda: dt.datetime.fromtimestamp(clock[0]))
+    monkeypatch.setattr("bot.scheduler.run_with_deadline", lambda *a, **k: 3)
+    _write_research_status(tmp_path, start.date(), {"outcome": "blocked", "next_retry_epoch": retry_at})
+    sch = Scheduler(_settings(scheduler_market_hours_only=False), project_root=tmp_path)
+    job = next(j for j in sch.jobs if j.name == "research")
+    job.consecutive_failures = 1
+    assert sch._run_job(job) == 3
+    # blocked is not a retryable failure: neither counted nor reset.
+    assert job.consecutive_failures == 1
+    assert job.next_retry_epoch == retry_at
+    now = dt.datetime.fromtimestamp(clock[0])
+    clock[0] = retry_at - 1
+    assert not sch._job_eligible(job, now, once=False)
+    assert not sch._job_eligible(job, now, once=True)
+    status = json.loads(sch.status_path.read_text(encoding="utf-8"))
+    assert status["jobs"]["research"]["state"] == "blocked"
+    assert status["jobs"]["research"]["retryable"] is False
+    assert status["jobs"]["research"]["next_retry_epoch"] == retry_at
+    reloaded = Scheduler(_settings(scheduler_market_hours_only=False), project_root=tmp_path)
+    assert next(j for j in reloaded.jobs if j.name == "research").next_retry_epoch == retry_at
+
+
+def test_partial_exit_without_retry_epoch_uses_normal_interval(tmp_path, monkeypatch):
+    from bot.scheduler import Scheduler
+    start = dt.datetime(2026, 10, 16, 10, 0)
+    clock = [start.timestamp()]
+    monkeypatch.setattr("bot.scheduler.time.time", lambda: clock[0])
+    monkeypatch.setattr("bot.scheduler.now_tw", lambda: dt.datetime.fromtimestamp(clock[0]))
+    monkeypatch.setattr("bot.scheduler.run_with_deadline", lambda *a, **k: 3)
+    _write_research_status(tmp_path, start.date(), {"outcome": "partial"})
+    sch = Scheduler(_settings(scheduler_market_hours_only=False), project_root=tmp_path)
+    job = next(j for j in sch.jobs if j.name == "research")
+    job.consecutive_failures = 2
+    assert sch._run_job(job) == 3
+    assert job.consecutive_failures == 0
+    assert job.next_retry_epoch == clock[0] + job.interval_min * 60
+    now = dt.datetime.fromtimestamp(clock[0])
+    clock[0] += job.interval_min * 60 - 1
+    assert not sch._job_eligible(job, now, once=False)
+    clock[0] += 1
+    assert sch._job_eligible(job, now, once=False)
+    status = json.loads(sch.status_path.read_text(encoding="utf-8"))
+    assert status["jobs"]["research"]["state"] == "partial"
