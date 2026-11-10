@@ -347,6 +347,25 @@ def page_runner() -> None:
 # ======================================================================
 
 
+def kill_switch_status(live_guard: Any, sim_guard: Any) -> List[Tuple[str, Path]]:
+    """回傳已啟動 Kill Switch 的環境（正式／模擬）與其旗標檔路徑。"""
+    out: List[Tuple[str, Path]] = []
+    for label, g in (("正式", live_guard), ("模擬", sim_guard)):
+        if g.is_kill_switch_engaged():
+            out.append((label, g.kill_switch_path))
+    return out
+
+
+def engage_all_kill_switches(live_guard: Any, sim_guard: Any, reason: str = "dashboard_manual") -> None:
+    live_guard.engage_kill_switch(reason)
+    sim_guard.engage_kill_switch(reason)
+
+
+def release_all_kill_switches(live_guard: Any, sim_guard: Any) -> None:
+    live_guard.release_kill_switch()
+    sim_guard.release_kill_switch()
+
+
 def page_risk_center() -> None:
     st.title("風控中心 (Risk Center)")
     st.caption("看一眼今天的資金/部位/虧損狀態，必要時拉下「緊急 Kill Switch」立刻關掉所有新進場。")
@@ -356,28 +375,32 @@ def page_risk_center() -> None:
 
     settings = S()
     guard = RiskGuard(settings=settings, project_root=PROJECT_ROOT)
+    sim_guard = RiskGuard(settings=settings, project_root=PROJECT_ROOT / "data" / "simulation")
     snap = guard.snapshot()
+    engaged_sides = kill_switch_status(guard, sim_guard)
+    engaged = bool(engaged_sides)
 
     # ============ Kill Switch =============
     with st.container(border=True):
         cols = st.columns([3, 1, 1])
         with cols[0]:
-            if snap["kill_switch"]:
+            if engaged:
+                detail = "；".join(f"{label}: `{path}`" for label, path in engaged_sides)
                 st.error(
                     "🔴 **Kill Switch 已啟動** — 所有新進場單會被拒絕。"
-                    f" 觸發檔案: `data/{KILL_SWITCH_FILENAME}`"
+                    f" 啟動範圍/檔案: {detail}"
                 )
             else:
                 st.success("🟢 Kill Switch 未啟動 — 正常運作中")
         with cols[1]:
-            if not snap["kill_switch"]:
+            if not engaged:
                 if st.button("🔴 緊急拉閘", type="primary", use_container_width=True):
-                    guard.engage_kill_switch("dashboard_manual")
+                    engage_all_kill_switches(guard, sim_guard)
                     st.rerun()
         with cols[2]:
-            if snap["kill_switch"]:
+            if engaged:
                 if st.button("🟢 解除拉閘", use_container_width=True):
-                    guard.release_kill_switch()
+                    release_all_kill_switches(guard, sim_guard)
                     st.rerun()
 
     # ============ 持倉安全（混倉警示）============

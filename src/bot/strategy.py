@@ -52,7 +52,7 @@ from bot.ownership import (
 from bot.intraday_llm_advisor import IntradayLlmAdvisor
 from bot.llm_gate import LlmGate
 from bot.recorder import TradeRecorder
-from bot.risk_guard import EntryKind, RiskGuard
+from bot.risk_guard import KILL_SWITCH_FILENAME, EntryKind, RiskGuard
 from bot.signal_recorder import SignalRecorder
 from bot.trade_cost import (
     buy_cash_required,
@@ -190,10 +190,16 @@ class BaseStrategy(ABC):
         )
 
         # 風險 / 資金控制 (所有實際下單都會經過)
+        extra_kill_paths = (
+            [self._project_root / "data" / KILL_SWITCH_FILENAME]
+            if self._state_root != self._project_root
+            else []
+        )
         self.risk = RiskGuard(
             settings=settings,
             logger=self.logger,
             project_root=dependency_root,
+            extra_kill_switch_paths=extra_kill_paths,
         )
         self._fund_used = self.risk.fund_used
 

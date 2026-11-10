@@ -50,7 +50,7 @@ import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Set, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple
 
 EntryKind = Literal["enter", "reenter", "rebuy"]
 
@@ -112,8 +112,11 @@ class RiskGuard:
         settings,                           # bot.config.Settings (避免循環 import)
         project_root: Optional[Path] = None,
         logger: Optional[logging.Logger] = None,
+        *,
+        extra_kill_switch_paths: Sequence[Path] = (),
     ):
         self.settings = settings
+        self.extra_kill_switch_paths: List[Path] = [Path(p) for p in extra_kill_switch_paths]
         self.logger = logger or get_logger("risk_guard")
         self.project_root = project_root or Path.cwd()
         self.data_dir = self.project_root / "data"
@@ -248,8 +251,12 @@ class RiskGuard:
         return self.data_dir / KILL_SWITCH_FILENAME
 
     def is_kill_switch_engaged(self) -> bool:
-        """拉閘條件：檔案存在 或 當日狀態已標記。"""
-        return self.kill_switch_path.exists() or self.state.kill_switch_engaged
+        """拉閘條件：檔案存在、當日狀態已標記，或任一額外旗標檔存在。"""
+        return (
+            self.kill_switch_path.exists()
+            or self.state.kill_switch_engaged
+            or any(p.exists() for p in self.extra_kill_switch_paths)
+        )
 
     def engage_kill_switch(self, reason: str = "manual") -> None:
         """主動拉閘 (dashboard 按鈕 / 程式邏輯觸發)。"""

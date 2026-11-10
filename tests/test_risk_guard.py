@@ -377,3 +377,36 @@ class TestRebuyBypass:
         assert not d_enter.allowed
         d_rebuy = g.check_entry("2330", 97, 1, entry_kind="rebuy")
         assert d_rebuy.allowed
+
+
+class TestExtraKillSwitchPaths:
+    def test_extra_path_engages_and_release_keeps_it(self, tmp_path: Path) -> None:
+        extra = tmp_path / "live" / KILL_SWITCH_FILENAME
+        extra.parent.mkdir(parents=True)
+        g = RiskGuard(settings=_make_settings(), project_root=tmp_path / "sim",
+                      extra_kill_switch_paths=[extra])
+        assert not g.is_kill_switch_engaged()
+        extra.write_text("x", encoding="utf-8")
+        assert g.is_kill_switch_engaged()
+        assert g.snapshot()["kill_switch"] is True
+        assert not g.check_entry("2330", price=100, requested_lots=1).allowed
+        g.release_kill_switch()
+        assert extra.exists()
+        assert g.is_kill_switch_engaged()
+        extra.unlink()
+        assert not g.is_kill_switch_engaged()
+
+    def test_dashboard_engage_and_release_both_sides(self, tmp_path: Path) -> None:
+        from bot.dashboard.pages import (
+            engage_all_kill_switches, kill_switch_status, release_all_kill_switches,
+        )
+        s = _make_settings()
+        live = RiskGuard(settings=s, project_root=tmp_path)
+        sim = RiskGuard(settings=s, project_root=tmp_path / "data" / "simulation")
+        assert kill_switch_status(live, sim) == []
+        engage_all_kill_switches(live, sim)
+        assert [x[0] for x in kill_switch_status(live, sim)] == ["正式", "模擬"]
+        assert live.kill_switch_path.exists() and sim.kill_switch_path.exists()
+        release_all_kill_switches(live, sim)
+        assert kill_switch_status(live, sim) == []
+        assert not live.kill_switch_path.exists() and not sim.kill_switch_path.exists()

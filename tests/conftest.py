@@ -64,12 +64,14 @@ def _isolate_risk_guard_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         settings,
         project_root: Path | None = None,
         logger=None,
+        **kwargs,
     ) -> None:
         original_init(
             self,
             settings,
             project_root=project_root or tmp_path,
             logger=logger,
+            **kwargs,
         )
 
     monkeypatch.setattr(RiskGuard, "__init__", _init)
