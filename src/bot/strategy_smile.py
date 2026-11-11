@@ -28,6 +28,8 @@ class SmileCurveStrategy(BaseStrategy):
             self.logger.warning("微笑策略不支援觀察池自動併入代號，已強制關閉 symbols_auto_merge")
         self.engines: dict[str, SmileCurveEngine] = {}
         self._smile_intent: dict[str, tuple[int | None, str]] = {}
+        self._smile_stop_selling: set[str] = set()  # 代號的在途賣單屬於單檔停損
+        self._reference_saved_at = float("-inf")
         self._smile_lock = self._submission_lock
         self._smile_state_path = self._state_root / "data" / "smile_state.json"
         for symbol in settings.symbols:
@@ -39,15 +41,19 @@ class SmileCurveStrategy(BaseStrategy):
                 for symbol, row in data.items():
                     loaded[symbol] = (row["reference"], set(row["tiers_done"]),
                                       set(row["bottom_dates"]),
-                                      [SmileLot(**lot) for lot in row["lots"]])
+                                      [SmileLot(**lot) for lot in row["lots"]],
+                                      bool(row.get("disabled", False)))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
                 path = self._smile_state_path.resolve()
                 raise RuntimeError(
                     f"smile_state.json 損毀：{path}（{type(exc).__name__}: {exc}）。"
                     "可從同目錄 smile_state.json.bak 還原（最後一次成功寫入前的版本）；"
                     "若確定沒有微笑持倉與未結委託，可刪除此檔讓策略重建標準價") from exc
-            for symbol, (ref, tiers, dates, lots) in loaded.items():
+            for symbol, (ref, tiers, dates, lots, disabled) in loaded.items():
                 e = self._engine(symbol)
+                e.state.disabled = disabled
+                if disabled:
+                    self.logger.warning("%s 已因單檔停損停用，不會再買進；重新啟用見 docs/operations.md 4.6", symbol)
                 e.state.reference = ref
                 e.state.tiers_done = tiers
                 e.state.bottom_dca_done_dates = dates
@@ -64,6 +70,7 @@ class SmileCurveStrategy(BaseStrategy):
         self._smile_state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {s: dict(reference=e.state.reference, tiers_done=sorted(e.state.tiers_done),
                            bottom_dates=sorted(e.state.bottom_dca_done_dates),
+                           disabled=e.state.disabled,
                            lots=[asdict(lot) for lot in e.state.lots]) for s, e in self.engines.items()}
         temp = self._smile_state_path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
@@ -117,7 +124,14 @@ class SmileCurveStrategy(BaseStrategy):
                     if not lot.quantity:
                         e.state.lots.remove(lot)
                 if symbol not in self.positions:
-                    e._reset_cycle(price, "")
+                    if symbol in self._smile_stop_selling:
+                        self._smile_stop_selling.discard(symbol)
+                        e.state.disabled = True
+                        self.logger.warning(
+                            "%s 單檔停損已出清並停用，不會再買進；重新啟用見 docs/operations.md 4.6",
+                            symbol)
+                    else:
+                        e._reset_cycle(price, "")
             self._save_smile_state()
             # Persist each fill, including partial fills, for restart reconciliation.
             if self._is_trade_mode:
@@ -134,8 +148,11 @@ class SmileCurveStrategy(BaseStrategy):
         want = min(want, cap // qty_multiplier(unit))
         if unit == "share":
             want = min(want, self.settings.odd_lot_max_shares)
-        return max_affordable_qty(price, self.risk.effective_fund_remaining(), unit,
-                                  max_qty=want, settings=self.settings), unit
+        budget = self.risk.effective_fund_remaining()
+        room = self._engine(symbol).symbol_fund_room()
+        if room is not None:
+            budget = min(budget, room)
+        return max_affordable_qty(price, budget, unit, max_qty=want, settings=self.settings), unit
 
     def _unrealized_loss_guard(self) -> bool:
         """全部微笑持倉浮虧達上限時回傳 True（不買），並拉一次 Kill Switch。"""
@@ -176,8 +193,24 @@ class SmileCurveStrategy(BaseStrategy):
             pos = self.positions.get(symbol)
             if price >= e.state.reference:
                 if (pos and e.open_lots and e._position_profitable(price)):
+                    self._smile_stop_selling.discard(symbol)
                     self._place_stop_sell(symbol, pos.quantity, "smile",
                                           limit_price=round_tick(price, True, symbol))
+                elif not pos and e.trail_reference(price):
+                    # 新高可能每個 tick 都出現；最多每分鐘落盤一次，成交時另會儲存。
+                    if time.monotonic() - self._reference_saved_at >= 60:
+                        self._reference_saved_at = time.monotonic()
+                        self._save_smile_state()
+                return
+            if pos and e.open_lots and e.stop_loss_breached(price):
+                # 單檔停損：整個部位以現價限價賣出，出清後停用該檔。
+                # 成交回報可能在送單呼叫內就回來，所以先標記再送單。
+                self._smile_stop_selling.add(symbol)
+                if not self._place_stop_sell(symbol, pos.quantity, "smile_stop",
+                                             limit_price=round_tick(price, False, symbol)):
+                    self._smile_stop_selling.discard(symbol)
+                return
+            if e.state.disabled:
                 return
             if self._unrealized_loss_guard():
                 return
