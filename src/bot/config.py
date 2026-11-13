@@ -256,7 +256,12 @@ class Settings(BaseSettings):
     smile_max_unrealized_loss_pct: float = 20.0  # 全部持倉浮虧 >= 此 % 資金上限即停買並拉 Kill Switch；0 停用
     smile_max_bottom_dca_days: int = 20  # 每輪跌破最深階後每日加碼最多天數；0 不限
 
-    @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days")
+    smile_trailing_reference: bool = True  # 空手時標準價跟著新高上移；手動固定標準價的代號不跟
+    smile_symbol_stop_loss_pct: float = 25.0  # 單檔部位淨損 >= 持倉成本此 % 即全賣並停用該檔（人工重啟）；0 停用
+    smile_max_symbol_fund_pct: float = 0.0  # 單檔持倉成本上限占資金上限 %；0 不限（仍受 MAX_LOT_PER_SYMBOL）
+
+    @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days",
+                     "smile_symbol_stop_loss_pct", "smile_max_symbol_fund_pct")
     @classmethod
     def _validate_smile_guards(cls, v):
         if v < 0:
