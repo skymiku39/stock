@@ -1,0 +1,377 @@
+{
+  "method": "2020 年 TWSE＋TPEx 全市場每日行情，依日均成交金額（全年合計 ÷ 交易日數）排名，排除 2330 與非普通股（ETF、權證、受益證券、存託憑證）；選定後不更換。",
+  "ranking_year": 2020,
+  "count": 60,
+  "excluded": [
+    "2330"
+  ],
+  "trading_days": 245,
+  "sources": [
+    "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={ymd}&type=ALLBUT0999&response=json",
+    "https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date={y}/{m:02d}/{d:02d}&type=EW&response=json"
+  ],
+  "raw_cache_dir": "data\\cache\\universe",
+  "caveat": "已下市股票在現行來源可能抓不到日 K，存活者偏誤無法完全消除。",
+  "symbols": [
+    {
+      "rank": 1,
+      "symbol": "2454",
+      "name": "聯發科",
+      "avg_daily_turnover_twd": 5928148527
+    },
+    {
+      "rank": 2,
+      "symbol": "2327",
+      "name": "國巨*",
+      "avg_daily_turnover_twd": 5857821780
+    },
+    {
+      "rank": 3,
+      "symbol": "3406",
+      "name": "玉晶光",
+      "avg_daily_turnover_twd": 4453230665
+    },
+    {
+      "rank": 4,
+      "symbol": "2303",
+      "name": "聯電",
+      "avg_daily_turnover_twd": 4222850501
+    },
+    {
+      "rank": 5,
+      "symbol": "3037",
+      "name": "欣興",
+      "avg_daily_turnover_twd": 3378795611
+    },
+    {
+      "rank": 6,
+      "symbol": "2317",
+      "name": "鴻海",
+      "avg_daily_turnover_twd": 3331818064
+    },
+    {
+      "rank": 7,
+      "symbol": "3008",
+      "name": "大立光",
+      "avg_daily_turnover_twd": 3069978160
+    },
+    {
+      "rank": 8,
+      "symbol": "3661",
+      "name": "世芯-KY",
+      "avg_daily_turnover_twd": 2779459522
+    },
+    {
+      "rank": 9,
+      "symbol": "2492",
+      "name": "華新科",
+      "avg_daily_turnover_twd": 2565333634
+    },
+    {
+      "rank": 10,
+      "symbol": "3105",
+      "name": "穩懋",
+      "avg_daily_turnover_twd": 2154101124
+    },
+    {
+      "rank": 11,
+      "symbol": "8046",
+      "name": "南電",
+      "avg_daily_turnover_twd": 1990064870
+    },
+    {
+      "rank": 12,
+      "symbol": "3374",
+      "name": "精材",
+      "avg_daily_turnover_twd": 1955201571
+    },
+    {
+      "rank": 13,
+      "symbol": "2337",
+      "name": "旺宏",
+      "avg_daily_turnover_twd": 1948154777
+    },
+    {
+      "rank": 14,
+      "symbol": "6488",
+      "name": "環球晶",
+      "avg_daily_turnover_twd": 1946476392
+    },
+    {
+      "rank": 15,
+      "symbol": "2603",
+      "name": "長榮",
+      "avg_daily_turnover_twd": 1886484011
+    },
+    {
+      "rank": 16,
+      "symbol": "3481",
+      "name": "群創",
+      "avg_daily_turnover_twd": 1789496858
+    },
+    {
+      "rank": 17,
+      "symbol": "2368",
+      "name": "金像電",
+      "avg_daily_turnover_twd": 1742672895
+    },
+    {
+      "rank": 18,
+      "symbol": "4968",
+      "name": "立積",
+      "avg_daily_turnover_twd": 1664592915
+    },
+    {
+      "rank": 19,
+      "symbol": "5269",
+      "name": "祥碩",
+      "avg_daily_turnover_twd": 1556377719
+    },
+    {
+      "rank": 20,
+      "symbol": "3034",
+      "name": "聯詠",
+      "avg_daily_turnover_twd": 1513949515
+    },
+    {
+      "rank": 21,
+      "symbol": "4142",
+      "name": "國光生",
+      "avg_daily_turnover_twd": 1498540202
+    },
+    {
+      "rank": 22,
+      "symbol": "3293",
+      "name": "鈊象",
+      "avg_daily_turnover_twd": 1482723457
+    },
+    {
+      "rank": 23,
+      "symbol": "2409",
+      "name": "友達",
+      "avg_daily_turnover_twd": 1416632501
+    },
+    {
+      "rank": 24,
+      "symbol": "5483",
+      "name": "中美晶",
+      "avg_daily_turnover_twd": 1408771951
+    },
+    {
+      "rank": 25,
+      "symbol": "2308",
+      "name": "台達電",
+      "avg_daily_turnover_twd": 1374042996
+    },
+    {
+      "rank": 26,
+      "symbol": "3227",
+      "name": "原相",
+      "avg_daily_turnover_twd": 1364510276
+    },
+    {
+      "rank": 27,
+      "symbol": "2379",
+      "name": "瑞昱",
+      "avg_daily_turnover_twd": 1315617899
+    },
+    {
+      "rank": 28,
+      "symbol": "2344",
+      "name": "華邦電",
+      "avg_daily_turnover_twd": 1304966585
+    },
+    {
+      "rank": 29,
+      "symbol": "2474",
+      "name": "可成",
+      "avg_daily_turnover_twd": 1194534211
+    },
+    {
+      "rank": 30,
+      "symbol": "2408",
+      "name": "南亞科",
+      "avg_daily_turnover_twd": 1186445958
+    },
+    {
+      "rank": 31,
+      "symbol": "2313",
+      "name": "華通",
+      "avg_daily_turnover_twd": 1174285298
+    },
+    {
+      "rank": 32,
+      "symbol": "6669",
+      "name": "緯穎",
+      "avg_daily_turnover_twd": 1158720971
+    },
+    {
+      "rank": 33,
+      "symbol": "6531",
+      "name": "愛普*",
+      "avg_daily_turnover_twd": 1152345786
+    },
+    {
+      "rank": 34,
+      "symbol": "2345",
+      "name": "智邦",
+      "avg_daily_turnover_twd": 1121436702
+    },
+    {
+      "rank": 35,
+      "symbol": "2448",
+      "name": "晶電",
+      "avg_daily_turnover_twd": 1091678216
+    },
+    {
+      "rank": 36,
+      "symbol": "3711",
+      "name": "日月光投控",
+      "avg_daily_turnover_twd": 1064652349
+    },
+    {
+      "rank": 37,
+      "symbol": "4966",
+      "name": "譜瑞-KY",
+      "avg_daily_turnover_twd": 1032755229
+    },
+    {
+      "rank": 38,
+      "symbol": "2456",
+      "name": "奇力新",
+      "avg_daily_turnover_twd": 1019712351
+    },
+    {
+      "rank": 39,
+      "symbol": "6278",
+      "name": "台表科",
+      "avg_daily_turnover_twd": 1015452956
+    },
+    {
+      "rank": 40,
+      "symbol": "6415",
+      "name": "矽力*-KY",
+      "avg_daily_turnover_twd": 1014458621
+    },
+    {
+      "rank": 41,
+      "symbol": "8086",
+      "name": "宏捷科",
+      "avg_daily_turnover_twd": 986895336
+    },
+    {
+      "rank": 42,
+      "symbol": "2458",
+      "name": "義隆",
+      "avg_daily_turnover_twd": 949681323
+    },
+    {
+      "rank": 43,
+      "symbol": "3324",
+      "name": "雙鴻",
+      "avg_daily_turnover_twd": 934850506
+    },
+    {
+      "rank": 44,
+      "symbol": "3017",
+      "name": "奇鋐",
+      "avg_daily_turnover_twd": 912367965
+    },
+    {
+      "rank": 45,
+      "symbol": "2049",
+      "name": "上銀",
+      "avg_daily_turnover_twd": 909768830
+    },
+    {
+      "rank": 46,
+      "symbol": "9958",
+      "name": "世紀鋼",
+      "avg_daily_turnover_twd": 884724228
+    },
+    {
+      "rank": 47,
+      "symbol": "1325",
+      "name": "恆大",
+      "avg_daily_turnover_twd": 882232731
+    },
+    {
+      "rank": 48,
+      "symbol": "2412",
+      "name": "中華電",
+      "avg_daily_turnover_twd": 880297158
+    },
+    {
+      "rank": 49,
+      "symbol": "2884",
+      "name": "玉山金",
+      "avg_daily_turnover_twd": 873315758
+    },
+    {
+      "rank": 50,
+      "symbol": "3189",
+      "name": "景碩",
+      "avg_daily_turnover_twd": 861750930
+    },
+    {
+      "rank": 51,
+      "symbol": "3443",
+      "name": "創意",
+      "avg_daily_turnover_twd": 861345047
+    },
+    {
+      "rank": 52,
+      "symbol": "1760",
+      "name": "寶齡富錦",
+      "avg_daily_turnover_twd": 831066095
+    },
+    {
+      "rank": 53,
+      "symbol": "4743",
+      "name": "合一",
+      "avg_daily_turnover_twd": 830970286
+    },
+    {
+      "rank": 54,
+      "symbol": "8299",
+      "name": "群聯",
+      "avg_daily_turnover_twd": 825410937
+    },
+    {
+      "rank": 55,
+      "symbol": "3653",
+      "name": "健策",
+      "avg_daily_turnover_twd": 808210637
+    },
+    {
+      "rank": 56,
+      "symbol": "1590",
+      "name": "亞德客-KY",
+      "avg_daily_turnover_twd": 805310507
+    },
+    {
+      "rank": 57,
+      "symbol": "4958",
+      "name": "臻鼎-KY",
+      "avg_daily_turnover_twd": 802473213
+    },
+    {
+      "rank": 58,
+      "symbol": "2891",
+      "name": "中信金",
+      "avg_daily_turnover_twd": 789400296
+    },
+    {
+      "rank": 59,
+      "symbol": "6510",
+      "name": "精測",
+      "avg_daily_turnover_twd": 755210878
+    },
+    {
+      "rank": 60,
+      "symbol": "2382",
+      "name": "廣達",
+      "avg_daily_turnover_twd": 737951937
+    }
+  ]
+}

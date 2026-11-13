@@ -22,6 +22,12 @@ from bot.events.wiring import publish_if_bus
 from bot.smile_curve_backtest import SmileCurveBacktester, SmileSymbolResult
 
 
+# 流動性門檻：近 N 筆日 K 的平均成交量（張，與 price_history 同單位）。預設 1000 張，
+# 對應回測成交量上限（前一日成交量的 0.1%）剛好容納一張。
+LIQUIDITY_WINDOW_DAYS = 60
+DEFAULT_MIN_AVG_VOLUME_LOTS = 1000.0
+
+
 @dataclass
 class PriceMetrics:
     symbol: str
@@ -33,6 +39,7 @@ class PriceMetrics:
     dip_5pct_days: int = 0
     ref_resets: int = 0
     bar_count: int = 0
+    avg_volume_lots: float = 0.0
     skip_reason: str = ""
 
 
@@ -179,6 +186,8 @@ def compute_price_metrics(
     rets = [(closes[i] / closes[i - 1] - 1.0) * 100.0 for i in range(1, len(closes))]
     vol = statistics.pstdev(rets) if len(rets) > 1 else 0.0
     price = closes[-1]
+    recent_volumes = [float(b.volume or 0) for b in bars[-LIQUIDITY_WINDOW_DAYS:]]
+    avg_volume_lots = sum(recent_volumes) / len(recent_volumes)
     lot_cost = price * 1000.0
     odd_shares = int(budget_per_symbol / price) if price > 0 else 0
 
@@ -192,6 +201,7 @@ def compute_price_metrics(
         dip_5pct_days=dip_events[5],
         ref_resets=ref_resets,
         bar_count=len(bars),
+        avg_volume_lots=avg_volume_lots,
     )
 
 
@@ -279,6 +289,7 @@ def screen_smile_candidates(
     max_price: float = 300.0,
     min_ann_vol: float = 35.0,
     min_add_etfs: int = 3,
+    min_avg_volume_lots: float = DEFAULT_MIN_AVG_VOLUME_LOTS,
     use_odd_lot: Optional[bool] = None,
     universe_limit: int = 30,
     extra_symbols: Optional[Sequence[str]] = None,
@@ -338,6 +349,8 @@ def screen_smile_candidates(
         if metrics.skip_reason:
             continue
         if metrics.price <= 0:
+            continue
+        if min_avg_volume_lots > 0 and metrics.avg_volume_lots < min_avg_volume_lots:
             continue
         if max_price > 0 and metrics.price > max_price:
             continue
@@ -409,6 +422,7 @@ def screen_smile_candidates(
 
 
 __all__ = [
+    "DEFAULT_MIN_AVG_VOLUME_LOTS",
     "PriceMetrics",
     "SmileScreenCandidate",
     "SmileScreenReport",
