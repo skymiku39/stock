@@ -135,3 +135,48 @@ class TestHistoryFetchQueue:
         ]
         assert price_items
         assert price_items[0]["provenance_status"] == "cache_only"
+
+
+def _bars(symbol, year, month):
+    return [PriceBar(symbol=symbol, date=f"{year:04d}-{month:02d}-{d:02d}", open=1, high=2, low=1, close=2)
+            for d in range(1, 11)]
+
+
+def test_recent_months_are_filled_for_every_symbol_before_older_ones(root: Path, db: StockDB) -> None:
+    state = QueueState(symbols=["A", "B"], months=[(2026, 2), (2026, 1)])
+    order = []
+    while (item := next_work_item(state, db)) is not None:
+        order.append((item.symbol, item.month))
+    assert order == [("A", 2), ("B", 2), ("A", 1), ("B", 1)]
+
+
+def test_exhausted_queue_adopts_tracked_universe_once_per_day_and_skips_known_empty_months(
+    root: Path, db: StockDB, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bot import daily_collection, history_fetch_queue as queue
+    from bot.history_fetch_queue import FetchRunResult, process_batch
+
+    monkeypatch.setattr(queue, "now_tw", lambda: dt.datetime(2026, 2, 20, 15))
+    monkeypatch.setattr(daily_collection, "extended_price_symbols", lambda r: ["A", "NEW"])
+    db.bulk_upsert_price_bars(_bars("A", 2026, 1) + _bars("A", 2026, 2) + _bars("NEW", 2026, 2))
+    init_state(root=root, start_date="2026-01-01", end_date="2026-01-31", symbols=["A"])
+    calls = []
+
+    def fake(item, **kw):
+        calls.append((item.symbol, item.month))
+        return FetchRunResult(item=item, ok=False, http_status=200, message="無資料")
+
+    monkeypatch.setattr(queue, "run_one_daily", fake)
+    process_batch(root=root, batch_size=5, delay_sec=0, db=db)
+    state = load_state(root)
+    assert state.symbols == ["A", "NEW"] and state.end_date == "2026-02-20" and state.universe_date == "2026-02-20"
+    assert calls == [("NEW", 1)]                       # 只有 NEW 的一月沒資料；二月與 A 都已齊
+    assert state.empty_months == {"NEW:2026-01": "2026-02-20"}
+    # 同一天再跑：不重新併入，也不重抓已知沒有資料的月份。
+    process_batch(root=root, batch_size=5, delay_sec=0, db=db)
+    assert calls == [("NEW", 1)]
+    # 隔天名單沒變、月份沒變：不重建佇列。
+    monkeypatch.setattr(queue, "now_tw", lambda: dt.datetime(2026, 2, 21, 15))
+    process_batch(root=root, batch_size=5, delay_sec=0, db=db)
+    assert calls == [("NEW", 1)] and load_state(root).universe_date == "2026-02-21"
+
