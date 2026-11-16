@@ -19,6 +19,7 @@ from typing import List, Optional
 
 from bot.cli_encoding import configure_console
 from bot.config import Settings
+from bot.round_metrics import account_metrics, summarize_rounds
 from bot.smile_execution import SmileExecution
 from bot.smile_curve_backtest import SmileBacktestSummary, SmileCurveBacktester
 from bot.stock_db import StockDB, default_db_path
@@ -91,6 +92,21 @@ def _print_summary(summary: SmileBacktestSummary) -> None:
     if summary.halted_date:
         print(f"浮虧護欄觸發: {summary.halted_date} 起停止買進")
     print(f"已平倉勝率: {summary.win_rate:.1f}%（只賣獲利單，不代表總報酬）")
+    m = summarize_rounds(summary.rounds)
+    a = account_metrics(summary.equity_curve, summary.initial_cash, summary.buy_cost_total_twd)
+    pf = "n/a" if m["profit_factor"] is None else f"{m['profit_factor']:.2f}"
+    rm = "n/a" if a["return_over_mdd"] is None else f"{a['return_over_mdd']:.2f}"
+    to = "n/a" if a["annual_turnover"] is None else f"{a['annual_turnover']:.2f}"
+    opened = sum(1 for r in summary.results if r.open_lots > 0)
+    print("--- 回合指標（整倉出清為一回合；未平倉不計）---")
+    print(f"回合數: {m['round_count']} | 勝率: {m['win_rate']:.1f}% | 獲利因子: {pf}")
+    print(f"期望值: {m['expectancy_twd']:,.0f} 元 / {m['expectancy_pct']:.2f}% 每回合")
+    print(f"持有天數 平均/中位/最長: {m['hold_days_mean']:.1f} / {m['hold_days_median']:.1f} / "
+          f"{m['hold_days_max']} | >90天: {m['over_90_days_pct']:.1f}%")
+    print(f"出場原因: {m['exit_reason_counts']}")
+    print(f"年化報酬: {a['annualized_return_pct']:.2f}% | 報酬/MDD: {rm} | "
+          f"平均資金使用率: {a['avg_capital_utilization_pct']:.1f}% | 年換手率: {to}")
+    print(f"未平倉檔數: {opened} | 未實現: {summary.unrealized_pnl_twd:,.0f} 元")
     print()
     for r in summary.results:
         if r.skip_reason:
