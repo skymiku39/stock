@@ -27,6 +27,7 @@ class SmileSymbolResult:
     open_cost_twd: float = 0.0
     last_price_date: str = ""
     pending_orders: int = 0
+    stopped_date: Optional[str] = None  # 單檔停損出清並停用的日期；未觸發為 None
 
     @property
     def net_pnl_twd(self) -> float:
@@ -91,7 +92,8 @@ class SmileBacktestSummary:
                                    total_pnl_twd=r.total_pnl_twd, net_pnl_twd=r.net_pnl_twd,
                                    unrealized_pnl_twd=r.unrealized_pnl_twd, win_rate=r.win_rate,
                                    open_lots=r.open_lots, cycle_count=r.cycle_count,
-                                   skip_reason=r.skip_reason) for r in self.results]
+                                   skip_reason=r.skip_reason, stopped_date=r.stopped_date)
+                              for r in self.results]
         return payload
 
     @property
@@ -183,6 +185,9 @@ class SmileCurveBacktester:
                                                  f"max_lot_per_symbol={self.settings.max_lot_per_symbol}; "
                                                  f"odd_lot={self.settings.use_odd_lot}; "
                                                  f"reference={self.settings.smile_reference_prices}; "
+                                                 f"trailing_reference={self.settings.smile_trailing_reference}; "
+                                                 f"symbol_stop_loss_pct={self.settings.smile_symbol_stop_loss_pct}; "
+                                                 f"max_symbol_fund_pct={self.settings.smile_max_symbol_fund_pct}; "
                                                  f"tax={self.settings.smile_regular_tax_rate}; "
                                                  f"fee_discount={self.settings.broker_fee_discount}; "
                                                  f"min_fee={self.settings.broker_min_fee}; "
@@ -231,9 +236,10 @@ class SmileCurveBacktester:
                         if sell_group_reason == "unset":
                             group = [o["lot"] for o in orders if o["side"] == "sell"]
                             group_shares = sum(l.quantity * qty_multiplier(l.unit) for l in group)
+                            is_stop = any(o.get("stop") for o in orders if o["side"] == "sell")
                             if group_shares > available_shares:
                                 sell_group_reason = "volume_limit_whole_position_sell"
-                            elif not e._position_profitable(px, group):
+                            elif not is_stop and not e._position_profitable(px, group):
                                 sell_group_reason = "unprofitable_open"
                             else:
                                 sell_group_reason = None
@@ -241,14 +247,19 @@ class SmileCurveBacktester:
                             log["reason"] = sell_group_reason
                             continue
                         lot = order["lot"]
-                        e._record_sell(lot, px, date, "close_signal_next_open")
+                        e._record_sell(lot, px, date, "stop_loss_next_open" if order.get("stop")
+                                       else "close_signal_next_open")
                         e.state.lots.remove(lot)
                         out.cash += sell_cash_received(px, lot.quantity, lot.unit,
                                                       settings=self.settings, sell_tax_rate=e.sell_tax)
                         log.update(status="filled", filled_quantity=lot.quantity)
                         available_shares -= lot.quantity * qty_multiplier(lot.unit)
                         if not e.open_lots:
-                            e._reset_cycle(px, date)
+                            if order.get("stop"):
+                                e.state.disabled = True
+                                results[sym].stopped_date = date
+                            else:
+                                e._reset_cycle(px, date)
                     else:
                         unit = "share" if self.settings.use_odd_lot else "lot"
                         want = order["quantity"]
@@ -262,8 +273,10 @@ class SmileCurveBacktester:
                         held = sum(l.quantity * qty_multiplier(l.unit) for l in e.open_lots)
                         if limit > 0:
                             want = min(want, max(0, int((limit - held) / qty_multiplier(unit))))
-                        qty = max_affordable_qty(px, opening_budget, unit, max_qty=want,
-                                                 settings=self.settings)
+                        room = e.symbol_fund_room()
+                        qty = max_affordable_qty(px, opening_budget if room is None
+                                                 else min(opening_budget, room), unit,
+                                                 max_qty=want, settings=self.settings)
                         if qty <= 0:
                             log["reason"] = "cash_or_position_limit"
                             continue
@@ -303,9 +316,15 @@ class SmileCurveBacktester:
                 if e.state.reference <= 0:
                     e._init_reference(close, date)
                     continue
-                if close >= e.state.reference:
+                if e.state.disabled:
+                    pending[sym] = []
+                elif close >= e.state.reference:
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity)
                                     for l in e.open_lots] if e._position_profitable(close) else []
+                    e.trail_reference(close)
+                elif e.stop_loss_breached(close):
+                    pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity,
+                                         stop=True) for l in e.open_lots]
                 elif out.halted_date is None:
                     drop = e._drop_pct(close)
                     for idx, tier in enumerate(e.tiers):

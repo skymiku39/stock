@@ -540,3 +540,49 @@ def test_bottom_dca_day_cap_stops_third_day(tmp_path):
     _tick_on(strategy, 90, days=2)
     assert len(api.trades) == 6
     assert len(strategy.engines["0050"].state.bottom_dca_done_dates) == 2
+
+
+def test_reference_trails_new_high_while_flat_then_buys_dip(tmp_path):
+    strategy, api = setup(tmp_path)
+    tick(strategy, 100)
+    tick(strategy, 110)
+    e = strategy.engines["0050"]
+    assert e.state.reference == 110 and api.trades == []
+    saved = json.loads(strategy._smile_state_path.read_text(encoding="utf-8"))
+    assert saved["0050"]["reference"] == 110
+    tick(strategy, 108.5)
+    assert len(api.trades) == 1
+    tick(strategy, 109)  # holding: reference must not move
+    assert e.state.reference == 110
+
+
+def test_symbol_stop_loss_sells_whole_position_and_disables_symbol(tmp_path):
+    strategy, api = _two_lot_position(tmp_path, smile_symbol_stop_loss_pct=10,
+                                      smile_max_unrealized_loss_pct=0)
+    tick(strategy, 90)  # about -6%: third tier buys, no stop
+    assert len(api.trades) == 3 and strategy.positions["0050"].quantity == 50
+    tick(strategy, 80)  # about -14% of cost
+    assert len(api.trades) == 4
+    assert str(api.trades[3].order.action).endswith("Sell")
+    assert api.trades[3].order.quantity == 50
+    assert not strategy.positions
+    e = strategy.engines["0050"]
+    assert e.state.disabled and not e.open_lots
+    assert strategy.risk.state.realized_pnl_twd < 0
+    assert not strategy.risk.is_kill_switch_engaged()
+    tick(strategy, 70)
+    tick(strategy, 120)
+    assert len(api.trades) == 4
+    saved = json.loads(strategy._smile_state_path.read_text(encoding="utf-8"))
+    assert saved["0050"]["disabled"] is True
+    restored = _strategy(strategy.settings, strategy.broker, tmp_path)
+    assert restored.engines["0050"].state.disabled
+
+
+def test_symbol_stop_loss_disabled_with_zero(tmp_path):
+    strategy, api = _two_lot_position(tmp_path, smile_symbol_stop_loss_pct=0,
+                                      smile_max_unrealized_loss_pct=0)
+    tick(strategy, 90)
+    tick(strategy, 60)
+    assert all(str(t.order.action).endswith("Buy") for t in api.trades)
+    assert not strategy.engines["0050"].state.disabled

@@ -159,7 +159,8 @@ def test_cli_json_uses_explicit_cap_and_contains_equity(tmp_path, capsys):
 
 def test_unrealized_loss_guard_halts_buys_from_trigger_date():
     hist = {"A": bars("A", [(100,100),(100,98),(95,60),(60,60),(60,60)])}
-    kw = dict(smile_buy_tiers="1:1,5:1", max_lot_per_symbol=5, smile_max_bottom_dca_days=0)
+    kw = dict(smile_buy_tiers="1:1,5:1", max_lot_per_symbol=5, smile_max_bottom_dca_days=0,
+              smile_symbol_stop_loss_pct=0)
     r = run(hist, smile_max_unrealized_loss_pct=5, **kw)
     assert r.halted_date == "2026-01-03"
     assert r.to_dict()["halted_date"] == "2026-01-03"
@@ -177,3 +178,34 @@ def test_bottom_dca_day_cap_in_portfolio_backtest():
         return [x for x in r.orders if x.get("label") == "bottom_dca" and x["status"] == "filled"]
     assert len(fills(smile_max_bottom_dca_days=2)) == 2
     assert len(fills(smile_max_bottom_dca_days=0)) > 2
+
+
+def test_reference_trails_while_flat_then_dip_buys_from_new_high():
+    hist = {"A": bars("A", [(100,100),(110,120),(120,118),(117,117)])}
+    r = run(hist)
+    buy, = [o for o in r.orders if o["side"] == "buy"]
+    assert (buy["signal_date"], buy["execution_date"], buy["status"]) == (
+        "2026-01-03", "2026-01-04", "filled")
+    assert not [o for o in run(hist, smile_trailing_reference=False).orders if o["side"] == "buy"]
+
+
+def test_symbol_stop_loss_sells_at_next_open_and_disables_symbol():
+    hist = {"A": bars("A", [(100,100),(100,98),(98,70),(68,68),(60,60),(150,150)])}
+    r = run(hist, smile_symbol_stop_loss_pct=20, smile_max_unrealized_loss_pct=0)
+    t, = r.all_round_trips
+    assert (t.entry_price, t.exit_date, t.exit_price, t.exit_reason) == (
+        98, "2026-01-04", 68, "stop_loss_next_open")
+    assert r.total_pnl_twd == -30000 and r.unrealized_pnl_twd == 0
+    assert r.results[0].stopped_date == "2026-01-04"
+    assert r.to_dict()["symbols"][0]["stopped_date"] == "2026-01-04"
+    assert not [o for o in r.orders if o["execution_date"] > "2026-01-04"]
+    held = run(hist, smile_symbol_stop_loss_pct=0, smile_max_unrealized_loss_pct=0)
+    assert held.results[0].stopped_date is None and held.results[0].open_lots == 1
+
+
+def test_symbol_fund_cap_limits_buy_in_portfolio_backtest():
+    hist = {"A": bars("A", [(100,100),(100,98),(98,98)])}
+    kw = dict(use_odd_lot=True, smile_base_lot=3000, max_lot_per_symbol=10)
+    assert run(hist, **kw).orders[0]["filled_quantity"] == 3000
+    capped = run(hist, smile_max_symbol_fund_pct=20, **kw)
+    assert capped.orders[0]["filled_quantity"] == 1020  # 100,000 / 98

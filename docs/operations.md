@@ -306,6 +306,15 @@ Select-String -Path "log\strategy_*.log" -Pattern "2330"
 3. 若確定沒有微笑持倉與未結委託，可刪除主檔，讓策略重建標準價。
 4. 重啟後確認持倉與微笑批次對帳通過。
 
+### 4.7 微笑策略單檔停損後重新啟用
+
+單檔停損（`SMILE_SYMBOL_STOP_LOSS_PCT`）出清後，該檔在 `smile_state.json` 會記成 `"disabled": true`，啟動時 log 也會提示。策略不會自動恢復買進。要重新啟用：
+
+1. 停止微笑策略，確認該檔沒有持倉與未結委託。
+2. 備份 `data/simulation/data/smile_state.json`。
+3. 把該代號的 `"disabled"` 改成 `false`；若要從目前價格重新起算，同時把 `"reference"` 改成 `0`。
+4. 重啟後確認 log 不再出現該檔的停用提示。
+
 ## 五、定期維護
 
 ### 每週

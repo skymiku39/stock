@@ -70,6 +70,7 @@ class SmileCycleState:
     tiers_done: set[int] = field(default_factory=set)
     bottom_dca_done_dates: set[str] = field(default_factory=set)
     cycle_index: int = 0
+    disabled: bool = False  # 單檔停損後停用：不再買進，需人工重啟
 
 
 def parse_smile_buy_tiers(raw: str) -> List[SmileBuyTier]:
@@ -146,7 +147,39 @@ class SmileCurveEngine:
         if unit == "lot" and max_per_symbol > 0:
             held = sum(l.quantity for l in self.state.lots if l.unit == "lot")
             cap = min(cap, max(0, max_per_symbol - held))
+        room = self.symbol_fund_room()
+        if room is not None:
+            cap = min(cap, max_affordable_qty(price, room, unit, max_qty=want,
+                                              settings=self.settings))
         return min(want, cap)
+
+    def symbol_fund_room(self) -> Optional[float]:
+        """單檔資金上限剩餘額度（元）；未設定上限回傳 None。"""
+        pct = float(getattr(self.settings, "smile_max_symbol_fund_pct", 0.0))
+        if pct <= 0:
+            return None
+        limit = pct / 100.0 * float(self.settings.effective_fund_cap())
+        return max(0.0, limit - self._lot_cost(self.state.lots))
+
+    def trail_reference(self, price: float) -> bool:
+        """空手時讓標準價跟著新高上移；手動固定標準價或停用的代號不動。"""
+        if (not getattr(self.settings, "smile_trailing_reference", False)
+                or self.state.lots or self.state.disabled
+                or price <= self.state.reference or self.state.reference <= 0):
+            return False
+        refs = getattr(self.settings, "smile_reference_prices", {}) or {}
+        if refs.get(self.symbol, 0) > 0:
+            return False
+        self.state.reference = price
+        return True
+
+    def stop_loss_breached(self, price: float, lots=None) -> bool:
+        """單檔停損：部位未實現淨損 >= 持倉成本的設定比例。"""
+        pct = float(getattr(self.settings, "smile_symbol_stop_loss_pct", 0.0))
+        lots = list(self.state.lots if lots is None else lots)
+        if pct <= 0 or not lots:
+            return False
+        return self.unrealized_pnl(price, lots) <= -pct / 100.0 * self._lot_cost(lots)
 
     def _drop_pct(self, price: float) -> float:
         ref = self.state.reference
@@ -348,12 +381,19 @@ class SmileCurveEngine:
             return self._init_reference(close, date)
 
         ref = self.state.reference
+        if self.stop_loss_breached(low):
+            for lot in list(self.state.lots):
+                actions.append(self._record_sell(lot, low, date, "stop_loss"))
+            self.state.lots = []
+            self.state.disabled = True
+            return actions
         if not self.halted and self._unrealized_loss_breached(low):
             self.halted = True
-        if low < ref and not self.halted:
+        if low < ref and not self.halted and not self.state.disabled:
             actions.extend(self._dip_buy(date, low))
         if high >= ref:
             actions.extend(self._rebound_sell(date, high))
+        self.trail_reference(close)
         return actions
 
     @property
