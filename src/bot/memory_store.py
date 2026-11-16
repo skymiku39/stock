@@ -65,6 +65,17 @@ class MemoryPolicy:
     max_active_long_chars: int = 8_000_000
     capacity_warning_ratio: float = 0.80
 
+    def capacity_warning(self, layer: str, ratio: float) -> bool:
+        """容量是否需要提醒。
+
+        長期層：達 80% 就提醒，因為再往上會開始封存整理過的長期記憶。
+        短期層：只在超過上限時提醒。它保存完整的 LLM 輸入輸出，每筆數萬字，寫入時超限就
+        自動封存最舊、最不重要的項目，所以長期貼著上限是正常狀態；超過上限才代表自動封存沒有生效。
+        """
+        if layer == "short":
+            return ratio > 1.0
+        return ratio >= self.capacity_warning_ratio
+
 
 @dataclass
 class MemoryContext:
@@ -1208,7 +1219,7 @@ class MemoryStore:
         return {"archived_short": archived_short, "archived_long": archived_long}
 
     def capacity_report(self) -> Dict[str, Any]:
-        """回報容量與 80% 警戒，不把警戒誤當成刪除。"""
+        """回報容量與警戒（條件見 MemoryPolicy.capacity_warning），不把警戒誤當成刪除。"""
         self.archive_expired()
         values: Dict[str, Any] = {}
         for layer, max_items, max_chars in (
@@ -1227,7 +1238,7 @@ class MemoryStore:
                 "max_chars": max_chars,
                 "item_ratio": round(item_ratio, 4),
                 "char_ratio": round(char_ratio, 4),
-                "warning": max(item_ratio, char_ratio) >= self.policy.capacity_warning_ratio,
+                "warning": self.policy.capacity_warning(layer, max(item_ratio, char_ratio)),
             }
         return values
 

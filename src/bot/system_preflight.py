@@ -525,14 +525,17 @@ def _memory_checks(root: Path) -> List[SystemCheck]:
     }
     warning_layers = [
         layer for layer, ratio in ratios.items()
-        if max(ratio["item_ratio"], ratio["char_ratio"]) >= policy.capacity_warning_ratio
+        if policy.capacity_warning(layer, max(ratio["item_ratio"], ratio["char_ratio"]))
     ]
     if warning_layers:
         checks.append(SystemCheck(
             "記憶容量",
             "warn",
-            "容量達到 80% 警戒：" + ", ".join(warning_layers),
-            "執行記憶濃縮／封存；只封存低價值項目，不硬刪原文",
+            "記憶容量需要處理：" + ", ".join(
+                f"{layer}（{'超過上限，自動封存未生效' if layer == 'short' else '達 80% 警戒'}）"
+                for layer in warning_layers),
+            "short：執行 stock-memory archive-expired 並檢查寫入路徑是否有呼叫 enforce_limits；"
+            "long：執行記憶濃縮／封存。只封存低價值項目，不硬刪原文",
             extra={
                 "counts": active_counts,
                 "chars": active_chars,
@@ -544,7 +547,9 @@ def _memory_checks(root: Path) -> List[SystemCheck]:
         checks.append(SystemCheck(
             "記憶容量",
             "ok",
-            "active short／long 均低於 80% 容量警戒",
+            "long 低於 80% 警戒；short 未超過上限"
+            + ("（已貼近上限，由自動封存維持，屬正常狀態）"
+               if max(ratios["short"].values()) >= policy.capacity_warning_ratio else ""),
             extra={"counts": active_counts, "chars": active_chars, "ratios": ratios},
         ))
     return checks

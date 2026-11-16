@@ -79,6 +79,12 @@
 `memory_items`。任何容量清理都只會
 把項目改成 `archived`，不直接刪除原文。
 
+容量警戒（`MemoryPolicy.capacity_warning`，`stock-memory capacity` 與 `stock-system-preflight` 共用）：
+
+- 長期層達 80% 就警戒：再往上會開始封存整理過的長期記憶，要先人工濃縮。
+- 短期層只在**超過上限**時警戒。短期層保存完整的 LLM 輸入輸出，每筆數萬字，200 萬字上限只容得下二十多筆；寫入時超限就自動封存最舊、最不重要的項目，所以長期貼著上限是正常狀態（2026-11-16 實測 active 22 筆、90.5%，另有 3,268 筆已封存）。超過上限才代表自動封存沒有生效，需要檢查。
+- 被封存的短期項目仍可回放，但不再進入檢索；想讓更多筆留在 active，要調高 `max_active_short_chars`，並先確認檢索與 preflight 的效能。
+
 ### `evidence_items` 與 `memory_evidence`
 
 `evidence_items` 是中央證據登錄表，保存證據類型、來源、來源識別、URL、觀測
