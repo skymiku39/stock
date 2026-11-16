@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from bot.news_fetcher import fetch_today_news, load_cached_news_only
+from bot.rss_archive import collect_rss_archive
 from bot.source_registry import SourceRegistry, resolve_source_document_path
 from bot.stock_db import StockDB
 from bot.technicals import fetch_recent_kline, load_kline_from_db
@@ -37,8 +38,8 @@ def verify_source(root, document_id):
 
 
 def collect_news(root, date):
-    items = fetch_today_news(root=root, limit=200, force_refresh=True)
-    cached = load_cached_news_only(root=root, date=dt.date.fromisoformat(date), limit=1000)
+    items = fetch_today_news(root=root, limit=200, force_refresh=True, cumulative=True)
+    cached = load_cached_news_only(root=root, date=dt.date.fromisoformat(date), limit=5000)
     if not items or items != cached:
         raise ValueError("news fetch is empty or cache readback differs")
     ids = sorted({i.source_document_id for i in items})
@@ -91,6 +92,7 @@ _TW_SYMBOL = re.compile(r"^\d{4,6}[A-Z]?$")
 EXTENDED_BUDGET_SECONDS = 240      # 每次執行最多花在擴充名單的時間；沒抓完下次接續
 EXTENDED_DELAY_SECONDS = 2.0       # 每檔之間的間隔，避免 TWSE 擋連線
 EXTENDED_MAX_ATTEMPTS = 3          # 同一檔同一個目標日最多嘗試幾次
+RSS_REFRESH_SECONDS = 1800         # RSS 存檔全部來源輪過一遍後，隔多久再抓
 EXTENDED_MAX_MONTHS = 6            # 落後太久時一次最多補幾個月；更早的交給 history_fetch
 
 
@@ -240,6 +242,20 @@ def _collect_daily_inputs(root, settings, *, force=False):
             root, extended, target, previous.get("extended", {}) if previous.get("date") == date else {})
     except Exception as exc:
         result["extended"] = {"complete": False, "error": str(exc)}
+    # RSS 存檔同樣另外記錄：九十幾個外部來源總有幾個暫時失敗，不該擋住 complete。
+    old_rss = previous.get("rss", {}) if previous.get("date") == date else {}
+    try:
+        rss_age = (now - dt.datetime.fromisoformat(old_rss.get("collected_at", ""))).total_seconds()
+    except (ValueError, TypeError):
+        rss_age = float("inf")
+    if (not force and old_rss.get("status") == "ok" and 0 <= rss_age < RSS_REFRESH_SECONDS
+            and old_rss.get("feeds_seen", 0) >= old_rss.get("feeds_total", 1)):
+        result["rss"] = old_rss
+    else:
+        try:
+            result["rss"] = collect_rss_archive(root)
+        except Exception as exc:
+            result["rss"] = {"status": "failed", "error": str(exc), "collected_at": now_tw().isoformat()}
     result["complete"] = not result["errors"] and now_tw().date().isoformat() == date
     result["finished_at"] = now_tw().isoformat()
     atomic_json(path, result)
@@ -287,6 +303,15 @@ def _write_daily_summary(root, state):
                       f"擷取 {price['retrieved_at']}。", f"  {price['source_url']}"]
         else:
             lines.append(f"- {ticker}：未完成，{price.get('error', 'unknown')}")
+    rss = inputs.get("rss") or {}
+    if rss:
+        lines += ["", "RSS 存檔（不需模型）",
+                  f"- {rss.get('status', 'pending')}：來源 {rss.get('feeds_ok', 0)} / {rss.get('feeds_total', 0)} 正常，"
+                  f"累積 {rss.get('total_items', 0)} 則，其中今天發布 {rss.get('today_items', 0)} 則。"]
+        if rss.get("feeds_failed"):
+            lines.append("- 失敗來源：" + "、".join(rss["feeds_failed"]))
+        if rss.get("error"):
+            lines.append(f"- {rss['error']}")
     ext = inputs.get("extended") or {}
     if ext:
         lines += ["", "擴充名單行情（ETF、ETF 台股持股、回測名單）",
@@ -298,6 +323,10 @@ def _write_daily_summary(root, state):
                 lines.append(f"- {label}：" + "、".join(f"{t}（{v}）" for t, v in sorted(ext[key].items())))
         if ext.get("error") or ext.get("note"):
             lines.append(f"- {ext.get('error') or ext.get('note')}")
+    freshness = read_json(Path(root) / "data/freshness_status.json")
+    if freshness.get("checks"):
+        from bot.data_freshness import format_report
+        lines += [""] + format_report(freshness)
     gaps = (inputs.get("errors", []) + state.get("collection_errors", [])
             + state.get("collection_warnings", []) + state.get("official_errors", []))
     if state.get("error"):
@@ -318,7 +347,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
-        result = collect_daily_inputs(root, Settings(_env_file=str(root / '.env')), force=args.force_refresh)
+        settings = Settings(_env_file=str(root / '.env'))
+        result = collect_daily_inputs(root, settings, force=args.force_refresh)
+        try:
+            # 工作成功不代表資料有更新；每輪都把各類資料的最新日期寫下來，摘要會引用。
+            from bot.data_freshness import check_data_freshness
+            atomic_json(root / 'data/freshness_status.json', check_data_freshness(root, settings=settings))
+        except Exception:
+            pass
         state = read_json(root / 'data/daily_research' / result['date'] / 'status.json')
         state = state or {'date': result['date'], 'phase': 'awaiting_research', 'complete': False}
         write_daily_summary(root, {**state, 'daily_inputs': result})

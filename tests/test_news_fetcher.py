@@ -155,3 +155,13 @@ def test_modified_news_cache_cannot_borrow_a_registered_source(tmp_path, monkeyp
     cached = load_cached_news_only(root=tmp_path, date=day)
     assert cached[0].title == "Unregistered change"
     assert cached[0].source_document_id == ""
+
+
+def test_day_cache_accumulates_instead_of_being_overwritten():
+    from bot.news_fetcher import merge_news_items
+    old = [NewsItem(news_id="1", title="早上", published_at="2026-11-17T08:00:00+08:00"),
+           NewsItem(news_id="2", title="舊標題", published_at="2026-11-17T09:00:00+08:00")]
+    fresh = [NewsItem(news_id="3", title="下午", published_at="2026-11-17T14:00:00+08:00"),
+             NewsItem(news_id="2", title="新標題", published_at="2026-11-17T09:00:00+08:00")]
+    merged = merge_news_items(fresh, old)
+    assert [i.news_id for i in merged] == ["3", "2", "1"] and merged[1].title == "新標題"

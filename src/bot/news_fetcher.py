@@ -308,6 +308,20 @@ def _save_cache(items: List[NewsItem], date: dt.date, root: Optional[Path]) -> P
     return p
 
 
+NEWS_DAY_CACHE_MAX = 3000
+
+
+def merge_news_items(fresh: List[NewsItem], existing: List[NewsItem]) -> List[NewsItem]:
+    """以 news_id（沒有就用 url）去重，新抓到的版本優先，依發布時間由新到舊排序。"""
+    merged: Dict[str, NewsItem] = {}
+    for item in list(fresh) + list(existing):
+        key = item.news_id or item.url
+        if key and key not in merged:
+            merged[key] = item
+    ordered = sorted(merged.values(), key=lambda i: i.published_at or "", reverse=True)
+    return ordered[:NEWS_DAY_CACHE_MAX]
+
+
 def load_cached_news_only(
     *,
     root: Optional[Path] = None,
@@ -329,8 +343,13 @@ def fetch_today_news(
     force_refresh: bool = False,
     root: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
+    cumulative: bool = False,
 ) -> List[NewsItem]:
-    """主要入口：抓今天的台股新聞 (有日快取)。"""
+    """主要入口：抓今天的台股新聞 (有日快取)。
+
+    重新抓取時，日快取累積當天看過的所有新聞；``cumulative=True`` 回傳完整累積清單，
+    否則只回最新的 ``limit`` 則。
+    """
     log = logger or get_logger("news")
     today = now_tw().date()
     if use_cache and not force_refresh:
@@ -340,10 +359,14 @@ def fetch_today_news(
             return cached[:limit]
     items = fetch_cnyes(limit=limit, logger=log)
     if items:
+        # 來源只回最新的一百多則；直接覆寫會把當天較早的新聞擠掉，所以併入既有日快取。
+        merged = merge_news_items(items, _load_cache(today, root) or [])
         try:
-            _save_cache(items, today, root)
+            _save_cache(merged, today, root)
         except Exception:
             log.exception("news 快取寫入失敗")
+            return items
+        return merged if cumulative else merged[:limit]
     return items
 
 

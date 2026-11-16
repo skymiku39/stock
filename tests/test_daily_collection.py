@@ -7,6 +7,12 @@ import pytest
 from bot import daily_collection as collection
 
 
+@pytest.fixture(autouse=True)
+def rss_archive_is_stubbed(monkeypatch):
+    monkeypatch.setattr(collection, "collect_rss_archive", lambda root: {
+        "status": "ok", "collected_at": collection.now_tw().isoformat(), "feeds_total": 1, "feeds_seen": 1})
+
+
 def test_retry_only_failed_steps_refresh_after_close_and_roll_over(tmp_path, monkeypatch):
     from bot import watchlist
     day = [dt.datetime(2026, 10, 27, 10, tzinfo=dt.timezone(dt.timedelta(hours=8)))]
