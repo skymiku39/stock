@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from bot.config import Settings
-from bot.smile_curve import SmileCurveEngine, SmileRoundTrip, SmileLot
+from bot.smile_curve import (SmileAccount, SmileCurveEngine, SmileRoundTrip, SmileLot,
+                             smile_fund_cap)
 from bot.models import qty_multiplier
 from bot.trade_cost import buy_cash_required, sell_cash_received, net_pnl_twd, max_affordable_qty
 from bot.stock_db import StockDB, default_db_path
@@ -250,6 +251,13 @@ class SmileCurveBacktester:
         if not math.isfinite(cap) or cap <= 0:
             raise ValueError("fund cap must be finite and positive")
         engines = {s: SmileCurveEngine(s, self.settings) for s in sorted(histories)}
+        # 依權益調整部位：所有標的共用一個帳戶，權益＝起始資金＋累計已實現損益。
+        account = SmileAccount()
+        for engine in engines.values():
+            engine.account = account
+        initial_fund = float(getattr(self.settings, "smile_initial_fund", 0) or 0)
+        base = initial_fund if initial_fund > 0 else cap  # 帳戶起始現金
+        unit_name = "share" if self.settings.use_odd_lot else "lot"
         results = {s: SmileSymbolResult(s, bar_count=len(histories[s])) for s in engines}
         calendar: dict = {}
         for sym, bars in histories.items():
@@ -259,8 +267,10 @@ class SmileCurveBacktester:
                     raise ValueError(f"duplicate daily bar: {sym} {date}")
                 calendar[date][sym] = bar
         out = SmileBacktestSummary(list(results.values()), start=start, end=end,
-                                  initial_cash=cap, cash=cap, execution=self.execution.to_dict(),
-                                  settings_note=(f"fund_cap={cap:.0f}; tiers={self.settings.smile_buy_tiers}; "
+                                  initial_cash=base, cash=base, execution=self.execution.to_dict(),
+                                  settings_note=(f"fund_cap={cap:.0f}; "
+                                                 f"initial_fund={self.settings.smile_initial_fund}; "
+                                                 f"unit_equity_pct={self.settings.smile_unit_equity_pct}; tiers={self.settings.smile_buy_tiers}; "
                                                  f"base_lot={self.settings.smile_base_lot}; "
                                                  f"max_lot_per_symbol={self.settings.max_lot_per_symbol}; "
                                                  f"odd_lot={self.settings.use_odd_lot}; "
@@ -300,7 +310,7 @@ class SmileCurveBacktester:
         pending: dict[str, list[dict]] = {s: [] for s in engines}
         marks: dict[str, float] = {}
         previous_volumes: dict[str, float] = {}
-        peak = cap
+        peak = base
 
         def valid(value):
             return value is not None and math.isfinite(float(value)) and float(value) > 0
@@ -316,7 +326,7 @@ class SmileCurveBacktester:
                     for l in e.open_lots]
 
         for date, today in sorted(calendar.items()):
-            opening_budget = min(out.cash, max(0.0, cap - exposure()))
+            opening_budget = min(out.cash, max(0.0, smile_fund_cap(self.settings, account) - exposure()))
             for record in out.data_ended:
                 sym = record["symbol"]
                 e = engines[sym]
@@ -459,7 +469,7 @@ class SmileCurveBacktester:
                 guard_pnl = sum(net_pnl_twd(l.entry_price, marks.get(s, l.entry_price), l.quantity,
                                             l.unit, settings=self.settings, sell_tax_rate=e.sell_tax)
                                 for s, e in engines.items() for l in e.open_lots)
-                if guard_pnl <= -loss_pct / 100.0 * cap:
+                if guard_pnl <= -loss_pct / 100.0 * smile_fund_cap(self.settings, account):
                     out.halted_date = date
                     for s in pending:  # Kill switch: drop queued buys, keep queued sells.
                         pending[s] = [o for o in pending[s] if o["side"] == "sell"]
@@ -503,26 +513,30 @@ class SmileCurveBacktester:
                     for idx, tier in enumerate(e.tiers):
                         if idx not in e.state.tiers_done and random_entry.fires(idx):
                             pending[sym].append(dict(side="buy", signal_date=date, tier=idx,
-                                                    quantity=e.base_lot * tier.multiplier,
+                                                    quantity=e.tier_quantity(close, tier.multiplier, unit_name),
                                                     label=f"random_tier{idx}"))
                     if e.open_lots and e.bottom_dca_allowed() and random_entry.fires("bottom"):
                         pending[sym].append(dict(side="buy", signal_date=date, tier=None,
-                                                quantity=e.base_lot, label="random_bottom"))
+                                                quantity=e.tier_quantity(close, 1, unit_name),
+                                                label="random_bottom"))
                 elif may_buy and out.halted_date is None:
                     drop = e._drop_pct(close)
                     for idx, tier in enumerate(e.tiers):
                         if idx not in e.state.tiers_done and drop + 1e-9 >= tier.drop_pct:
                             pending[sym].append(dict(side="buy", signal_date=date, tier=idx,
-                                                    quantity=e.base_lot * tier.multiplier,
+                                                    quantity=e.tier_quantity(close, tier.multiplier, unit_name),
                                                     label=f"dip_{tier.drop_pct:.1f}%"))
                     if drop + 1e-9 >= e.tiers[-1].drop_pct and e.bottom_dca_allowed():
                         pending[sym].append(dict(side="buy", signal_date=date, tier=None,
-                                                quantity=e.base_lot, label="bottom_dca"))
+                                                quantity=e.tier_quantity(close, 1, unit_name),
+                                                label="bottom_dca"))
+                # 依權益算出的數量不足一個單位（整張模式常見）就不下單。
+                pending[sym] = [o for o in pending[sym] if o["side"] != "buy" or o["quantity"] > 0]
             realized = sum(e.realized_pnl_twd for e in engines.values())
             unrealized = sum(net_pnl_twd(l.entry_price, self.execution.slipped(marks[s], "sell", s), l.quantity, l.unit,
                                         settings=self.settings, sell_tax_rate=e.sell_tax)
                              for s, e in engines.items() for l in e.open_lots)
-            equity = cap + realized + unrealized
+            equity = base + realized + unrealized
             peak = max(peak, equity)
             dd = peak - equity
             dd_pct = 100 * dd / peak

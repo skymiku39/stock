@@ -78,6 +78,27 @@ class SmileCycleState:
     cooldown_until: str = ""  # 到期認賠出場後的冷卻期：此日期（YYYY-MM-DD）之前不買
 
 
+@dataclass
+class SmileAccount:
+    """多檔共用的帳戶狀態：累計已實現淨損益（依權益調整部位用）。"""
+    realized_pnl_twd: float = 0.0
+
+
+def smile_equity(settings: "Settings", account: SmileAccount) -> Optional[float]:
+    """權益＝起始資金＋累計已實現損益（不計未實現）；未設定起始資金回傳 None。"""
+    initial = float(getattr(settings, "smile_initial_fund", 0) or 0)
+    if initial <= 0:
+        return None
+    return max(0.0, initial + account.realized_pnl_twd)
+
+
+def smile_fund_cap(settings: "Settings", account: SmileAccount) -> float:
+    """有效資金上限＝min(MAX_FUND, 權益)；MAX_FUND 是硬上限，複利不會超過它。"""
+    cap = float(settings.effective_fund_cap())
+    equity = smile_equity(settings, account)
+    return cap if equity is None else min(cap, equity)
+
+
 def parse_smile_buy_tiers(raw: str) -> List[SmileBuyTier]:
     """解析 '1:1,3:2,5:3,8:4' → 跌幅% : 加碼倍數。"""
     tiers: List[SmileBuyTier] = []
@@ -133,10 +154,23 @@ class SmileCurveEngine:
         self.round_trips: List[SmileRoundTrip] = []
         self._cash_used = 0.0
         self.halted = False  # 浮虧護欄觸發後不再買進（模擬 Kill Switch，需人工解除）
+        self.account = SmileAccount()  # 多檔回測與盤中策略會換成共用的同一個帳戶
+
+    def fund_cap(self) -> float:
+        return smile_fund_cap(self.settings, self.account)
+
+    def tier_quantity(self, price: float, multiplier: int, unit: QtyUnit) -> int:
+        """一階要買的數量。未啟用複利：base_lot × 倍數；啟用：權益 × 單位比例 × 倍數 ÷ 價格，向下取整。"""
+        pct = float(getattr(self.settings, "smile_unit_equity_pct", 0.0))
+        equity = smile_equity(self.settings, self.account)
+        if pct <= 0 or equity is None:
+            return self.base_lot * multiplier
+        if price <= 0:
+            return 0
+        return int(equity * pct / 100.0 * multiplier // (price * qty_multiplier(unit)))
 
     def _fund_remaining(self) -> float:
-        cap = float(self.settings.effective_fund_cap())
-        return max(0.0, cap - self._cash_used)
+        return max(0.0, self.fund_cap() - self._cash_used)
 
     def _lot_cost(self, lots: Sequence[SmileLot]) -> float:
         return sum(
@@ -168,7 +202,7 @@ class SmileCurveEngine:
         pct = float(getattr(self.settings, "smile_max_symbol_fund_pct", 0.0))
         if pct <= 0:
             return None
-        limit = pct / 100.0 * float(self.settings.effective_fund_cap())
+        limit = pct / 100.0 * self.fund_cap()
         return max(0.0, limit - self._lot_cost(self.state.lots))
 
     def trail_reference(self, price: float) -> bool:
@@ -308,6 +342,7 @@ class SmileCurveEngine:
             lot.entry_price, lot.quantity, lot.unit, settings=self.settings,
         )
         self._cash_used = max(0.0, self._cash_used - cost)
+        self.account.realized_pnl_twd += pnl_twd
         return SmileAction(
             kind="sell",
             date=date,
@@ -396,7 +431,7 @@ class SmileCurveEngine:
         pct = float(getattr(self.settings, "smile_max_unrealized_loss_pct", 0.0))
         if pct <= 0 or not self.state.lots:
             return False
-        limit = pct / 100.0 * float(self.settings.effective_fund_cap())
+        limit = pct / 100.0 * self.fund_cap()
         return self.unrealized_pnl(price) <= -limit
 
     def _dip_buy(self, date: str, price: float) -> List[SmileAction]:
@@ -409,7 +444,7 @@ class SmileCurveEngine:
                 continue
             if idx in self.state.tiers_done:
                 continue
-            want = self.base_lot * tier.multiplier
+            want = self.tier_quantity(price, tier.multiplier, unit)
             act = self._record_buy(
                 price, want, unit, date,
                 reason=f"dip_{tier.drop_pct:.1f}%",
@@ -422,7 +457,7 @@ class SmileCurveEngine:
         if (drop + 1e-9 >= deepest and date not in self.state.bottom_dca_done_dates
                 and self.bottom_dca_allowed()):
             act = self._record_buy(
-                price, self.base_lot, unit, date,
+                price, self.tier_quantity(price, 1, unit), unit, date,
                 reason=f"bottom_dca_{deepest:.1f}%",
             )
             if act:
