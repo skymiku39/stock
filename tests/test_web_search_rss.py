@@ -427,6 +427,36 @@ def test_validate_check_rss_feeds_parallel_and_by_region(monkeypatch):
     assert res.rows == 3 + 4
 
 
+def test_validate_check_world_watch_review_age(tmp_path: Path):
+    import datetime as dt
+    import json
+
+    from bot import validate_sources as vs
+
+    path = tmp_path / "config" / "world_watch.json"
+    path.parent.mkdir(parents=True)
+
+    def check(reviewed, today="2026-11-16", leaders=None):
+        cfg = {"leaders": {"US": ["Trump"]} if leaders is None else leaders, "topics": []}
+        if reviewed is not None:
+            cfg["reviewed_at"] = reviewed
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        return vs.check_world_watch(tmp_path, today=dt.date.fromisoformat(today))
+
+    fresh = check("2026-07-19")  # 剛好 120 天
+    assert fresh.ok and fresh.details["age_days"] == 120 and not fresh.note
+    stale = check("2026-07-18")
+    assert not stale.ok and "121 天" in stale.note and not stale.error  # 警告，不是錯誤
+    for missing in (None, "", "not-a-date"):
+        res = check(missing)
+        assert not res.ok and "reviewed_at" in res.note and not res.error
+    empty = check("2026-11-16", leaders={})
+    assert not empty.ok and empty.error
+    # repo 內的正式設定檔必須帶可解析的核對日期。
+    repo = ws.load_world_watch(None)
+    dt.date.fromisoformat(repo["reviewed_at"])
+
+
 def test_result_cap_is_per_language():
     zh_items = "".join(
         f"<item><title>台積電 新聞{i}</title><link>https://z.example/{i}</link></item>" for i in range(5)
