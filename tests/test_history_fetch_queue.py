@@ -82,6 +82,13 @@ class TestHistoryFetchQueue:
         ])
         assert _month_covered(db, "9999", 2026, 1, kind="daily")
 
+    def test_december_is_recognised_as_covered(self, root: Path, db: StockDB) -> None:
+        db.bulk_upsert_price_bars([
+            PriceBar(symbol="9999", date=f"2025-12-{d:02d}", open=1, high=2, low=1, close=2)
+            for d in range(1, 11)
+        ])
+        assert _month_covered(db, "9999", 2025, 12, kind="daily")
+
     def test_yfinance_fallback_is_archived_as_cache_only_normalized_source(
         self, root: Path, db: StockDB, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

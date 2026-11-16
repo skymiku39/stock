@@ -180,7 +180,7 @@ def _month_covered(
         return n >= 150
     start = f"{year:04d}-{month:02d}-01"
     if month == 12:
-        end = f"{year:12}-31"
+        end = f"{year:04d}-12-31"
     else:
         end = (dt.date(year, month + 1, 1) - dt.timedelta(days=1)).isoformat()
     bars = db.get_price_history(symbol, start=start, end=end)
