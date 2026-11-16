@@ -96,14 +96,14 @@ def run_baseline(run_once: Callable[[RandomEntry], Mapping[str, object]],
         raise ValueError("runs must be positive")
     samples = [dict(run_once(RandomEntry(rates, f"{seed}:{i}"))) for i in range(runs)]
     return dict(runs=runs, seed=seed,
-                rates={("bottom" if k == "bottom" else f"tier{k}"): v for k, v in rates.items()},
+                rates={(k if isinstance(k, str) else f"tier{k}"): v for k, v in rates.items()},
                 distribution=summarize_distribution(samples))
 
 
 # ── 微笑方案 ──────────────────────────────────────────────────────────────
 
 def flat_metrics(summary) -> dict:
-    """SmileBacktestSummary → 單層指標（一輪指標、帳戶指標、進場次數）。"""
+    """回測摘要（微笑或波段）→ 單層指標（一輪指標、帳戶指標、進場次數）。"""
     out = {k: v for k, v in summarize_rounds(summary.rounds).items() if k != "exit_reason_counts"}
     out.update(account_metrics(summary.equity_curve, summary.initial_cash,
                                summary.buy_cost_total_twd))
@@ -126,24 +126,51 @@ def smile_entry_rates(summary) -> dict:
     return {key: n / days for key, n in sorted(counts.items(), key=lambda kv: str(kv[0]))}
 
 
+def strategy_random_baseline(run: Callable[[Optional[RandomEntry]], object],
+                             rates_of: Callable[[object], Mapping[Hashable, float]], *,
+                             runs: int = DEFAULT_RUNS, seed: int = DEFAULT_SEED) -> dict:
+    """任何策略共用：run(None) 跑策略本身，run(RandomEntry) 跑一次隨機進場。
+
+    先用策略自己的成交次數算出進場機率並校準，再跑 runs 次取分布。
+    """
+    strategy = run(None)
+    metrics = flat_metrics(strategy)
+
+    def once(entry: RandomEntry) -> dict:
+        return flat_metrics(run(entry))
+
+    rates, calibration = calibrate_rates(lambda entry: once(entry)["filled_buys"],
+                                         rates_of(strategy), metrics["filled_buys"], seed=seed)
+    baseline = run_baseline(once, rates, runs=runs, seed=seed)
+    baseline["calibration"] = calibration
+    spread = baseline["distribution"].get("expectancy_pct")
+    return dict(strategy=metrics, random_entry=baseline,
+                expectancy_pct_above_p95=(bool(metrics["expectancy_pct"] > spread["p95"])
+                                          if spread else None))
+
+
 def smile_random_baseline(backtester, histories: dict, *, ex_rights: Optional[dict] = None,
                           start: str = "", end: str = "", runs: int = DEFAULT_RUNS,
                           seed: int = DEFAULT_SEED) -> dict:
-    """先跑一次策略本身取得進場頻率，再跑隨機進場 runs 次。"""
-    strategy = backtester.run_histories(histories, start=start, end=end, ex_rights=ex_rights)
-    rates = smile_entry_rates(strategy)
+    """微笑方案：各階不看跌幅，改以機率觸發。"""
+    return strategy_random_baseline(
+        lambda entry: backtester.run_histories(histories, start=start, end=end,
+                                               ex_rights=ex_rights, random_entry=entry),
+        smile_entry_rates, runs=runs, seed=seed)
 
-    def once(entry: RandomEntry) -> dict:
-        return flat_metrics(backtester.run_histories(histories, start=start, end=end,
-                                                     ex_rights=ex_rights, random_entry=entry))
 
-    target = flat_metrics(strategy)["filled_buys"]
-    rates, calibration = calibrate_rates(lambda entry: once(entry)["filled_buys"], rates,
-                                         target, seed=seed)
-    result = run_baseline(once, rates, runs=runs, seed=seed)
-    result["calibration"] = calibration
-    result = dict(strategy=flat_metrics(strategy), random_entry=result)
-    spread = result["random_entry"]["distribution"].get("expectancy_pct")
-    result["expectancy_pct_above_p95"] = (
-        bool(result["strategy"]["expectancy_pct"] > spread["p95"]) if spread else None)
-    return result
+def entry_rate(summary, histories: dict) -> dict:
+    """單一進場訊號的策略（波段原型）：每日進場機率 = 成交買進次數 ÷ 全部標的的日 K 根數。"""
+    days = sum(len(bars) for bars in histories.values())
+    fills = sum(1 for o in summary.orders if o["side"] == "buy" and o["status"] == "filled")
+    return {"entry": fills / days} if days > 0 and fills else {}
+
+
+def swing_random_baseline(backtester, histories: dict, *, ex_rights: Optional[dict] = None,
+                          trade_start: str = "", runs: int = DEFAULT_RUNS,
+                          seed: int = DEFAULT_SEED) -> dict:
+    """波段原型：不看突破與均線，改以機率觸發；停損、移動停利、期限與部位大小不變。"""
+    return strategy_random_baseline(
+        lambda entry: backtester.run_histories(histories, trade_start=trade_start,
+                                               ex_rights=ex_rights, random_entry=entry),
+        lambda summary: entry_rate(summary, histories), runs=runs, seed=seed)
