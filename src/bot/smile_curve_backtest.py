@@ -196,17 +196,23 @@ class SmileCurveBacktester:
         owns_db = db is None
         database = db or StockDB.open(path=default_db_path(root or Path.cwd()))
         try:
-            histories = {sym: database.get_price_history(sym, start=start, end=end, ascending=True)
-                         for sym in sorted(set(symbols))}
-            events = (load_ex_rights(database, list(histories), start=start or "", end=end or "")
-                      if self.apply_ex_rights else None)
+            histories, events = self.load(symbols, database, start=start, end=end)
             return self.run_histories(histories, start=start or "", end=end or "", ex_rights=events)
         finally:
             if owns_db:
                 database.close()
 
+    def load(self, symbols: Sequence[str], db: StockDB, *, start: Optional[str] = None,
+             end: Optional[str] = None) -> tuple:
+        """讀取日 K 與除權息事件，回傳 (histories, ex_rights)；可重複餵給 run_histories。"""
+        histories = {sym: db.get_price_history(sym, start=start, end=end, ascending=True)
+                     for sym in sorted(set(symbols))}
+        events = (load_ex_rights(db, list(histories), start=start or "", end=end or "")
+                  if self.apply_ex_rights else None)
+        return histories, events
+
     def run_histories(self, histories: dict, *, start: str = "", end: str = "",
-                      ex_rights: Optional[dict] = None) -> SmileBacktestSummary:
+                      ex_rights: Optional[dict] = None, random_entry=None) -> SmileBacktestSummary:
         """One cash account. Signals at close, fills at the next observed session's open.
 
         Buy orders use only cash available BEFORE that morning's sales, avoiding an
@@ -219,6 +225,9 @@ class SmileCurveBacktester:
         their cost basis drops by the same amount, and the reference price is scaled by
         reference_price / prev_close. Cash credited that morning does not fund that morning's buys.
         Events that cannot be computed pause that symbol's signals for the day.
+
+        random_entry: 隨機進場基準（bot.random_entry.RandomEntry）。給定時買進訊號不看跌幅，
+        改由各階各自的機率決定；出場、部位大小、資金與成交假設都不變。
         """
         cap = float(self.settings.effective_fund_cap())
         if not self.execution.is_ideal:
@@ -410,6 +419,7 @@ class SmileCurveBacktester:
                 if e.state.reference <= 0:
                     e._init_reference(close, date)
                     continue
+                may_buy = False
                 if sym in paused:
                     pending[sym] = []
                 elif e.state.disabled:
@@ -418,10 +428,23 @@ class SmileCurveBacktester:
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity)
                                     for l in e.open_lots] if e._position_profitable(close) else []
                     e.trail_reference(close)
+                    # 隨機進場不看跌幅，所以價格在標準價之上也能進場（沒有賣單排隊時）。
+                    may_buy = random_entry is not None and not pending[sym]
                 elif e.stop_loss_breached(close):
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity,
                                          stop=True) for l in e.open_lots]
-                elif out.halted_date is None:
+                else:
+                    may_buy = True
+                if may_buy and out.halted_date is None and random_entry is not None:
+                    for idx, tier in enumerate(e.tiers):
+                        if idx not in e.state.tiers_done and random_entry.fires(idx):
+                            pending[sym].append(dict(side="buy", signal_date=date, tier=idx,
+                                                    quantity=e.base_lot * tier.multiplier,
+                                                    label=f"random_tier{idx}"))
+                    if e.open_lots and e.bottom_dca_allowed() and random_entry.fires("bottom"):
+                        pending[sym].append(dict(side="buy", signal_date=date, tier=None,
+                                                quantity=e.base_lot, label="random_bottom"))
+                elif may_buy and out.halted_date is None:
                     drop = e._drop_pct(close)
                     for idx, tier in enumerate(e.tiers):
                         if idx not in e.state.tiers_done and drop + 1e-9 >= tier.drop_pct:

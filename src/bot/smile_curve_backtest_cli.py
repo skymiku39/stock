@@ -5,6 +5,7 @@
     uv run stock-smile-backtest --symbols 2330,0050 --start 2020-01-01
     uv run stock-smile-backtest --symbols 2330 --days 365 --fetch
     uv run stock-smile-backtest --symbols 2330 --tiers "1:1,3:2,5:3,10:5"
+    uv run stock-smile-backtest --symbols 2317,2603 --start 2020-01-02 --random-baseline --seed 20261116
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import List, Optional
 
 from bot.cli_encoding import configure_console
 from bot.config import Settings
+from bot.random_entry import DEFAULT_RUNS, DEFAULT_SEED, smile_random_baseline
 from bot.round_metrics import account_metrics, summarize_rounds
 from bot.smile_execution import SmileExecution
 from bot.smile_curve_backtest import SmileBacktestSummary, SmileCurveBacktester
@@ -160,6 +162,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--fetch", action="store_true", help="缺日K時自動抓取")
     parser.add_argument("--no-ex-rights", action="store_true",
                         help="不套用除權息調整（對照用；預設會套用 ex_rights_events）")
+    parser.add_argument("--random-baseline", action="store_true",
+                        help="輸出隨機進場基準（JSON）：同樣的出場與部位規則，進場日隨機，重複多次取分布")
+    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="隨機進場重複次數")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="隨機進場亂數種子")
     parser.add_argument("--output", help="匯出 CSV 路徑")
     parser.add_argument("--json", action="store_true", help="輸出 JSON 摘要")
     parser.add_argument(
@@ -197,8 +203,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
 
         execution = SmileExecution(slippage_bps=args.slippage_bps, participation=args.participation)
-        summary = SmileCurveBacktester(settings, execution=execution,
-                                       apply_ex_rights=not args.no_ex_rights).run_many(
+        backtester = SmileCurveBacktester(settings, execution=execution,
+                                          apply_ex_rights=not args.no_ex_rights)
+        if args.random_baseline:
+            histories, events = backtester.load(symbols, db, start=start, end=end)
+            payload = smile_random_baseline(backtester, histories, ex_rights=events, start=start,
+                                            end=end, runs=args.runs, seed=args.seed)
+            payload.update(symbols=sorted(histories), start=start, end=end)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        summary = backtester.run_many(
             symbols, root=root, start=start, end=end, db=db,
         )
         summary.start = start
