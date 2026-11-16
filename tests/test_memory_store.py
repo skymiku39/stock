@@ -262,16 +262,27 @@ def test_expired_active_memory_is_hidden_before_maintenance_runs(tmp_path: Path)
     assert store.db.get_memory_item(item.memory_id).memory_status == "active"
 
 
-def test_capacity_report_warns_without_archiving_at_threshold(tmp_path: Path) -> None:
+def test_short_capacity_at_limit_is_normal_and_only_overflow_warns(tmp_path: Path) -> None:
     store = _store(tmp_path, max_active_short_items=2, max_active_short_chars=8)
     item = store.put_short("12345678", quality_status="ok")
 
     report = store.capacity_report()
 
+    # 短期層貼著上限是自動封存的正常結果，不警戒，也不因為回報而封存。
     assert report["short"]["active_items"] == 1
     assert report["short"]["char_ratio"] == 1.0
-    assert report["short"]["warning"] is True
+    assert report["short"]["warning"] is False
     assert store.db.get_memory_item(item.memory_id).memory_status == "active"
+
+    # 超過上限代表自動封存沒有生效，這才警戒（這裡縮小上限來模擬）。
+    store.policy.max_active_short_chars = 7
+    assert store.capacity_report()["short"]["warning"] is True
+
+
+def test_capacity_warning_rule_differs_by_layer() -> None:
+    policy = MemoryPolicy()
+    assert [policy.capacity_warning("long", r) for r in (0.79, 0.80, 1.2)] == [False, True, True]
+    assert [policy.capacity_warning("short", r) for r in (0.80, 1.0, 1.01)] == [False, False, True]
 
 
 def test_capacity_includes_llm_calls_hidden_by_retrieval_policy(tmp_path):

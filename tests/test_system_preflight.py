@@ -268,3 +268,23 @@ def test_memory_preflight_accepts_exact_long_research_and_flags_non_replayable(t
     assert provenance.status == "fail"
     assert "memory:long-exact" in provenance.extra["non_replayable_memory_ids"]
     assert "不得依 URL／標題／相似度猜補" in provenance.suggestion
+
+
+def test_memory_capacity_preflight_treats_full_short_layer_as_normal(tmp_path, monkeypatch):
+    from bot.memory_store import MemoryPolicy
+
+    db = StockDB.open(root=tmp_path)
+    try:
+        MemoryStore(db).put_short("x" * 9, memory_id="memory:cap", quality_status="ok")
+    finally:
+        db.close()
+
+    def capacity(**limits):
+        monkeypatch.setattr(module, "MemoryPolicy", lambda: MemoryPolicy(**limits))
+        return next(c for c in module._memory_checks(tmp_path) if c.name == "記憶容量")
+
+    near_full = capacity(max_active_short_chars=10)  # 90%：貼近上限但未超過
+    assert near_full.status == "ok" and "正常狀態" in near_full.detail
+    assert capacity(max_active_short_chars=1000).status == "ok"
+    over = capacity(max_active_short_chars=8)  # 超過上限：自動封存沒有生效
+    assert over.status == "warn" and "short" in over.detail and "自動封存未生效" in over.detail

@@ -60,7 +60,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sub.add_parser("stats", help="顯示記憶統計")
     # argparse treats '%' in help strings as an interpolation marker.
-    sub.add_parser("capacity", help="顯示短期／長期容量與 80%% 警戒")
+    sub.add_parser("capacity", help="顯示短期／長期容量與警戒（長期 80%%；短期超過上限才警戒）")
     sub.add_parser("archive-expired", help="封存已過期短期記憶")
 
     backfill = sub.add_parser("backfill-llm", help="將既有 LLM JSONL 補進短期記憶")
