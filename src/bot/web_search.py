@@ -118,15 +118,22 @@ class WebMaterial:
             parts.append("")
         if self.search_results:
             parts.append("【網頁搜尋摘要】")
+            if any(is_official_site(r.site) for r in self.search_results[:25]):
+                parts.append(OFFICIAL_NOTE)
             for r in self.search_results[:25]:
-                line = f"- ({r.site or r.source}) {r.title}"
+                line = f"- ({_site_label(r)}) {r.title}"
                 if r.snippet:
                     line += f" — {r.snippet[:180]}"
                 parts.append(line)
         if self.world_results:
             parts.append("\n【國際與地緣政治】")
-            for r in self.world_results[:15]:
-                line = f"- ({r.site or r.source}) {r.title}"
+            # 官媒項目排在後面另成一組（最多 OFFICIAL_WORLD_RESERVED 則），其餘名額給一般來源。
+            stated = [r for r in self.world_results if is_official_site(r.site)][:OFFICIAL_WORLD_RESERVED]
+            general = [r for r in self.world_results if not is_official_site(r.site)][:15 - len(stated)]
+            for r in general + stated:
+                if stated and r is stated[0]:
+                    parts.append(OFFICIAL_NOTE)
+                line = f"- ({_site_label(r)}) {r.title}"
                 if r.snippet:
                     line += f" — {r.snippet[:160]}"
                 parts.append(line)
@@ -142,6 +149,11 @@ class WebMaterial:
         if len(joined) > max_chars:
             joined = joined[:max_chars] + "\n...(已截斷)"
         return joined
+
+
+def _site_label(r: "SearchResult") -> str:
+    base = r.site or r.source
+    return f"{base}｜{OFFICIAL_LABEL}" if is_official_site(r.site) else base
 
 
 _SOURCE_LABELS = {
@@ -427,12 +439,16 @@ def _extract_xml_tag(s: str, tag: str) -> str:
 
 @dataclass(frozen=True)
 class Feed:
-    """一個 RSS/Atom 來源。region: tw/us/uk/eu/asia；lang: zh/en。"""
+    """一個 RSS/Atom 來源。region: tw/us/uk/eu/asia/cn；lang: zh/en。
+
+    stance="official" 代表官媒：內容是官方說法，素材中會標「官方立場」，不抓原文。
+    """
 
     name: str
     url: str
     region: str
     lang: str
+    stance: str = ""
 
 
 def _feeds(region: str, lang: str, pairs: tuple[tuple[str, str], ...]) -> tuple[Feed, ...]:
@@ -440,6 +456,17 @@ def _feeds(region: str, lang: str, pairs: tuple[tuple[str, str], ...]) -> tuple[
 
 
 _CNBC = "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id="
+# 新華社英文版與環球時報自己的 RSS 已停更（2026-11-16 實測），改經 Google News 取最近兩天。
+_GNEWS_SITE = "https://news.google.com/rss/search?q=site:{site}+when:2d&hl=en-US&gl=US&ceid=US:en"
+OFFICIAL_STANCE = "official"
+OFFICIAL_LABEL = "官方立場"
+OFFICIAL_NOTE = (
+    f"※ 標示「{OFFICIAL_LABEL}」的項目來自中國官媒，是官方說法，不是已查證的事實；"
+    "要有非官方來源交叉核對才能當成事實引用，否則只能寫成「中國官方表示」。"
+)
+OFFICIAL_MAX_AGE_DAYS = 7     # 官媒項目超過這個天數就不收（Google News 會混入舊文）
+OFFICIAL_WORLD_CAP = 8        # 國際管道中官媒項目的上限，避免佔滿名額
+OFFICIAL_WORLD_RESERVED = 5   # 保留給官媒的名額：官媒項目分數通常較低，不保留就進不了素材
 
 RSS_FEEDS: tuple[Feed, ...] = (
     *_feeds("tw", "zh", (
@@ -542,7 +569,28 @@ RSS_FEEDS: tuple[Feed, ...] = (
          "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6936"),
         ("straitstimes_business", "https://www.straitstimes.com/news/business/rss.xml"),
     )),
+    # 中國官媒（使用者 2026-11-16 決定採用，#25）；俄羅斯官媒不採用。
+    *(Feed(n, u, "cn", "en", OFFICIAL_STANCE) for n, u in (
+        ("xinhua_en", _GNEWS_SITE.format(site="english.news.cn")),
+        ("globaltimes", _GNEWS_SITE.format(site="globaltimes.cn")),
+        ("cgtn_world", "https://www.cgtn.com/subscribe/rss/section/world.xml"),
+        ("cgtn_china", "https://www.cgtn.com/subscribe/rss/section/china.xml"),
+        ("cgtn_business", "https://www.cgtn.com/subscribe/rss/section/business.xml"),
+    )),
 )
+OFFICIAL_FEED_NAMES = frozenset(f.name for f in RSS_FEEDS if f.stance == OFFICIAL_STANCE)
+
+
+def is_official_site(site: str) -> bool:
+    return site in OFFICIAL_FEED_NAMES
+
+
+def _official_too_old(feed: Feed, published: str) -> bool:
+    """官媒項目沒有日期或太舊時不收。"""
+    if feed.stance != OFFICIAL_STANCE:
+        return False
+    epoch = _published_epoch(published)
+    return epoch <= 0 or time.time() - epoch > OFFICIAL_MAX_AGE_DAYS * 86400
 
 
 def _local(tag: Any) -> str:
@@ -700,7 +748,8 @@ def _fetch_feed(
                 kind="search_response",
                 suffix="xml",
                 mime_type="application/rss+xml",
-                metadata={"feed": feed.name, "region": feed.region, "lang": feed.lang},
+                metadata={"feed": feed.name, "region": feed.region, "lang": feed.lang,
+                          "stance": feed.stance},
             )
             raw_document_id = raw_document.document_id
         except Exception:
@@ -805,7 +854,7 @@ def search_feeds(
                     hit = any(m.search(hay) for m in en_matchers)
                 else:
                     hit = any(n in hay for n in zh_needles)
-                if not hit:
+                if not hit or _official_too_old(feed, item["published"]):
                     continue
                 matched += 1
                 # 中文與英文來源各自計上限，避免排在前面的中文來源佔滿名額。
@@ -936,7 +985,7 @@ def search_world_news(
                 lead_hits = _term_hits(hay, leaders)
                 topic_hits = _term_hits(hay, topics)
                 score = len(lead_hits) * 2 + len(topic_hits)
-                if score < 2:
+                if score < 2 or _official_too_old(feed, item["published"]):
                     continue
                 kept += 1
                 result = SearchResult(
@@ -957,7 +1006,22 @@ def search_world_news(
             status[feed.name] = f"unavailable: {_feed_reason(exc)}"
             log.debug("RSS world %s 解析失敗", feed.name, exc_info=True)
     ordered = sorted(best.values(), key=lambda t: (t[0], t[1]), reverse=True)
-    results = [r for _, _, r in ordered[:max_results]]
+    ranked = [r for _, _, r in ordered]
+    reserved = [r for r in ranked if is_official_site(r.site)][:min(OFFICIAL_WORLD_RESERVED, max_results)]
+    reserved_ids = {id(r) for r in reserved}
+    chosen_ids = set(reserved_ids)
+    official = len(reserved)
+    for r in ranked:
+        if len(chosen_ids) >= max_results:
+            break
+        if id(r) in reserved_ids:
+            continue
+        if is_official_site(r.site):
+            if official >= OFFICIAL_WORLD_CAP:
+                continue
+            official += 1
+        chosen_ids.add(id(r))
+    results = [r for r in ranked if id(r) in chosen_ids]
     log.info("RSS world -> %d 筆", len(results))
     return results, status
 
@@ -1201,8 +1265,8 @@ def research_ticker(
 
     pages: List[PageContent] = []
     fetch_candidates = [r for r in all_results if r.source == "ddg"] + [
-        r for r in all_results if r.source == "rss"
-    ]
+        r for r in all_results if r.source == "rss" and not is_official_site(r.site)
+    ]  # 官媒不抓原文：原文進素材後就沒有「官方立場」標示
     for r in fetch_candidates:
         if not r.url.startswith("http"):
             continue
