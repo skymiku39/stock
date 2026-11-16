@@ -13,6 +13,7 @@ from bot.models import qty_multiplier
 from bot.trade_cost import buy_cash_required, sell_cash_received, net_pnl_twd, max_affordable_qty
 from bot.stock_db import StockDB, default_db_path
 from bot.smile_execution import SmileExecution
+from bot.round_metrics import Round, group_rounds, summarize_rounds, account_metrics
 
 
 @dataclass
@@ -66,6 +67,8 @@ class SmileBacktestSummary:
     max_drawdown_pct: float = 0.0
     execution: dict = field(default_factory=dict)
     halted_date: Optional[str] = None  # 浮虧護欄觸發日；未觸發為 None
+    buy_cost_total_twd: float = 0.0  # 全部成交買進的現金支出（含費用）
+    rounds: List[Round] = field(default_factory=list)  # 已平倉回合；未平倉不計
 
     @property
     def unrealized_pnl_twd(self) -> float:
@@ -88,7 +91,18 @@ class SmileBacktestSummary:
                        final_equity=self.initial_cash + self.net_pnl_twd,
                        win_rate=self.win_rate, trade_count=len(self.all_round_trips),
                        execution_mode="close_signal_next_open")
+        payload["rounds"] = [r.to_dict() for r in self.rounds]
+        payload["round_metrics"] = summarize_rounds(self.rounds)
+        payload["account_metrics"] = account_metrics(self.equity_curve, self.initial_cash,
+                                                     self.buy_cost_total_twd)
+        payload["open_positions"] = dict(
+            count=sum(1 for r in self.results if r.open_lots > 0),
+            unrealized_pnl_twd=self.unrealized_pnl_twd)
+        round_counts: dict = {}
+        for rd in self.rounds:
+            round_counts[rd.symbol] = round_counts.get(rd.symbol, 0) + 1
         payload["symbols"] = [dict(symbol=r.symbol, trade_count=r.trade_count,
+                                   round_count=round_counts.get(r.symbol, 0),
                                    total_pnl_twd=r.total_pnl_twd, net_pnl_twd=r.net_pnl_twd,
                                    unrealized_pnl_twd=r.unrealized_pnl_twd, win_rate=r.win_rate,
                                    open_lots=r.open_lots, cycle_count=r.cycle_count,
@@ -284,6 +298,7 @@ class SmileCurveBacktester:
                         e.state.lots.append(SmileLot(px, qty, unit, date, order["label"]))
                         e._cash_used += paid
                         out.cash -= paid
+                        out.buy_cost_total_twd += paid
                         opening_budget -= paid
                         available_shares -= qty * qty_multiplier(unit)
                         if order["tier"] is not None:
@@ -364,4 +379,5 @@ class SmileCurveBacktester:
                 r.skip_reason = "no_daily_bars"
             elif sym not in marks:
                 r.skip_reason = "no_valid_close"
+        out.rounds = group_rounds(out.all_round_trips, cost)
         return out
