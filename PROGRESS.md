@@ -122,7 +122,7 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
 - 判讀：差異主要不是股利本身，而是標準價跟著除權息下修後，除權息跳空不再被當成跌幅而觸發買進或停損，交易路徑改變；回撤變大要在 #31 一併看。
 - 限制：1598、2328、4766 不在 60 檔名單內，`ex_rights_events` 沒有它們的資料，回測沒調整並在輸出列為 `ex_rights_no_events`。之後的比較改用 60 檔名單內的標的（59 檔有事件；2448 無事件且已下市，屬 #34）。
 - 2026-11-16 #36 完成（分支 `feat/36-world-watch-reviewed`，待開 PR）：`config/world_watch.json` 加 `reviewed_at`；`validate_sources` 新增 `check_world_watch`，超過 120 天或缺日期回報警告（不算錯誤）。名單核對結果：英國改為 Andy Burnham（首相，2026-07-20 上任）與 John Healey（財相），移除 Starmer、Reeves；美國加入聯準會主席 Kevin Warsh（2026-05-22 上任）；其餘未變。Lagarde 已宣布 2027-02-07 提前卸任，下次核對要換人。
-- 2026-11-16 #26 完成（分支 `feat/26-rss-404`，疊在 #36 上，待開 PR）：實測 74 個候選網址，新增 19 個來源，RSS 共 89 個（tw 28、us 32、uk 13、eu 7、asia 9）。用專案抓取器實測 88 個可用，Semiconductor Engineering 當次讀取逾時（8 秒），屬偶發。商周、數位時代、今周刊、中時、Reuters、AP 等找不到可用 RSS，原因記在 `docs/data-sources.md`「未採用的 RSS 來源」，不要重複嘗試。台灣的英文媒體（Focus Taiwan、Taipei Times）放在 asia 區，因為 tw 區一律用中文名稱比對。
+- 2026-11-16 #26 完成（分支 `feat/26-rss-404`，疊在 #36 上，待開 PR）：實測 74 個候選網址，新增 18 個來源，RSS 共 88 個（tw 28、us 31、uk 13、eu 7、asia 9）。Semiconductor Engineering 內容可用，但用專案抓取器連續兩次讀取逾時（8 秒），沒有採用。商周、數位時代、今周刊、中時、Reuters、AP 等找不到可用 RSS，原因記在 `docs/data-sources.md`「未採用的 RSS 來源」，不要重複嘗試。台灣的英文媒體（Focus Taiwan、Taipei Times）放在 asia 區，因為 tw 區一律用中文名稱比對。
 - 清理舊 issue 的順序：#36 → #26 → #25 → #24；分支依序疊在前一個上面，PR 依序合併。#23 等使用者安排重開機。
 - M1 下一步：#30 隨機進場基準，再 #31。
 - 排程設計備忘：exit 4=busy 60 秒後重試；exit 3=blocked/partial 依 `next_retry_epoch`；重試次數用完只照一般間隔執行，直到成功才歸零。

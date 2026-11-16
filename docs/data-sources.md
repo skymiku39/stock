@@ -29,7 +29,7 @@
 | **重大訊息** | `openapi.twse.com.tw/v1/opendata/t187ap04_L` (每日全市場) | 個股重大訊息 | 否 | fallback 走 `mopsov` 個股歷史 `ajax_t05st02`；遇安全性阻擋會明確標記失敗 |
 | 新聞 | 鉅亨網 cnyes | 題材/情緒 | 否 | 空清單 |
 | 網路搜尋 | DuckDuckGo HTML | 法說/題材研究 | 否 | DDG 目前一律回 HTTP 202 驗證頁；研究流程以 strict 模式偵測，熔斷後略過並在 `WebMaterial.source_status` 與 LLM 素材【來源狀態】標示不可用 |
-| 財經 RSS 訂閱 | 共 89 個來源（`RSS_FEEDS`，`Feed(name, url, region, lang)`）：tw/zh 28（Yahoo 奇摩、經濟日報、自由時報、工商時報、MoneyDJ、中央社、科技新報、DIGITIMES、ETtoday、iThome、天下、鉅亨網、風傳媒、INSIDE、TechOrange、公視、遠見）；us/en 32（CNBC、MarketWatch、WSJ、Bloomberg、Nasdaq、Seeking Alpha、NYT、Politico、Fed、TechCrunch、EE Times、Axios、Ars Technica、The Verge、Semiconductor Engineering）；uk/en 13（BBC、Guardian、FT、Economist、Sky News、Bank of England、The Register、Independent）；eu/en 7（DW、Euronews、France 24、Politico EU、ECB、Le Monde 英文版）；asia/en 9（Nikkei Asia、SCMP、Focus Taiwan、Taipei Times、Japan Times、Yonhap、CNA 新加坡、Straits Times） | 個股新聞補料與原文抓取 (DDG 替代來源) | 否 | 單一 feed 失敗不影響其他；各 feed 狀態記於 `source_status['rss:<名稱>']`；中文 feed 以代號/中文名稱比對，英文 feed 以公司英文簡稱字詞邊界比對（無英文簡稱則 `skipped (no english name)`）；抓取為 stream + 8 秒連線/讀取逾時 + 20 秒總時限 + 5MB 上限，快取於 `data/cache/rss/<name>.xml`（TTL 30 分鐘，失敗時退回過期快取並標 `stale cache`）；raw 以 `rss_feed` 保存；不含中國/俄羅斯官媒 |
+| 財經 RSS 訂閱 | 共 88 個來源（`RSS_FEEDS`，`Feed(name, url, region, lang)`）：tw/zh 28（Yahoo 奇摩、經濟日報、自由時報、工商時報、MoneyDJ、中央社、科技新報、DIGITIMES、ETtoday、iThome、天下、鉅亨網、風傳媒、INSIDE、TechOrange、公視、遠見）；us/en 31（CNBC、MarketWatch、WSJ、Bloomberg、Nasdaq、Seeking Alpha、NYT、Politico、Fed、TechCrunch、EE Times、Axios、Ars Technica、The Verge）；uk/en 13（BBC、Guardian、FT、Economist、Sky News、Bank of England、The Register、Independent）；eu/en 7（DW、Euronews、France 24、Politico EU、ECB、Le Monde 英文版）；asia/en 9（Nikkei Asia、SCMP、Focus Taiwan、Taipei Times、Japan Times、Yonhap、CNA 新加坡、Straits Times） | 個股新聞補料與原文抓取 (DDG 替代來源) | 否 | 單一 feed 失敗不影響其他；各 feed 狀態記於 `source_status['rss:<名稱>']`；中文 feed 以代號/中文名稱比對，英文 feed 以公司英文簡稱字詞邊界比對（無英文簡稱則 `skipped (no english name)`）；抓取為 stream + 8 秒連線/讀取逾時 + 20 秒總時限 + 5MB 上限，快取於 `data/cache/rss/<name>.xml`（TTL 30 分鐘，失敗時退回過期快取並標 `stale cache`）；raw 以 `rss_feed` 保存；不含中國/俄羅斯官媒 |
 | 國際與地緣政治 | 同上 RSS 來源，以 `config/world_watch.json` 的領導人與主題關鍵字篩選 | 個股研究的【國際與地緣政治】區段（`WebMaterial.world_results`，不併入搜尋結果、不抓原文） | 否 | 分數 = 命中領導人數 × 2 + 命中主題數，≥2 才收；共用 RSS 快取；總結記於 `source_status['world']`；**人名與職位會更換，`world_watch.json` 需定期確認** |
 | 美股/指數/VIX/ADR | yfinance | 跨市場連動 | 否 | TWSE 收盤 fallback；未安裝則「無資料」 |
 | **台指期正逆價差** | `openapi.taifex.com.tw/v1/DailyMarketReportFut` | 期貨領先指標 (正逆價差) | 否 | 抓不到則 macro note 標記、不影響其他分析 |
@@ -51,6 +51,7 @@
 | Kyodo News、Barron's、Yahoo Finance（美國） | 測過的網址都是 404；Yahoo 的個別代號 feed 只回 1 則。 |
 | Telegraph | 402（付費牆）。 |
 | CNN Business | feed 還在，但最新一則是 2018 年。 |
+| Semiconductor Engineering | 內容可用，但用專案抓取器（讀取逾時 8 秒）連續兩次逾時，會拖慢每次抓取，暫不採用。 |
 | Korea Herald | 兩次實測一次成功、一次連線失敗，不穩定，暫不採用。 |
 | NHK、Handelsblatt | 可用，但內容是日文／德文，目前只比對中文與英文。 |
 
