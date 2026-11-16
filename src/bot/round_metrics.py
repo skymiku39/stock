@@ -15,6 +15,7 @@ _REASON_MAP = {
     "rebound": "take_profit",
     "stop_loss_next_open": "stop_loss",
     "stop_loss": "stop_loss",
+    "data_end": "data_end",  # 標的資料中斷（下市、合併）時以最後收盤價強制平倉
 }  # "expiry" 保留給未來的到期出場
 
 
