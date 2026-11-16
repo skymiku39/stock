@@ -6,11 +6,15 @@ import pytest
 
 from bot import daily_collection as collection
 
+REAL_COLLECT_EX_RIGHTS = collection.collect_ex_rights
+
 
 @pytest.fixture(autouse=True)
-def rss_archive_is_stubbed(monkeypatch):
+def network_side_collections_are_stubbed(monkeypatch):
     monkeypatch.setattr(collection, "collect_rss_archive", lambda root: {
         "status": "ok", "collected_at": collection.now_tw().isoformat(), "feeds_total": 1, "feeds_seen": 1})
+    monkeypatch.setattr(collection, "collect_ex_rights", lambda root: {"status": "ok"})
+    monkeypatch.setattr(collection, "crosscheck_prices", lambda root, date, expected=(): {"status": "ok", "date": date})
 
 
 def test_retry_only_failed_steps_refresh_after_close_and_roll_over(tmp_path, monkeypatch):
@@ -223,3 +227,49 @@ def test_extended_prices_skip_current_resume_on_budget_and_do_not_refetch(tmp_pa
     # 換目標日就重新開始。
     assert collection.collect_extended_prices(tmp_path, ["C1"], "2026-11-17", state, budget=60, delay=0)["fetched"] == ["C1"]
     assert collection.collect_extended_prices(tmp_path, symbols, "", {}, budget=60, delay=0)["pending"] == symbols
+
+
+def test_ex_rights_refresh_keeps_universe_symbols_and_runs_once_per_day(tmp_path, monkeypatch):
+    from bot import ex_rights
+    from bot.stock_db import StockDB
+    monkeypatch.setattr(collection, "now_tw", lambda: dt.datetime(2026, 11, 17, 15, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/backtest_universe.json").write_text('{"symbols": [{"symbol": "2303"}]}', encoding="utf-8")
+    def row(symbol):
+        return dict(symbol=symbol, ex_date="2026-11-10", kind="息", prev_close=50.0, reference_price=49.0,
+                    value_total=1.0, cash_dividend=1.0, stock_per_1000=None, market="twse",
+                    source_url="https://example.test", retrieved_at="2026-11-17T15:00:00")
+    years = []
+    monkeypatch.setattr(ex_rights, "fetch_year", lambda year: years.append(year) or [row("2303"), row("9999")])
+    result = REAL_COLLECT_EX_RIGHTS(tmp_path)      # autouse fixture 換掉的是模組屬性，這裡測真的實作
+    assert result["status"] == "ok" and result["saved"] == 1 and result["latest_ex_date"] == "2026-11-10" and years == [2026]
+    db = StockDB.open(root=tmp_path)
+    try:
+        assert [r[0] for r in db.conn.execute("SELECT symbol FROM ex_rights_events")] == ["2303"]
+    finally:
+        db.close()
+
+
+
+def test_daily_inputs_refresh_ex_rights_once_per_day_and_retry_failures(tmp_path, monkeypatch):
+    from bot import watchlist
+    clock = [dt.datetime(2026, 11, 17, 10, tzinfo=dt.timezone(dt.timedelta(hours=8)))]
+    monkeypatch.setattr(collection, "now_tw", lambda: clock[0])
+    monkeypatch.setattr(watchlist, "load", lambda root: SimpleNamespace(items=[]))
+    monkeypatch.setattr(collection, "collect_news", lambda *a: {"status": "ok"})
+    monkeypatch.setattr(collection, "collect_price", lambda *a: {"status": "ok"})
+    outcomes = [ValueError("twse down"), {"status": "ok"}]
+    calls = []
+    def ex(root):
+        calls.append(1)
+        value = outcomes.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(collection, "collect_ex_rights", ex)
+    settings = SimpleNamespace(symbols=["2330"])
+    first = collection.collect_daily_inputs(tmp_path, settings)
+    assert first["ex_rights"]["status"] == "failed" and first["complete"]      # 不影響 complete
+    assert collection.collect_daily_inputs(tmp_path, settings)["ex_rights"]["status"] == "ok"
+    collection.collect_daily_inputs(tmp_path, settings)
+    assert len(calls) == 2

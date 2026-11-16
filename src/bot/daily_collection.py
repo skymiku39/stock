@@ -11,6 +11,7 @@ from pathlib import Path
 
 from bot.news_fetcher import fetch_today_news, load_cached_news_only
 from bot.rss_archive import collect_rss_archive
+from bot.price_crosscheck import describe as describe_crosscheck, run as crosscheck_prices
 from bot.source_registry import SourceRegistry, resolve_source_document_path
 from bot.stock_db import StockDB
 from bot.technicals import fetch_recent_kline, load_kline_from_db
@@ -190,6 +191,29 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
     return out
 
 
+def collect_ex_rights(root):
+    """更新今年的除權息事件（只存回測名單內的標的，與 `bot.ex_rights` 的預設一致）。
+
+    為什麼每天做：回測靠這張表調整除權息跳空；只在回補時抓一次的話，新的除權息日會被當成下跌。
+    """
+    from bot import ex_rights
+    from bot.backtest_universe import load_universe
+    symbols = set(load_universe(Path(root) / "config/backtest_universe.json"))
+    year = now_tw().year
+    rows = [r for r in ex_rights.fetch_year(year) if r["symbol"] in symbols]
+    db = StockDB.open(root=root)
+    try:
+        saved = ex_rights.save_events(db, rows)
+        stored, latest = db.conn.execute(
+            "SELECT COUNT(*), MAX(ex_date) FROM ex_rights_events WHERE ex_date >= ?", (f"{year}-01-01",)).fetchone()
+    finally:
+        db.close()
+    if stored < saved:
+        raise ValueError("ex-rights readback has fewer rows than were saved")
+    return {"status": "ok", "collected_at": now_tw().isoformat(), "year": year, "saved": saved,
+            "stored_this_year": stored, "latest_ex_date": latest}
+
+
 def collect_daily_inputs(root, settings, *, force=False):
     with FileLock(Path(root) / 'data/.daily-inputs.lock'):
         return _collect_daily_inputs(root, settings, force=force)
@@ -236,12 +260,19 @@ def _collect_daily_inputs(root, settings, *, force=False):
     # 擴充名單另外記錄，不影響 complete：單一檔抓不到不該讓每日研究永遠不完整。
     target = max((p.get("source_date", "") for p in result["prices"].values()
                   if p.get("status") == "ok"), default="")
+    extended = []
     try:
         extended = [t for t in extended_price_symbols(root) if t not in symbols]
         result["extended"] = collect_extended_prices(
             root, extended, target, previous.get("extended", {}) if previous.get("date") == date else {})
     except Exception as exc:
         result["extended"] = {"complete": False, "error": str(exc)}
+    # 用全市場單日行情核對目標日的日 K（另一個端點）；原始回應有快取，一天只連線一次。
+    if target:
+        try:
+            result["crosscheck"] = crosscheck_prices(root, target, expected=sorted(set(symbols) | set(extended)))
+        except Exception as exc:
+            result["crosscheck"] = {"status": "pending", "date": target, "error": str(exc)}
     # RSS 存檔同樣另外記錄：九十幾個外部來源總有幾個暫時失敗，不該擋住 complete。
     old_rss = previous.get("rss", {}) if previous.get("date") == date else {}
     try:
@@ -256,6 +287,15 @@ def _collect_daily_inputs(root, settings, *, force=False):
             result["rss"] = collect_rss_archive(root)
         except Exception as exc:
             result["rss"] = {"status": "failed", "error": str(exc), "collected_at": now_tw().isoformat()}
+    # 除權息事件一天更新一次；失敗下一輪再試，不影響 complete。
+    old_ex = previous.get("ex_rights", {}) if previous.get("date") == date else {}
+    if not force and old_ex.get("status") == "ok":
+        result["ex_rights"] = old_ex
+    else:
+        try:
+            result["ex_rights"] = collect_ex_rights(root)
+        except Exception as exc:
+            result["ex_rights"] = {"status": "failed", "error": str(exc), "collected_at": now_tw().isoformat()}
     result["complete"] = not result["errors"] and now_tw().date().isoformat() == date
     result["finished_at"] = now_tw().isoformat()
     atomic_json(path, result)
@@ -312,6 +352,24 @@ def _write_daily_summary(root, state):
             lines.append("- 失敗來源：" + "、".join(rss["feeds_failed"]))
         if rss.get("error"):
             lines.append(f"- {rss['error']}")
+    xc = inputs.get("crosscheck") or {}
+    if xc:
+        lines += ["", "日 K 交叉核對（與交易所全市場日報比對）：" + (
+            describe_crosscheck(xc) if "matched" in xc else f"{xc.get('date')} 尚未完成，{xc.get('error', 'unknown')}")]
+    exr = inputs.get("ex_rights") or {}
+    if exr:
+        lines += ["", "除權息事件：" + (f"今年 {exr.get('stored_this_year', 0)} 筆，最後一筆 {exr.get('latest_ex_date')}"
+                                    if exr.get("status") == "ok" else f"未完成，{exr.get('error', 'unknown')}")]
+    forward = read_json(Path(root) / "data/forward_tracking/latest.json")
+    if forward.get("strategies"):
+        lines += ["", f"前瞻追蹤（凍結參數，{forward.get('forward_start')}～{forward.get('as_of')}，"
+                      f"{forward.get('trading_days')} 個交易日；樣本少時不能當證據）"]
+        for key, label in (("smile", "微笑方案"), ("swing", "波段原型")):
+            item = forward["strategies"].get(key)
+            if item:
+                m = item["metrics"]
+                lines.append(f"- {label}：權益 {item['equity']:,.0f}（{m['return_pct']:.2f}%），已平倉 {m['round_count']} 輪，"
+                             f"未平倉 {len(item['open_positions'])} 檔，最大回撤 {m['max_drawdown_pct']:.2f}%")
     ext = inputs.get("extended") or {}
     if ext:
         lines += ["", "擴充名單行情（ETF、ETF 台股持股、回測名單）",
@@ -353,6 +411,12 @@ def main(argv=None):
             # 工作成功不代表資料有更新；每輪都把各類資料的最新日期寫下來，摘要會引用。
             from bot.data_freshness import check_data_freshness
             atomic_json(root / 'data/freshness_status.json', check_data_freshness(root, settings=settings))
+        except Exception:
+            pass
+        try:
+            # 凍結參數的前瞻追蹤：資料日有前進且名單涵蓋率足夠時才重算。
+            from bot.forward_tracker import update as update_forward
+            update_forward(root)
         except Exception:
             pass
         state = read_json(root / 'data/daily_research' / result['date'] / 'status.json')

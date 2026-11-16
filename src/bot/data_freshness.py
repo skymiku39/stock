@@ -199,6 +199,17 @@ def _etf_holdings(root: Path, now: dt.datetime) -> Dict[str, Any]:
     return _check("ETF 持股", OK if not bad else FAIL if total and bad / total > 0.5 else WARN, detail)
 
 
+def _crosscheck(root: Path) -> Dict[str, Any]:
+    folder = root / "data/price_crosscheck"
+    latest = _newest_date_in_names(folder)
+    if not latest:
+        return _check("日 K 交叉核對", INFO, "還沒有核對紀錄")
+    result = read_json(folder / f"{latest}.json")
+    from bot.price_crosscheck import describe
+    status = {"ok": OK, "warn": WARN, "fail": FAIL}.get(result.get("status"), WARN)
+    return _check("日 K 交叉核對", status, describe(result) if "matched" in result else f"{latest} 的紀錄無法讀取")
+
+
 def _model(root: Path, now: dt.datetime) -> Dict[str, Any]:
     state = read_json(root / "data/llm_availability.json")
     if not state:
@@ -226,6 +237,7 @@ def check_data_freshness(root: Path, *, settings: Any = None, now: Optional[dt.d
         lambda: _scheduler(root, now),
         lambda: _news(root, now),
         lambda: _prices(root, now, core, extended),
+        lambda: _crosscheck(root),
         lambda: _etf_holdings(root, now),
         lambda: _dated(_newest_date_in_names(root / "data/chips"), expected, "籌碼（三大法人、融資券）", 2, 4),
         lambda: _dated(_newest_date_in_names(root / "data/macro"), expected, "跨市場總經", 2, 4),
