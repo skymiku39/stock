@@ -1,14 +1,15 @@
 {
   "_note": "國際與地緣政治新聞的篩選關鍵字。人名與職位會更換，請定期確認；英文關鍵字以字詞邊界比對，大小寫不拘。",
-  "updated": "2026-11-10",
+  "updated": "2026-11-16",
+  "reviewed_at": "2026-11-16",
   "leaders": {
-    "US": ["Donald Trump", "Trump", "川普", "JD Vance", "范斯", "Scott Bessent", "Bessent", "貝森特", "Howard Lutnick", "Lutnick", "盧特尼克", "Jamieson Greer", "葛里爾", "Marco Rubio", "盧比歐", "Fed Chair", "聯準會主席"],
+    "US": ["Donald Trump", "Trump", "川普", "JD Vance", "范斯", "Scott Bessent", "Bessent", "貝森特", "Howard Lutnick", "Lutnick", "盧特尼克", "Jamieson Greer", "葛里爾", "Marco Rubio", "盧比歐", "Kevin Warsh", "Warsh", "華許", "沃什", "Fed Chair", "聯準會主席"],
     "China": ["Xi Jinping", "習近平", "Li Qiang", "李強", "He Lifeng", "何立峰", "Wang Yi", "王毅"],
     "Russia": ["Vladimir Putin", "Putin", "普丁"],
     "Taiwan": ["Lai Ching-te", "賴清德", "Cho Jung-tai", "卓榮泰"],
     "Japan": ["Sanae Takaichi", "Takaichi", "高市早苗"],
     "South Korea": ["Lee Jae-myung", "李在明"],
-    "UK": ["Keir Starmer", "Starmer", "施凱爾", "施紀賢", "Rachel Reeves"],
+    "UK": ["Andy Burnham", "Burnham", "伯納姆", "柏南", "John Healey"],
     "Germany": ["Friedrich Merz", "Merz", "梅爾茨", "梅爾茲"],
     "France": ["Emmanuel Macron", "Macron", "馬克宏"],
     "EU": ["Ursula von der Leyen", "von der Leyen", "范德賴恩", "馮德萊恩", "Christine Lagarde", "Lagarde", "拉加德"],

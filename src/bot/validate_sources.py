@@ -586,6 +586,41 @@ def check_rss_feeds(root: Optional[Path] = None) -> CheckResult:
     return r
 
 
+WORLD_WATCH_REVIEW_DAYS = 120
+
+
+def check_world_watch(root: Optional[Path] = None, *, today: Optional[dt.date] = None) -> CheckResult:
+    """world_watch.json 的領導人名單是否在期限內核對過（離線檢查，不連網）。
+
+    名單過期不會讓抓取失敗，只會讓國際新聞比對失準，所以過期或缺日期時回報警告（note）
+    而不是錯誤。核對後更新檔內的 reviewed_at。
+    """
+    from bot.web_search import load_world_watch
+
+    r = CheckResult(name="國際關注名單 (world_watch)", layer="parse")
+    cfg = load_world_watch(root)
+    leaders = cfg.get("leaders") or {}
+    r.rows = sum(len(v) for v in leaders.values() if isinstance(v, list))
+    reviewed = str(cfg.get("reviewed_at") or "")
+    r.sample_date = reviewed
+    r.details["max_age_days"] = WORLD_WATCH_REVIEW_DAYS
+    if not leaders:
+        r.error = "world_watch.json 沒有領導人名單"
+        return r
+    try:
+        age = ((today or now_tw().date()) - dt.date.fromisoformat(reviewed[:10])).days
+    except ValueError:
+        r.note = "缺少或無法解析 reviewed_at，請核對領導人名單後填入核對日期"
+        return r
+    r.details["age_days"] = age
+    if age > WORLD_WATCH_REVIEW_DAYS:
+        r.note = (f"領導人名單已 {age} 天未核對（上限 {WORLD_WATCH_REVIEW_DAYS} 天），"
+                  "請核對後更新 reviewed_at")
+        return r
+    r.ok = True
+    return r
+
+
 def check_macro(root: Path) -> CheckResult:
     from bot.market_macro import fetch_macro_snapshot
     r = CheckResult(name="總經 (yfinance: 美股/SOX/VIX/加權 + ADR 溢價)", layer="parse")
@@ -1032,6 +1067,7 @@ def _run_all_checks(
         lambda: check_news(root),
         lambda: check_web_search(root),
         lambda: check_rss_feeds(root),
+        lambda: check_world_watch(config_root),
         lambda: check_macro(root),
         lambda: check_futures_basis(root),
     ]
