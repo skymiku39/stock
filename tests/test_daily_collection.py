@@ -11,7 +11,7 @@ REAL_COLLECT_EX_RIGHTS = collection.collect_ex_rights
 
 @pytest.fixture(autouse=True)
 def network_side_collections_are_stubbed(monkeypatch):
-    monkeypatch.setattr(collection, "collect_rss_archive", lambda root: {
+    monkeypatch.setattr(collection, "collect_rss_archive", lambda root, tracked=(): {
         "status": "ok", "collected_at": collection.now_tw().isoformat(), "feeds_total": 1, "feeds_seen": 1})
     monkeypatch.setattr(collection, "collect_ex_rights", lambda root: {"status": "ok"})
     monkeypatch.setattr(collection, "crosscheck_prices", lambda root, date, expected=(): {"status": "ok", "date": date})
@@ -202,7 +202,8 @@ def test_extended_symbols_cover_etfs_taiwan_holdings_and_backtest_universe(tmp_p
 
 def test_extended_prices_skip_current_resume_on_budget_and_do_not_refetch(tmp_path, monkeypatch):
     monkeypatch.setattr(collection, "now_tw", lambda: dt.datetime(2026, 11, 17, 15, tzinfo=dt.timezone(dt.timedelta(hours=8))))
-    monkeypatch.setattr(collection, "latest_price_dates", lambda root: {"A1": "2026-11-16", "B1": "2026-10-15"})
+    monkeypatch.setattr(collection, "latest_price_dates",
+                        lambda root: {"A1": "2026-11-16", "B1": "2026-10-15", "GONE": "2020-12-23"})
     calls = []
     def price(root, ticker, months=1):
         calls.append((ticker, months))
@@ -210,10 +211,11 @@ def test_extended_prices_skip_current_resume_on_budget_and_do_not_refetch(tmp_pa
             raise ValueError("boom")
         return {"source_date": "2026-11-10" if ticker == "C1" else "2026-11-16"}
     monkeypatch.setattr(collection, "collect_price", price)
-    symbols = ["A1", "B1", "C1", "D1"]
-    # 預算 0：已到目標日的不連線，其餘留待下次。
+    symbols = ["A1", "B1", "C1", "D1", "GONE"]
+    # 預算 0：已到目標日的不連線，其餘留待下次；下市多年的不抓也不算失敗。
     first = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", {}, budget=0, delay=0)
     assert first["current"] == 1 and first["pending"] == ["B1", "C1", "D1"] and not calls and not first["complete"]
+    assert first["retired"] == {"GONE": "2020-12-23"} and not first["failed"]
     second = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", first, budget=60, delay=0)
     assert calls == [("B1", 2), ("C1", 1), ("D1", 1)]          # 落後一個月的補兩個月
     assert second["current"] == 2 and second["behind"] == {"C1": "2026-11-10"}
@@ -273,3 +275,26 @@ def test_daily_inputs_refresh_ex_rights_once_per_day_and_retry_failures(tmp_path
     assert collection.collect_daily_inputs(tmp_path, settings)["ex_rights"]["status"] == "ok"
     collection.collect_daily_inputs(tmp_path, settings)
     assert len(calls) == 2
+
+
+def test_collection_fallback_only_runs_when_nothing_else_collected_recently(tmp_path):
+    import json
+    tz = dt.timezone(dt.timedelta(hours=8))
+    now = dt.datetime(2026, 11, 17, 15, tzinfo=tz)
+    day = tmp_path / "data/daily_research/2026-11-17"
+    day.mkdir(parents=True)
+    def status(**values):
+        (day / "status.json").write_text(json.dumps(values), encoding="utf-8")
+    def scheduler(**jobs):
+        (tmp_path / "data/scheduler_status.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    assert collection.collection_fallback_due(tmp_path, now) == (True, "due")           # 今天還沒收過
+    status(attempted_at="2026-11-17T14:00:00+08:00")
+    assert collection.collection_fallback_due(tmp_path, now) == (False, "recent")       # 一小時前才試過
+    status(attempted_at="2026-11-17T12:00:00+08:00")
+    assert collection.collection_fallback_due(tmp_path, now) == (True, "due")
+    scheduler(collection={"started_at": "2026-11-17T14:30:00+08:00"})
+    assert collection.collection_fallback_due(tmp_path, now) == (False, "scheduled")    # 專屬工作在跑
+    scheduler(research={"started_at": "2026-11-17T14:30:00+08:00"})
+    status(attempted_at="2026-11-17T12:00:00+08:00", collection_complete=True, official_complete=True)
+    assert collection.collection_fallback_due(tmp_path, now) == (False, "complete")
+

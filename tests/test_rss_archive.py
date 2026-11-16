@@ -52,3 +52,28 @@ def test_unparseable_feed_is_reported_without_losing_others(tmp_path, monkeypatc
     out = rss_archive.collect_rss_archive(tmp_path, feeds=[_feed("bad"), _feed("ok")], budget=60, session=object(),
                                           loader=lambda feed, **kw: (pages[feed.name], "", "ok"))
     assert out["total_items"] == 1 and out["feeds_failed"] == ["bad"]
+
+
+def test_items_are_tagged_with_tracked_tickers_without_matching_bare_numbers(tmp_path, monkeypatch):
+    from bot import company_info
+    from bot.stock_db import StockDB, StockInfo
+    monkeypatch.setattr(rss_archive, "now_tw", lambda: dt.datetime(2026, 11, 17, 10, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(company_info, "english_name_for", lambda symbol, root=None: {"2330": "TSMC"}.get(symbol, ""))
+    db = StockDB.open(root=tmp_path)
+    try:
+        db.upsert_stock_info(StockInfo("2330", "台灣積體電路製造", short_name="台積電"))
+        db.upsert_stock_info(StockInfo("2303", "聯華電子", short_name="聯電"))
+    finally:
+        db.close()
+    zh = SimpleNamespace(name="zh", url="https://example.test/zh", region="tw", lang="zh", stance="")
+    en = SimpleNamespace(name="en", url="https://example.test/en", region="us", lang="en", stance="")
+    pages = {"zh": _xml(("台積電法說優於預期", "https://x.test/a", ""), ("外資買超 2330 億元", "https://x.test/b", ""),
+                        ("晶圓雙雄 (2303) 同步走高", "https://x.test/c", "")),
+             "en": _xml(("TSMC raises capex", "https://x.test/d", ""), ("Chipmakers slide", "https://x.test/e", ""))}
+    out = rss_archive.collect_rss_archive(tmp_path, feeds=[zh, en], budget=60, session=object(), tracked=["2330", "2303"],
+                                          loader=lambda feed, **kw: (pages[feed.name], "", "ok"))
+    saved = json.loads(rss_archive.archive_path(tmp_path, "2026-11-17").read_text(encoding="utf-8"))
+    tags = {i["url"][-1]: i["related_tickers"] for i in saved["items"]}
+    assert tags == {"a": ["2330"], "b": [], "c": ["2303"], "d": ["2330"], "e": []}
+    assert out["tagged_items"] == 3 and out["top_tickers"] == [["2330", 2], ["2303", 1]]
+

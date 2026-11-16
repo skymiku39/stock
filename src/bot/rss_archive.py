@@ -36,6 +36,55 @@ def _published_iso(value: str) -> str:
     return dt.datetime.fromtimestamp(epoch, now_tw().tzinfo).isoformat(timespec="seconds")
 
 
+def build_tagger(root: Path, symbols: Iterable[str]):
+    """回傳 tag(lang, text) → 提到的追蹤標的代號。只讀本機的公司名冊，不連網。
+
+    中文來源比對公司簡稱，或「(2330)」「2330.TW」這類明確寫出代號的寫法；單獨的數字不算，
+    因為新聞裡的金額、年份很容易和代號撞號。英文來源用英文簡稱做字詞邊界比對。
+    名稱比對會有少量誤判（簡稱剛好是常見詞），這個標記只用來找新聞，不當成事實依據。
+    """
+    import re
+    import sqlite3
+    from bot.company_info import english_name_for
+    from bot.web_search import _en_matcher
+
+    symbols = sorted({str(s).strip() for s in symbols if str(s).strip()})
+    names: Dict[str, str] = {}
+    db_path = Path(root) / "data" / "stock.db"
+    if symbols and db_path.exists():
+        con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=30)
+        try:
+            marks = ",".join("?" for _ in symbols)
+            names = {row[0]: (row[1] or "").strip() for row in con.execute(
+                f"SELECT symbol, short_name FROM stock_info WHERE symbol IN ({marks})", symbols)}
+        except sqlite3.Error:
+            names = {}
+        finally:
+            con.close()
+    zh, en = [], []
+    for symbol in symbols:
+        code = re.compile(rf"[（(\[]\s*{re.escape(symbol)}(?:[-.](?:TW|TWO))?\s*[)）\]]|(?<![0-9A-Za-z]){re.escape(symbol)}\.TWO?\b")
+        name = names.get(symbol, "")
+        zh.append((symbol, name if len(name) >= 2 else "", code))
+        english = english_name_for(symbol, Path(root))
+        en.append((symbol, _en_matcher(english) if len(english) >= 3 else None, code))
+
+    def tag(lang: str, text: str) -> List[str]:
+        if lang == "en":
+            return [s for s, matcher, code in en if (matcher and matcher.search(text)) or code.search(text)]
+        return [s for s, name, code in zh if (name and name in text) or code.search(text)]
+
+    return tag
+
+
+def _top_tickers(items: List[Dict[str, Any]], limit: int = 10) -> List[List[Any]]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        for ticker in item.get("related_tickers") or []:
+            counts[ticker] = counts.get(ticker, 0) + 1
+    return [[t, n] for t, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
+
+
 def collect_rss_archive(
     root: Path,
     *,
@@ -43,8 +92,12 @@ def collect_rss_archive(
     budget: float = BUDGET_SECONDS,
     session: Any = None,
     loader: Any = None,
+    tracked: Iterable[str] = (),
 ) -> Dict[str, Any]:
-    """下載尚未輪到的來源並併入當日清單；回傳摘要（不含項目本身）。"""
+    """下載尚未輪到的來源並併入當日清單；回傳摘要（不含項目本身）。
+
+    tracked：要在項目上標記 related_tickers 的代號（追蹤標的）；不給就不標。
+    """
     from bot import web_search
 
     log = get_logger("rss-archive")
@@ -60,6 +113,10 @@ def collect_rss_archive(
     feed_status: Dict[str, str] = dict(previous.get("feeds", {}))
     cursor = int(previous.get("cursor", 0)) % max(1, len(feeds))
     cutoff = now.timestamp() - ITEM_MAX_AGE_DAYS * 86400
+    try:
+        tag = build_tagger(root, tracked) if tracked else None
+    except Exception:
+        tag = None
     started = time.monotonic()
     visited = added = 0
     sess = session or web_search._new_session()
@@ -89,6 +146,7 @@ def collect_rss_archive(
                 "published_at": published, "feed": feed.name, "region": feed.region,
                 "lang": feed.lang, "stance": feed.stance,
                 "first_seen_at": now.isoformat(timespec="seconds"), "source_document_id": raw_id,
+                "related_tickers": tag(feed.lang, f"{title} {row.get('desc', '')}") if tag else [],
             }
             added += 1
     cursor = (cursor + visited) % max(1, len(feeds))
@@ -104,6 +162,8 @@ def collect_rss_archive(
         "feeds_ok": len(feed_status) - len(failed), "feeds_failed": failed,
         "new_items": added, "total_items": len(ordered),
         "today_items": sum(1 for i in ordered if (i.get("published_at") or "").startswith(date)),
+        "tagged_items": sum(1 for i in ordered if i.get("related_tickers")),
+        "top_tickers": _top_tickers(ordered),
         "path": str(path),
     }
     atomic_json(path, {**{k: v for k, v in summary.items() if k != "path"},

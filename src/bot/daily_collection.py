@@ -94,6 +94,7 @@ EXTENDED_BUDGET_SECONDS = 240      # 每次執行最多花在擴充名單的時�
 EXTENDED_DELAY_SECONDS = 2.0       # 每檔之間的間隔，避免 TWSE 擋連線
 EXTENDED_MAX_ATTEMPTS = 3          # 同一檔同一個目標日最多嘗試幾次
 RSS_REFRESH_SECONDS = 1800         # RSS 存檔全部來源輪過一遍後，隔多久再抓
+EXTENDED_RETIRED_DAYS = 90         # 最新日 K 比目標日舊這麼多天的標的視為已下市或長期停牌
 EXTENDED_MAX_MONTHS = 6            # 落後太久時一次最多補幾個月；更早的交給 history_fetch
 
 
@@ -127,6 +128,13 @@ def latest_price_dates(root):
         db.close()
 
 
+def _days_between(earlier, later):
+    try:
+        return (dt.date.fromisoformat(later[:10]) - dt.date.fromisoformat(earlier[:10])).days
+    except ValueError:
+        return 0
+
+
 def _months_to_fetch(latest, today):
     try:
         last = dt.date.fromisoformat(latest)
@@ -148,7 +156,7 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
     attempts = dict(previous.get("attempts", {})) if same else {}
     failed = dict(previous.get("failed", {})) if same else {}
     out = {"target_date": target, "requested": len(symbols), "current": 0, "fetched": [],
-           "pending": [], "behind": {}, "failed": failed, "checked": checked,
+           "pending": [], "behind": {}, "retired": {}, "failed": failed, "checked": checked,
            "attempts": attempts, "complete": False}
     if not target:
         out["pending"] = list(symbols)
@@ -165,6 +173,11 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
             continue
         if ticker in checked:
             out["behind"][ticker] = checked[ticker]
+            continue
+        if have and _days_between(have, target) > EXTENDED_RETIRED_DAYS:
+            # 已經很久沒有日 K（下市、長期停牌）：不每天去問，也不算失敗。恢復交易時用 history_fetch 補。
+            out["retired"][ticker] = have
+            failed.pop(ticker, None)
             continue
         if attempts.get(ticker, 0) >= EXTENDED_MAX_ATTEMPTS:
             continue
@@ -284,7 +297,7 @@ def _collect_daily_inputs(root, settings, *, force=False):
         result["rss"] = old_rss
     else:
         try:
-            result["rss"] = collect_rss_archive(root)
+            result["rss"] = collect_rss_archive(root, tracked=sorted(set(symbols) | set(extended)))
         except Exception as exc:
             result["rss"] = {"status": "failed", "error": str(exc), "collected_at": now_tw().isoformat()}
     # 除權息事件一天更新一次；失敗下一輪再試，不影響 complete。
@@ -347,7 +360,10 @@ def _write_daily_summary(root, state):
     if rss:
         lines += ["", "RSS 存檔（不需模型）",
                   f"- {rss.get('status', 'pending')}：來源 {rss.get('feeds_ok', 0)} / {rss.get('feeds_total', 0)} 正常，"
-                  f"累積 {rss.get('total_items', 0)} 則，其中今天發布 {rss.get('today_items', 0)} 則。"]
+                  f"累積 {rss.get('total_items', 0)} 則，其中今天發布 {rss.get('today_items', 0)} 則，"
+                  f"提到追蹤標的 {rss.get('tagged_items', 0)} 則。"]
+        if rss.get("top_tickers"):
+            lines.append("- 提到最多的標的：" + "、".join(f"{t}（{n}）" for t, n in rss["top_tickers"]))
         if rss.get("feeds_failed"):
             lines.append("- 失敗來源：" + "、".join(rss["feeds_failed"]))
         if rss.get("error"):
@@ -375,8 +391,8 @@ def _write_daily_summary(root, state):
         lines += ["", "擴充名單行情（ETF、ETF 台股持股、回測名單）",
                   f"- 目標日 {ext.get('target_date') or '未確認'}：{ext.get('current', 0)} / {ext.get('requested', 0)} 檔已到目標日；"
                   f"待抓 {len(ext.get('pending', []))}、失敗 {len(ext.get('failed', {}))}、"
-                  f"來源日較舊 {len(ext.get('behind', {}))}。"]
-        for label, key in (("失敗", "failed"), ("來源日較舊", "behind")):
+                  f"來源日較舊 {len(ext.get('behind', {}))}、已無日 K {len(ext.get('retired', {}))}。"]
+        for label, key in (("失敗", "failed"), ("來源日較舊", "behind"), ("已無日 K（下市或長期停牌）", "retired")):
             if ext.get(key):
                 lines.append(f"- {label}：" + "、".join(f"{t}（{v}）" for t, v in sorted(ext[key].items())))
         if ext.get("error") or ext.get("note"):
@@ -394,6 +410,29 @@ def _write_daily_summary(root, state):
     path = root / "data/daily_research" / date / "summary.txt"
     atomic_text(path, "\n".join(lines) + "\n")
     return path
+
+
+COLLECTION_FALLBACK_SECONDS = 90 * 60     # 比專屬的 collection 工作（60 分鐘）長，所以它在的時候輪不到這裡
+
+
+def collection_fallback_due(root, now=None):
+    """排程器還沒有 collection 工作時，由 daily_inputs 代為啟動「只收集」。回傳 (要不要跑, 原因)。
+
+    為什麼需要：排程器是常駐程序，重啟前不會出現新增的工作；ETF 持股、籌碼與官方財務
+    不該因此停更。專屬工作出現後，它每 60 分鐘就會更新 status.json，這裡自然不再觸發。
+    """
+    now = now or now_tw()
+    status = read_json(Path(root) / 'data/daily_research' / now.date().isoformat() / 'status.json')
+    if status.get('complete') or (status.get('collection_complete') and status.get('official_complete')):
+        return False, 'complete'
+    job = (read_json(Path(root) / 'data/scheduler_status.json').get('jobs') or {}).get('collection') or {}
+    for stamp, reason in ((job.get('started_at'), 'scheduled'), (status.get('attempted_at'), 'recent')):
+        try:
+            if (now - dt.datetime.fromisoformat(stamp)).total_seconds() < COLLECTION_FALLBACK_SECONDS:
+                return False, reason
+        except (TypeError, ValueError):
+            continue
+    return True, 'due'
 
 
 def main(argv=None):
@@ -423,6 +462,13 @@ def main(argv=None):
         state = state or {'date': result['date'], 'phase': 'awaiting_research', 'complete': False}
         write_daily_summary(root, {**state, 'daily_inputs': result})
         print(json.dumps(result, ensure_ascii=False))
+        try:
+            due, reason = collection_fallback_due(root)
+            if due:
+                from bot.daily_research import main as collect_only
+                print(f'collection fallback: exit={collect_only(["--root", str(root), "--collect-only"])}', flush=True)
+        except Exception as exc:
+            print(f'collection fallback failed: {exc}', flush=True)
         return 0 if result['complete'] else 2
     except StateBusy:
         return 4

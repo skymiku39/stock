@@ -134,10 +134,12 @@ def _news(root: Path, now: dt.datetime) -> List[Dict[str, Any]]:
         out.append(_check("RSS 存檔", WARN if now.hour < 1 else FAIL, "今天還沒有 RSS 存檔"))
     else:
         total, good = int(rss.get("feeds_total") or 0), int(rss.get("feeds_ok") or 0)
+        seen = int(rss.get("feeds_seen") or 0)
         age = _hours_since(rss.get("collected_at", ""), now)
-        bad = age is None or age > 3 or (total and good / total < 0.7)
+        # 來源分好幾輪才抓完一遍；正常率只看已經輪到的來源。
+        bad = age is None or age > 3 or (seen and good / seen < 0.7)
         out.append(_check("RSS 存檔", WARN if bad else OK,
-                          f"來源 {good}/{total} 正常，累積 {rss.get('total_items', 0)} 則，"
+                          f"已輪到的 {seen} 個來源中 {good} 個正常（共 {total} 個），累積 {rss.get('total_items', 0)} 則，"
                           f"上次收集 {rss.get('collected_at', '未知')}",
                           failed=rss.get("feeds_failed", [])))
     return out
@@ -188,10 +190,13 @@ def _etf_holdings(root: Path, now: dt.datetime) -> Dict[str, Any]:
         dates = list_holdings_dates(etf.symbol, root)
         if not dates:
             missing.append(etf.symbol)
-        elif (weekday_lag(dates[0].isoformat(), expected) or 0) >= 3:
-            stale.append(f"{etf.symbol}（{dates[0].isoformat()}）")
+        else:
+            # 有些基金每月才揭露一次；用它自己最近兩期的間隔判斷，不拿每日揭露的標準去量。
+            monthly = len(dates) >= 2 and (dates[0] - dates[1]).days >= 20
+            if (weekday_lag(dates[0].isoformat(), expected) or 0) >= (30 if monthly else 3):
+                stale.append(f"{etf.symbol}（{dates[0].isoformat()}）")
     bad = len(stale) + len(missing)
-    detail = f"{total - bad}/{total} 檔在三個工作日內有持股資料"
+    detail = f"{total - bad}/{total} 檔的持股資料在預期的揭露週期內"
     if stale:
         detail += "；過期：" + "、".join(stale[:10]) + (" 等" if len(stale) > 10 else "")
     if missing:

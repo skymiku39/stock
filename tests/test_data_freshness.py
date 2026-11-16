@@ -35,7 +35,7 @@ def _project(tmp_path, prices, *, heartbeat, jobs=None):
     (data / "news/news_2026-11-17.json").write_text(json.dumps(
         {"items": [{"published_at": "2026-11-16T21:00:00+08:00"}]}), encoding="utf-8")
     (data / "news/rss_2026-11-17.json").write_text(json.dumps(
-        {"feeds_total": 10, "feeds_ok": 9, "total_items": 50, "collected_at": "2026-11-17T00:30:00+08:00"}), encoding="utf-8")
+        {"feeds_total": 10, "feeds_seen": 10, "feeds_ok": 9, "total_items": 50, "collected_at": "2026-11-17T00:30:00+08:00"}), encoding="utf-8")
     for name in ("chips/2026-11-16", "macro"):
         (data / name).mkdir(parents=True)
     (data / "macro/macro_2026-11-16.json").write_text("{}", encoding="utf-8")
@@ -55,9 +55,10 @@ def test_stale_extended_prices_and_blocked_jobs_are_reported(tmp_path, monkeypat
                           "macro": {"state": "succeeded"},
                           "nextday_draft": {"state": "interrupted", "finished_at": "2026-10-13T04:02:47+08:00"}})
     monkeypatch.setattr(daily_collection, "extended_price_symbols", lambda r: ["A", "B", "C"])
-    monkeypatch.setattr(active_etf, "load_active_etfs", lambda r: [SimpleNamespace(symbol="E1"), SimpleNamespace(symbol="E2")])
-    monkeypatch.setattr(active_etf, "list_holdings_dates",
-                        lambda symbol, r: [dt.date(2026, 11, 16)] if symbol == "E1" else [dt.date(2026, 11, 6)])
+    monkeypatch.setattr(active_etf, "load_active_etfs", lambda r: [SimpleNamespace(symbol=s) for s in ("E1", "E2", "M1")])
+    holdings = {"E1": [dt.date(2026, 11, 16)], "E2": [dt.date(2026, 11, 6), dt.date(2026, 11, 5)],
+                "M1": [dt.date(2026, 10, 31), dt.date(2026, 9, 30)]}      # M1 每月揭露一次，不算過期
+    monkeypatch.setattr(active_etf, "list_holdings_dates", lambda symbol, r: holdings[symbol])
     report = fresh.check_data_freshness(root, settings=SimpleNamespace(symbols=["2330"]), now=now)
     checks = _by_name(report)
     assert report["status"] == "fail" and report["expected_market_date"] == "2026-11-16"
@@ -68,6 +69,7 @@ def test_stale_extended_prices_and_blocked_jobs_are_reported(tmp_path, monkeypat
     assert "macro" not in checks["排程工作"]["detail"]
     assert "nextday_draft：" not in checks["排程工作"]["detail"] and "視為已停用：nextday_draft" in checks["排程工作"]["detail"]
     assert checks["ETF 持股"]["status"] == "warn" and "E2" in checks["ETF 持股"]["detail"]
+    assert "M1" not in checks["ETF 持股"]["detail"] and "2/3" in checks["ETF 持股"]["detail"]
     assert checks["月營收"]["status"] == "ok" and checks["RSS 存檔"]["status"] == "ok"
     assert checks["籌碼（三大法人、融資券）"]["status"] == "ok"
     assert any("落後" in line for line in fresh.format_report(report))
