@@ -35,6 +35,32 @@ def _read_scheduler_status() -> dict:
         return {}
 
 
+def _render_data_freshness() -> None:
+    """各類資料最新到哪一天（由每日收集工作寫入 data/freshness_status.json）。"""
+    try:
+        report = json.loads((PROJECT_ROOT / "data" / "freshness_status.json").read_text(encoding="utf-8"))
+        checks = list(report.get("checks") or [])
+    except Exception:
+        return
+    if not checks:
+        return
+    label = {"ok": "正常", "warn": "警告", "fail": "落後", "info": "資訊"}
+    color = {"ok": "green", "warn": "yellow", "fail": "red"}
+    status = str(report.get("status") or "")
+    behind = [c for c in checks if c.get("status") == "fail"]
+    warned = [c for c in checks if c.get("status") == "warn"]
+    st.markdown(
+        f"{_badge('資料新鮮度：' + label.get(status, status or '未知'), color.get(status, 'gray'))}",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"檢查時間 {report.get('checked_at', '未知')} · 預期最新交易日 {report.get('expected_market_date', '未知')}")
+    if behind:
+        st.warning("資料落後：" + "、".join(str(c.get("name")) for c in behind))
+    with st.expander(f"各類資料最新日期（落後 {len(behind)}、警告 {len(warned)}）"):
+        for check in checks:
+            st.caption(f"[{label.get(check.get('status'), check.get('status'))}] {check.get('name')}：{check.get('detail')}")
+
+
 def _render_sidebar_quick_controls() -> None:
     env_values = cached_env_values()
     bot_runner = get_runner(PROJECT_ROOT)
@@ -112,6 +138,8 @@ def _render_sidebar_quick_controls() -> None:
                             st.caption(str(entry["error"]))
         else:
             st.caption("排程正在啟動，等待第一個心跳...")
+
+    _render_data_freshness()
 
     mode_options = ["watch", "report", "trade"]
     default_mode = env_values.get("RUN_MODE", "watch")
