@@ -586,3 +586,69 @@ def test_symbol_stop_loss_disabled_with_zero(tmp_path):
     tick(strategy, 60)
     assert all(str(t.order.action).endswith("Buy") for t in api.trades)
     assert not strategy.engines["0050"].state.disabled
+
+
+def _age_lots(strategy, days=400):
+    old = (now_tw().date() - dt.timedelta(days=days)).isoformat()
+    for lot in strategy.engines["0050"].state.lots:
+        lot.entry_date = old
+
+
+def test_hold_expiry_sells_whole_position_and_starts_cooldown_after_a_loss(tmp_path):
+    strategy, api = _two_lot_position(tmp_path, smile_max_hold_days=30,
+                                      smile_reentry_cooldown_days=20,
+                                      smile_symbol_stop_loss_pct=0,
+                                      smile_max_unrealized_loss_pct=0)
+    tick(strategy, 97)  # 還沒到期：不賣（兩階都買過，也不再買）
+    assert len(api.trades) == 2
+    _age_lots(strategy)
+    tick(strategy, 95)  # 到期：整個部位賣出，成本約 95.67，認賠
+    assert len(api.trades) == 3
+    assert str(api.trades[2].order.action).endswith("Sell")
+    assert api.trades[2].order.quantity == 30
+    assert not strategy.positions
+    e = strategy.engines["0050"]
+    today = now_tw().date()
+    assert not e.open_lots and not e.state.disabled and not e.state.tiers_done
+    assert e.state.cooldown_until == (today + dt.timedelta(days=20)).isoformat()
+    tick(strategy, 90)  # 冷卻中不買
+    assert len(api.trades) == 3
+    saved = json.loads(strategy._smile_state_path.read_text(encoding="utf-8"))
+    assert saved["0050"]["cooldown_until"] == e.state.cooldown_until
+    restored = _strategy(strategy.settings, strategy.broker, tmp_path)
+    assert restored.engines["0050"].state.cooldown_until == e.state.cooldown_until
+    e.state.cooldown_until = today.isoformat()  # 冷卻期滿
+    tick(strategy, 90)
+    assert len(api.trades) == 4 and str(api.trades[3].order.action).endswith("Buy")
+
+
+def test_profitable_hold_expiry_has_no_cooldown(tmp_path):
+    strategy, api = _two_lot_position(tmp_path, smile_max_hold_days=30,
+                                      smile_reentry_cooldown_days=20,
+                                      smile_symbol_stop_loss_pct=0)
+    _age_lots(strategy)
+    tick(strategy, 99)  # 低於標準價 100 但整個部位有淨利：到期賣出
+    assert len(api.trades) == 3 and not strategy.positions
+    assert strategy.engines["0050"].state.cooldown_until == ""
+
+
+def test_take_profit_sells_below_reference(tmp_path):
+    strategy, api = _two_lot_position(tmp_path, smile_take_profit_pct=2)
+    tick(strategy, 96)  # 淨利不到 2%
+    assert len(api.trades) == 2
+    tick(strategy, 99)  # 成本約 95.67，淨利約 3%
+    assert len(api.trades) == 3
+    assert str(api.trades[2].order.action).endswith("Sell")
+    assert api.trades[2].order.quantity == 30
+    e = strategy.engines["0050"]
+    assert not strategy.positions and not e.state.disabled and not e.state.tiers_done
+
+
+def test_bottom_dca_switch_stops_daily_adds(tmp_path):
+    strategy, api = setup(tmp_path, smile_reference_prices={"0050": 100.0}, max_fund=100000,
+                          smile_max_unrealized_loss_pct=0, smile_symbol_stop_loss_pct=0,
+                          smile_buy_tiers="1:1,2:1", smile_bottom_dca_enabled=False)
+    tick(strategy, 100)
+    for price in (99, 97, 96, 95):
+        tick(strategy, price)
+    assert len(api.trades) == 2
