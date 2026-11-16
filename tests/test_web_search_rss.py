@@ -335,6 +335,69 @@ def test_world_threshold_and_ordering():
     assert len(limited) == 2
 
 
+def _dated_world_xml(days_ago_by_id: dict) -> bytes:
+    import datetime as dt
+    from email.utils import format_datetime
+
+    now = dt.datetime.now(dt.timezone.utc)
+    items = "".join(
+        f"<item><title>Trump tariff talks {i}</title><link>https://o.example/{i}</link>"
+        "<description>x</description>"
+        + ("" if days is None else f"<pubDate>{format_datetime(now - dt.timedelta(days=days))}</pubDate>")
+        + "</item>" for i, days in days_ago_by_id.items())
+    return f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'.encode("utf-8")
+
+
+def test_official_feeds_drop_stale_items_and_are_capped_in_world():
+    official = Feed("cgtn_world", "http://r/o", "cn", "en", "official")
+    normal = F("w1", "http://r/n", "us", "en")
+    # 官媒：12 則新的、1 則 30 天前、1 則沒日期；一般來源不受日期限制。
+    fresh = {i: 0 for i in range(12)}
+    sess = FakeSession({
+        "http://r/o": FakeResp(_dated_world_xml({**fresh, "old": 30, "undated": None})),
+        "http://r/n": FakeResp(WORLD_XML),
+    })
+    results, _ = ws.search_world_news(session=sess, feeds=(official, normal), watch=WATCH)
+    from_official = [r for r in results if r.site == "cgtn_world"]
+    assert len(from_official) == ws.OFFICIAL_WORLD_CAP == 8
+    # 名額很少時仍保留給官媒：一般來源的分數較高，不保留就會被擠掉。
+    few, _ = ws.search_world_news(session=sess, feeds=(official, normal), watch=WATCH, max_results=6)
+    assert [ws.is_official_site(r.site) for r in few].count(True) == ws.OFFICIAL_WORLD_RESERVED == 5
+    assert few[0].site == "w1" and len(few) == 6
+    assert not any(r.url.endswith(("/old", "/undated")) for r in from_official)
+    assert len([r for r in results if r.site == "w1"]) == 5  # 2024 年的舊文照收
+
+    en = _dated_world_xml({"a": 0, "old": 30}).replace(b"Trump tariff talks", b"TSMC news")
+    official2 = Feed("cgtn_world", "http://r/o2", "cn", "en", "official")  # 不同網址避開記憶體快取
+    sess = FakeSession({"http://r/o2": FakeResp(en)})
+    hits, status = search_feeds("2330", "台積電", english_name="TSMC", feeds=(official2,), session=sess)
+    assert [r.url for r in hits] == ["https://o.example/a"] and status == {"cgtn_world": "ok"}
+
+
+def test_official_items_are_labelled_and_not_fetched(monkeypatch, tmp_path: Path):
+    world = [SearchResult(title="W", url="https://w/1", source="rss_world", site="xinhua_en"),
+             SearchResult(title="B", url="https://w/2", source="rss_world", site="bbc_world")]
+    rss = [SearchResult(title="t1", url="https://o.example/1", source="rss", site="globaltimes"),
+           SearchResult(title="t2", url="https://a.example/1", source="rss", site="f1")]
+    calls = _patch_research(monkeypatch, lambda: [], rss_results=rss, world_results=world)
+    m = research_ticker("2330", name="台積電", root=tmp_path, force_refresh=True)
+    assert calls["fetch"] == ["https://a.example/1"]  # 官媒不抓原文
+    text = m.compact_text()
+    assert text.count(ws.OFFICIAL_NOTE) == 2  # 兩個區段各提醒一次
+    assert "- (xinhua_en｜官方立場) W" in text and "- (globaltimes｜官方立場) t1" in text
+    assert "- (bbc_world) B" in text and "- (f1) t2" in text
+
+    assert text.index("- (bbc_world) B") < text.index("- (xinhua_en｜官方立場) W")  # 官媒排在後面
+
+    plain = WebMaterial("2330", world_results=world[1:], search_results=rss[1:]).compact_text()
+    assert "官方立場" not in plain
+    many = [SearchResult(title=f"G{i}", url=f"https://g/{i}", source="rss_world", site="bbc_world")
+            for i in range(20)] + [SearchResult(title=f"O{i}", url=f"https://o/{i}", source="rss_world",
+                                                site="cgtn_world") for i in range(8)]
+    shown = WebMaterial("2330", world_results=many).compact_text()
+    assert shown.count("- (bbc_world)") == 10 and shown.count("- (cgtn_world｜官方立場)") == 5
+
+
 def test_load_world_watch(tmp_path: Path, monkeypatch):
     # A data root without config/ falls back to the repo's config.
     assert ws.load_world_watch(tmp_path)["leaders"]
@@ -406,9 +469,13 @@ def test_research_passes_english_name(monkeypatch, tmp_path: Path):
 
 def test_rss_feed_catalog():
     names = [f.name for f in ws.RSS_FEEDS]
-    assert len(names) == len(set(names)) == 89
-    assert all(f.region in {"tw", "us", "uk", "eu", "asia"} and f.lang in {"zh", "en"}
+    assert len(names) == len(set(names)) == 94
+    assert all(f.region in {"tw", "us", "uk", "eu", "asia", "cn"} and f.lang in {"zh", "en"}
                for f in ws.RSS_FEEDS)
+    official = {f.name for f in ws.RSS_FEEDS if f.stance == "official"}
+    assert official == {f.name for f in ws.RSS_FEEDS if f.region == "cn"} == ws.OFFICIAL_FEED_NAMES
+    assert official == {"xinhua_en", "globaltimes", "cgtn_world", "cgtn_china", "cgtn_business"}
+    assert not any(x in f.url for f in ws.RSS_FEEDS for x in ("tass.", "rt.com"))  # 俄媒不採用
     assert all(f.lang == "zh" for f in ws.RSS_FEEDS if f.region == "tw")
     assert all(f.lang == "en" for f in ws.RSS_FEEDS if f.region != "tw")
 
