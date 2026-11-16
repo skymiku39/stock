@@ -149,6 +149,24 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
 `data/freshness_status.json`，並附在當天的 `summary.txt`。假日無法從資料判斷，
 所以落後一個工作日只算警告。
 
+**日 K 交叉核對**用交易所的全市場單日行情（另一個端點）核對資料庫同一天的日 K，
+開高低收必須完全相同；每輪 `daily_inputs` 會對目標日自動執行，也可以手動指定日期：
+
+```powershell
+.venv\Scripts\python.exe -m bot.price_crosscheck --root C:\skymiku\stock --date 2026-11-16
+```
+
+結束碼 0 全部一致、1 名單內有標的尚未入庫或全市場日報沒有該代號、2 有價格不符。
+結果在 `data/price_crosscheck/<日期>.json`。
+
+**前瞻追蹤**把 #19 選定的兩組參數凍結，只用 2026-11-01 之後的行情記帳（詳見
+`src/bot/forward_tracker.py` 開頭的說明）。資料日前進時自動重算，結果在
+`data/forward_tracking/latest.md`；手動重算：
+
+```powershell
+.venv\Scripts\python.exe -m bot.forward_tracker --root C:\skymiku\stock --force
+```
+
 只想補資料、不想動用模型時：
 
 ```powershell
