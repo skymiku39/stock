@@ -8,7 +8,7 @@
 ## 專案慣例
 - 測試：`uv run --offline --no-sync pytest -q`（全套約 2.5 分鐘，請背景執行或調高 timeout）。
 - 保持 `SIMULATION=true`、`RUN_MODE=watch`；不得送出真實委託。
-- 提交時逐檔 `git add`，不要 `git add -A`（`work/` 未被忽略）。未經使用者同意不推送。
+- 提交時逐檔 `git add`，不要 `git add -A`（`work/` 未被忽略）。commit 後直接推送；開 PR 前先經使用者確認（PR 代表完工要合併）。
 
 ## 委派規則
 - 搜尋、讀大量檔案、跑測試、整理日誌 → 交給 `worker-haiku`。
