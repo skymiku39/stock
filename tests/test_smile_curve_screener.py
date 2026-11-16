@@ -16,7 +16,7 @@ from bot.smile_curve_screener import (
 from bot.stock_db import PriceBar, StockDB
 
 
-def _volatile_bars(symbol: str, base: float = 100.0) -> list[PriceBar]:
+def _volatile_bars(symbol: str, base: float = 100.0, volume: float = 5000.0) -> list[PriceBar]:
     """震盪序列，適合微笑曲線。"""
     pattern = [0, -2, -5, -8, -4, 0, 3, 6, 2, -1, -4, -7, -3, 1, 5, 8, 4, 0, -3]
     bars: list[PriceBar] = []
@@ -25,7 +25,7 @@ def _volatile_bars(symbol: str, base: float = 100.0) -> list[PriceBar]:
         d = f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
         bars.append(PriceBar(
             symbol=symbol, date=d,
-            open=c, high=c + 1, low=c - 1, close=c,
+            open=c, high=c + 1, low=c - 1, close=c, volume=volume,
         ))
     return bars
 
@@ -37,7 +37,7 @@ def _flat_bars(symbol: str) -> list[PriceBar]:
         d = f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
         bars.append(PriceBar(
             symbol=symbol, date=d,
-            open=c, high=c + 0.5, low=c - 0.5, close=c,
+            open=c, high=c + 0.5, low=c - 0.5, close=c, volume=5000.0,
         ))
     return bars
 
@@ -111,6 +111,29 @@ class TestSmileCurveScreener:
         )
         symbols = {c.symbol for c in report.candidates}
         assert "EXP" not in symbols
+
+    def test_illiquid_symbol_is_excluded(self, root: Path, tmp_path: Path) -> None:
+        database = StockDB.open(path=tmp_path / "liq.db")
+        database.bulk_upsert_price_bars(_volatile_bars("GOOD", 150.0, volume=5000.0))
+        database.bulk_upsert_price_bars(_volatile_bars("FLAT", 150.0, volume=200.0))
+        kwargs = dict(
+            root=root, start="2024-01-01", end="2024-12-31", total_fund=300_000,
+            top_n=5, min_etf_count=1, max_price=300.0, min_ann_vol=0.0,
+            use_odd_lot=True,
+            settings=Settings(max_fund=60_000, use_odd_lot=True, _env_file=None),
+        )
+        report = screen_smile_candidates(database, **kwargs)
+        symbols = {c.symbol for c in report.candidates}
+        assert "GOOD" in symbols and "FLAT" not in symbols
+        relaxed = screen_smile_candidates(database, min_avg_volume_lots=0, **kwargs)
+        assert "FLAT" in {c.symbol for c in relaxed.candidates}
+
+    def test_avg_volume_uses_recent_window(self) -> None:
+        bars = _volatile_bars("GOOD", 150.0, volume=100.0)
+        for bar in bars[-60:]:
+            bar.volume = 3000.0
+        metrics = compute_price_metrics(bars, budget_per_symbol=60_000)
+        assert metrics.avg_volume_lots == 3000.0
 
     def test_extra_symbols_without_etf(self, db: StockDB, tmp_path: Path) -> None:
         report = screen_smile_candidates(

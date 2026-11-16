@@ -14,6 +14,7 @@ from bot.app_bootstrap import get_or_create_bus
 from bot.config import Settings
 from bot.smile_curve_backtest_cli import _ensure_daily_data, _normalize_symbol, _resolve_dates
 from bot.smile_curve_screener import (
+    DEFAULT_MIN_AVG_VOLUME_LOTS,
     SmileScreenReport,
     collect_universe_tickers,
     screen_smile_candidates,
@@ -74,6 +75,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--min-etf", type=int, default=2, help="最少 ETF 共識檔數")
     parser.add_argument("--max-price", type=float, default=300.0, help="最高股價 (0=不限)")
     parser.add_argument("--min-vol", type=float, default=35.0, help="最低年化波動 %% (0=不限)")
+    parser.add_argument("--min-volume-lots", type=float, default=DEFAULT_MIN_AVG_VOLUME_LOTS, help="近 60 日平均成交量下限（張，0=不限）")
     parser.add_argument("--universe-limit", type=int, default=30, help="共識池最多分析檔數")
     parser.add_argument("--symbols", help="額外/覆寫候選池 (逗號分隔)；無 ETF 快照時必填")
     parser.add_argument("--start", help="回測起始 YYYY-MM-DD")
@@ -136,6 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             min_etf_count=args.min_etf,
             max_price=args.max_price,
             min_ann_vol=args.min_vol,
+            min_avg_volume_lots=args.min_volume_lots,
             use_odd_lot=use_odd_lot,
             universe_limit=args.universe_limit,
             extra_symbols=extra,
