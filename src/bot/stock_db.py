@@ -56,6 +56,8 @@ from bot.utils import get_logger, now_tw
 # the same transaction boundary in one thread.
 _DB_PATH_LOCKS: Dict[str, threading.RLock] = {}
 _DB_PATH_LOCKS_GUARD = threading.Lock()
+# 資料庫路徑 → 本行程上次完整跑完結構初始化後的結構指紋（schema_version 與遷移紀錄）。
+_SCHEMA_VERIFIED: Dict[str, tuple] = {}
 
 
 def _db_path_lock(path: Path) -> threading.RLock:
@@ -1672,6 +1674,41 @@ class StockDB:
     # ----- Schema -----
 
     def _init_schema(self) -> None:
+        """Run the compatibility DDL once per process and schema state.
+
+        The full pass takes the cross-process schema lock, reserves the writer
+        and rebuilds triggers; on the production database that is one to three
+        seconds per ``StockDB.open()``, and a single collection step opens the
+        database several times.  ``PRAGMA schema_version`` changes whenever any
+        connection alters the schema, so if it and the migration receipts still
+        equal what this process recorded right after its own full pass, nothing
+        the pass would act on has changed and it can be skipped.  A deleted or
+        replaced file, DDL from another process, or an edited receipt changes
+        the fingerprint and forces a full pass.
+        """
+        key = str(self.path.resolve()).casefold()
+        known = _SCHEMA_VERIFIED.get(key)
+        if known is not None and self.path.exists():
+            try:
+                if self._schema_fingerprint() == known:
+                    return
+            except sqlite3.Error:
+                pass
+        self._run_schema_init()
+        try:
+            _SCHEMA_VERIFIED[key] = self._schema_fingerprint()
+        except sqlite3.Error:
+            _SCHEMA_VERIFIED.pop(key, None)
+
+    def _schema_fingerprint(self) -> tuple:
+        # The migration receipts are data, not schema: an altered checksum must
+        # still reach the full pass, which refuses to continue on a mismatch.
+        version = int(self.conn.execute("PRAGMA schema_version").fetchone()[0])
+        receipts = tuple(tuple(row) for row in self.conn.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"))
+        return version, receipts
+
+    def _run_schema_init(self) -> None:
         # SQLite's busy timeout handles ordinary writer contention; this
         # sidecar lock handles the special case where several independent CLI
         # processes all try to run compatibility DDL during startup.
