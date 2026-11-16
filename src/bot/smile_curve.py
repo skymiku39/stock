@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Sequence, Tuple
 
-from bot.models import QtyUnit
+from bot.models import QtyUnit, qty_multiplier
 from bot.trade_cost import (
     buy_cash_required,
     max_affordable_qty,
@@ -33,6 +33,8 @@ class SmileLot:
     unit: QtyUnit
     entry_date: str
     tier_label: str = ""
+    # 除權息累計每股配發（元）。entry_price 已扣除這個數字，原始成交價 = 兩者相加。
+    distribution_per_share: float = 0.0
 
 
 @dataclass
@@ -61,6 +63,7 @@ class SmileRoundTrip:
     pnl_twd: float
     pnl_pct: float
     reference: float
+    distribution_twd: float = 0.0  # 持有期間的除權息配發（已含在 pnl_twd）
 
 
 @dataclass
@@ -173,6 +176,28 @@ class SmileCurveEngine:
         self.state.reference = price
         return True
 
+    def apply_distribution(self, per_share: float, factor: float) -> float:
+        """除權息日調整：回傳持倉應收的配發金額（元）。
+
+        - 持倉成本每股下修 per_share，所以停損與獲利判斷不會把除權息跳空當成虧損；
+          配發金額由呼叫端計入現金，賣出時的損益因此已包含配發。
+        - 標準價乘上 factor（除權息參考價 ÷ 前收盤價），跌幅階梯維持連續；
+          手動固定標準價的代號不動。
+        """
+        amount = 0.0
+        if per_share > 0 and self.state.lots:
+            before = self._lot_cost(self.state.lots)
+            for lot in self.state.lots:
+                cut = min(per_share, max(0.0, lot.entry_price - 0.01))
+                lot.entry_price -= cut
+                lot.distribution_per_share += cut
+                amount += cut * lot.quantity * qty_multiplier(lot.unit)
+            self._cash_used = max(0.0, self._cash_used - (before - self._lot_cost(self.state.lots)))
+        refs = getattr(self.settings, "smile_reference_prices", {}) or {}
+        if 0 < factor < 1 and self.state.reference > 0 and not refs.get(self.symbol, 0) > 0:
+            self.state.reference *= factor
+        return amount
+
     def stop_loss_breached(self, price: float, lots=None) -> bool:
         """單檔停損：部位未實現淨損 >= 持倉成本的設定比例。"""
         pct = float(getattr(self.settings, "smile_symbol_stop_loss_pct", 0.0))
@@ -223,7 +248,7 @@ class SmileCurveEngine:
             symbol=self.symbol,
             entry_date=lot.entry_date,
             exit_date=date,
-            entry_price=lot.entry_price,
+            entry_price=lot.entry_price + lot.distribution_per_share,
             exit_price=price,
             quantity=lot.quantity,
             unit=lot.unit,
@@ -232,6 +257,8 @@ class SmileCurveEngine:
             pnl_twd=pnl_twd,
             pnl_pct=pnl_pct,
             reference=self.state.reference,
+            distribution_twd=(lot.distribution_per_share * lot.quantity
+                              * qty_multiplier(lot.unit)),
         ))
         cost = buy_cash_required(
             lot.entry_price, lot.quantity, lot.unit, settings=self.settings,
