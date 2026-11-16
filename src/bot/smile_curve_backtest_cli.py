@@ -107,6 +107,12 @@ def _print_summary(summary: SmileBacktestSummary) -> None:
     print(f"年化報酬: {a['annualized_return_pct']:.2f}% | 報酬/MDD: {rm} | "
           f"平均資金使用率: {a['avg_capital_utilization_pct']:.1f}% | 年換手率: {to}")
     print(f"未平倉檔數: {opened} | 未實現: {summary.unrealized_pnl_twd:,.0f} 元")
+    applied = [d for d in summary.distributions if d["status"] == "applied"]
+    skipped = [d for d in summary.distributions if d["status"] != "applied"]
+    print(f"除權息調整: {len(applied)} 次 | 持倉配發入帳: {summary.distribution_total_twd:,.0f} 元"
+          f"（已含在損益內）| 資料不足暫停訊號: {len(skipped)} 次")
+    if summary.ex_rights_no_events:
+        print(f"區間內查無除權息事件（未調整，可能是資料未收錄）: {', '.join(summary.ex_rights_no_events)}")
     print()
     for r in summary.results:
         if r.skip_reason:
@@ -126,7 +132,7 @@ def _export_csv(summary: SmileBacktestSummary, path: Path) -> None:
         w.writerow([
             "symbol", "entry_date", "exit_date", "entry_price", "exit_price",
             "quantity", "unit", "entry_reason", "exit_reason",
-            "pnl_twd", "pnl_pct", "reference",
+            "pnl_twd", "pnl_pct", "reference", "distribution_twd",
         ])
         for t in summary.all_round_trips:
             w.writerow([
@@ -134,6 +140,7 @@ def _export_csv(summary: SmileBacktestSummary, path: Path) -> None:
                 f"{t.entry_price:.4f}", f"{t.exit_price:.4f}",
                 t.quantity, t.unit, t.entry_reason, t.exit_reason,
                 f"{t.pnl_twd:.2f}", f"{t.pnl_pct:.4f}", f"{t.reference:.4f}",
+                f"{t.distribution_twd:.2f}",
             ])
 
 
@@ -151,6 +158,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--slippage-bps", type=float, default=10, help="每邊滑價 bps，10 = 0.1%%")
     parser.add_argument("--participation", type=float, default=.001, help="前一日成交股數參與率，.001 = 0.1%%")
     parser.add_argument("--fetch", action="store_true", help="缺日K時自動抓取")
+    parser.add_argument("--no-ex-rights", action="store_true",
+                        help="不套用除權息調整（對照用；預設會套用 ex_rights_events）")
     parser.add_argument("--output", help="匯出 CSV 路徑")
     parser.add_argument("--json", action="store_true", help="輸出 JSON 摘要")
     parser.add_argument(
@@ -188,7 +197,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             _ensure_daily_data(symbols, start, end, root=root, db=db, logger=logger)
 
         execution = SmileExecution(slippage_bps=args.slippage_bps, participation=args.participation)
-        summary = SmileCurveBacktester(settings, execution=execution).run_many(
+        summary = SmileCurveBacktester(settings, execution=execution,
+                                       apply_ex_rights=not args.no_ex_rights).run_many(
             symbols, root=root, start=start, end=end, db=db,
         )
         summary.start = start

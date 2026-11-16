@@ -16,6 +16,37 @@ from bot.smile_execution import SmileExecution
 from bot.round_metrics import Round, group_rounds, summarize_rounds, account_metrics
 
 
+def ex_rights_adjustment(event: dict) -> Optional[tuple]:
+    """除權息事件 → (每股配發, 標準價係數)；資料不足以計算時回傳 None。
+
+    每股配發 = 前收盤價 − 除權息參考價，也就是日 K 在除權息日的理論跳空。
+    配股（權）的部分無法從 TWSE 資料拆出股數，一律視為以參考價折現的現金。
+    """
+    prev, ref = event.get("prev_close"), event.get("reference_price")
+    try:
+        prev, ref = float(prev), float(ref)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(prev) and math.isfinite(ref)) or ref <= 0 or prev <= ref:
+        return None
+    return prev - ref, ref / prev
+
+
+def load_ex_rights(db: StockDB, symbols: Sequence[str], *, start: str = "", end: str = "") -> dict:
+    """讀取各代號的除權息事件（依日期排序）；資料表不存在時回傳空表。"""
+    import sqlite3
+    from bot.ex_rights import load_events
+    out: dict = {}
+    for sym in sorted(set(symbols)):
+        try:
+            rows = load_events(db, sym, start=start, end=end)
+        except sqlite3.Error:
+            return {}
+        if rows:
+            out[sym] = rows
+    return out
+
+
 @dataclass
 class SmileSymbolResult:
     symbol: str
@@ -69,6 +100,11 @@ class SmileBacktestSummary:
     halted_date: Optional[str] = None  # 浮虧護欄觸發日；未觸發為 None
     buy_cost_total_twd: float = 0.0  # 全部成交買進的現金支出（含費用）
     rounds: List[Round] = field(default_factory=list)  # 已平倉回合；未平倉不計
+    # 除權息調整紀錄：applied＝已調整並入帳；skipped＝資料不足，當日暫停該檔訊號
+    distributions: list[dict] = field(default_factory=list)
+    distribution_total_twd: float = 0.0  # 入帳現金合計（已含在損益內）
+    # 有套用調整、但區間內查不到任何除權息事件的代號：可能真的沒配發，也可能是資料沒收錄
+    ex_rights_no_events: list[str] = field(default_factory=list)
 
     @property
     def unrealized_pnl_twd(self) -> float:
@@ -132,9 +168,11 @@ class SmileBacktestSummary:
 class SmileCurveBacktester:
     """日 K 微笑曲線回測。"""
 
-    def __init__(self, settings: Optional[Settings] = None, *, execution: Optional[SmileExecution] = None):
+    def __init__(self, settings: Optional[Settings] = None, *, execution: Optional[SmileExecution] = None,
+                 apply_ex_rights: bool = True):
         self.settings = settings or Settings()
         self.execution = execution or SmileExecution()
+        self.apply_ex_rights = apply_ex_rights
 
     def run_symbol(
         self,
@@ -160,18 +198,27 @@ class SmileCurveBacktester:
         try:
             histories = {sym: database.get_price_history(sym, start=start, end=end, ascending=True)
                          for sym in sorted(set(symbols))}
-            return self.run_histories(histories, start=start or "", end=end or "")
+            events = (load_ex_rights(database, list(histories), start=start or "", end=end or "")
+                      if self.apply_ex_rights else None)
+            return self.run_histories(histories, start=start or "", end=end or "", ex_rights=events)
         finally:
             if owns_db:
                 database.close()
 
-    def run_histories(self, histories: dict, *, start: str = "", end: str = "") -> SmileBacktestSummary:
+    def run_histories(self, histories: dict, *, start: str = "", end: str = "",
+                      ex_rights: Optional[dict] = None) -> SmileBacktestSummary:
         """One cash account. Signals at close, fills at the next observed session's open.
 
         Buy orders use only cash available BEFORE that morning's sales, avoiding an
         assumed same-auction sell/buy order. Ties are resolved by symbol then tier.
         Missing sessions retain orders; an invalid observed open cancels that order.
         Valuation is net liquidation value (including estimated exit fees/tax).
+
+        ex_rights: {symbol: [ex_rights_events rows]}. On the first bar on/after ex_date, before
+        that morning's orders: holdings receive (prev_close - reference_price) per share as cash,
+        their cost basis drops by the same amount, and the reference price is scaled by
+        reference_price / prev_close. Cash credited that morning does not fund that morning's buys.
+        Events that cannot be computed pause that symbol's signals for the day.
         """
         cap = float(self.settings.effective_fund_cap())
         if not self.execution.is_ideal:
@@ -206,7 +253,13 @@ class SmileCurveBacktester:
                                                  f"fee_discount={self.settings.broker_fee_discount}; "
                                                  f"min_fee={self.settings.broker_min_fee}; "
                                                  "收盤訊號→次日開盤；多檔共用現金；同日賣款不供開盤買單；"
-                                                 "代號排序分配；權益含出清滑價與費稅；成交假設見 execution"))
+                                                 "代號排序分配；權益含出清滑價與費稅；成交假設見 execution；"
+                                                 + ("除權息：配發於除權息日入帳、成本與標準價同步調整，配股視為以參考價折現"
+                                                    if ex_rights is not None else "除權息：未調整")))
+        if ex_rights is not None:
+            out.ex_rights_no_events = [s for s in engines if histories[s] and not ex_rights.get(s)]
+        event_queue = {s: sorted(ex_rights.get(s, []), key=lambda ev: str(ev["ex_date"]))
+                       for s in engines} if ex_rights else {}
         pending: dict[str, list[dict]] = {s: [] for s in engines}
         marks: dict[str, float] = {}
         previous_volumes: dict[str, float] = {}
@@ -223,8 +276,34 @@ class SmileCurveBacktester:
 
         for date, today in sorted(calendar.items()):
             opening_budget = min(out.cash, max(0.0, cap - exposure()))
+            paused: set = set()
             for sym in sorted(today):
                 e, bar = engines[sym], today[sym]
+                queue = event_queue.get(sym)
+                while queue and str(queue[0]["ex_date"])[:10] <= date:
+                    ev = queue.pop(0)
+                    if e.state.reference <= 0 and not e.open_lots:
+                        continue  # 尚未開始追蹤這檔，沒有東西要調整
+                    record = dict(symbol=sym, ex_date=str(ev["ex_date"])[:10], applied_date=date,
+                                  kind=ev.get("kind", ""), prev_close=ev.get("prev_close"),
+                                  reference_price=ev.get("reference_price"))
+                    adjustment = ex_rights_adjustment(ev)
+                    if adjustment is None:
+                        record.update(status="skipped", reason="missing_or_invalid_reference")
+                        paused.add(sym)
+                        out.distributions.append(record)
+                        continue
+                    per_share, factor = adjustment
+                    shares = sum(l.quantity * qty_multiplier(l.unit) for l in e.open_lots)
+                    reference_before = e.state.reference
+                    amount = e.apply_distribution(per_share, factor)
+                    out.cash += amount
+                    out.distribution_total_twd += amount
+                    marks[sym] = float(ev["reference_price"])  # 漲跌停與估值以參考價為基準
+                    record.update(status="applied", per_share=per_share, factor=factor, shares=shares,
+                                  amount_twd=amount, reference_before=reference_before,
+                                  reference_after=e.state.reference)
+                    out.distributions.append(record)
                 available_shares = self.execution.capacity(previous_volumes.get(sym))
                 orders, pending[sym] = pending[sym], []
                 sell_group_reason = "unset"
@@ -331,7 +410,9 @@ class SmileCurveBacktester:
                 if e.state.reference <= 0:
                     e._init_reference(close, date)
                     continue
-                if e.state.disabled:
+                if sym in paused:
+                    pending[sym] = []
+                elif e.state.disabled:
                     pending[sym] = []
                 elif close >= e.state.reference:
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity)

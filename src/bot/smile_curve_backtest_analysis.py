@@ -9,7 +9,9 @@ from typing import List, Literal, Optional, Sequence
 
 from bot.config import Settings
 from bot.smile_curve import SmileCurveEngine, SmileRoundTrip
-from bot.smile_curve_backtest import SmileCurveBacktester, SmileBacktestSummary
+from bot.smile_curve_backtest import (
+    SmileCurveBacktester, SmileBacktestSummary, ex_rights_adjustment, load_ex_rights,
+)
 from bot.stock_db import StockDB
 from bot.trade_cost import buy_cash_required, net_pnl_pct, net_pnl_twd
 
@@ -180,8 +182,22 @@ def run_scenario(
     if scenario.price_mode not in ("close", "ohlc"):
         raise ValueError(f"unsupported price mode: {scenario.price_mode}")
     engine = SmileCurveEngine(symbol, bt_settings)
+    # 與組合回測同一套除權息調整；這條路徑沒有現金帳戶，配發反映在各筆損益。
+    events = list(load_ex_rights(db, [symbol], start=scenario.start or "",
+                                 end=scenario.end or "").get(symbol, []))
     for bar in bars:
         trade_date = bar.date[:10]
+        pause = False
+        while events and str(events[0]["ex_date"])[:10] <= trade_date:
+            adjustment = ex_rights_adjustment(events.pop(0))
+            if engine.state.reference <= 0 and not engine.open_lots:
+                continue
+            if adjustment is None:
+                pause = True  # 資料不足：當日不產生訊號
+            else:
+                engine.apply_distribution(*adjustment)
+        if pause:
+            continue
         if scenario.price_mode == "ohlc":
             engine.on_bar_ohlc(
                 trade_date,
