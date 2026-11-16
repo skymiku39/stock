@@ -465,6 +465,12 @@ RSS_FEEDS: tuple[Feed, ...] = (
         ("cw", "https://www.cw.com.tw/RSS/cw_content.xml"),
         ("yahoo_tw_intl", "https://tw.stock.yahoo.com/rss?category=intl-markets"),
         ("yahoo_tw_tech", "https://tw.stock.yahoo.com/rss?category=tech"),
+        ("cnyes_tw_stock", "https://news.cnyes.com/rss/v1/news/category/tw_stock"),
+        ("storm_finance", "https://www.storm.mg/api/getRss/channel_id/2"),
+        ("inside", "https://www.inside.com.tw/feed/rss"),
+        ("techorange", "https://buzzorange.com/techorange/feed/"),
+        ("pts_news", "https://news.pts.org.tw/xml/newsfeed.xml"),
+        ("gvm", "https://www.gvm.com.tw/rss"),
     )),
     *_feeds("us", "en", (
         ("cnbc_top", _CNBC + "100003114"),
@@ -495,6 +501,9 @@ RSS_FEEDS: tuple[Feed, ...] = (
         ("techcrunch", "https://techcrunch.com/feed/"),
         ("eetimes", "https://www.eetimes.com/feed/"),
         ("tomshardware", "https://www.tomshardware.com/feeds/all"),
+        ("axios", "https://api.axios.com/feed/"),
+        ("arstechnica", "https://feeds.arstechnica.com/arstechnica/index"),
+        ("theverge", "https://www.theverge.com/rss/index.xml"),
     )),
     *_feeds("uk", "en", (
         ("bbc_business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
@@ -508,6 +517,8 @@ RSS_FEEDS: tuple[Feed, ...] = (
         ("economist_asia", "https://www.economist.com/asia/rss.xml"),
         ("sky_business", "https://feeds.skynews.com/feeds/rss/business.xml"),
         ("boe_news", "https://www.bankofengland.co.uk/rss/news"),
+        ("theregister", "https://www.theregister.com/headlines.atom"),
+        ("independent_business", "https://www.independent.co.uk/news/business/rss"),
     )),
     *_feeds("eu", "en", (
         ("dw_business", "https://rss.dw.com/rdf/rss-en-bus"),
@@ -516,11 +527,20 @@ RSS_FEEDS: tuple[Feed, ...] = (
         ("france24_business", "https://www.france24.com/en/business/rss"),
         ("politico_eu", "https://www.politico.eu/feed/"),
         ("ecb_press", "https://www.ecb.europa.eu/rss/press.html"),
+        ("lemonde_en", "https://www.lemonde.fr/en/rss/une.xml"),
     )),
     *_feeds("asia", "en", (
         ("nikkei_asia", "https://asia.nikkei.com/rss/feed/nar"),
         ("scmp_business", "https://www.scmp.com/rss/92/feed"),
         ("scmp_china", "https://www.scmp.com/rss/4/feed"),
+        # 台灣的英文媒體放在 asia：tw 區的來源一律以中文名稱比對。
+        ("focustaiwan", "https://feeds.feedburner.com/rsscna/engnews"),
+        ("taipeitimes", "https://www.taipeitimes.com/xml/index.rss"),
+        ("japantimes", "https://www.japantimes.co.jp/feed/"),
+        ("yonhap_en", "https://en.yna.co.kr/RSS/news.xml"),
+        ("cna_sg_business",
+         "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6936"),
+        ("straitstimes_business", "https://www.straitstimes.com/news/business/rss.xml"),
     )),
 )
 
