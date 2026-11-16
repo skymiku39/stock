@@ -531,7 +531,6 @@ RSS_FEEDS: tuple[Feed, ...] = (
         ("axios", "https://api.axios.com/feed/"),
         ("arstechnica", "https://feeds.arstechnica.com/arstechnica/index"),
         ("theverge", "https://www.theverge.com/rss/index.xml"),
-        ("semiengineering", "https://semiengineering.com/feed/"),
     )),
     *_feeds("uk", "en", (
         ("bbc_business", "https://feeds.bbci.co.uk/news/business/rss.xml"),

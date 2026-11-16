@@ -469,7 +469,7 @@ def test_research_passes_english_name(monkeypatch, tmp_path: Path):
 
 def test_rss_feed_catalog():
     names = [f.name for f in ws.RSS_FEEDS]
-    assert len(names) == len(set(names)) == 94
+    assert len(names) == len(set(names)) == 93
     assert all(f.region in {"tw", "us", "uk", "eu", "asia", "cn"} and f.lang in {"zh", "en"}
                for f in ws.RSS_FEEDS)
     official = {f.name for f in ws.RSS_FEEDS if f.stance == "official"}
