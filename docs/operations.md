@@ -109,6 +109,57 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
 正式歷史資料不會因程式升級而自動重寫。需要回填時先備份，在資料副本驗證
 結果；沒有原始輸入證明的內容維持未驗證，不能靠猜測補造證據 ID。
 
+## 〇・三、每日資料收集與新鮮度檢查
+
+排程啟用 `SCHEDULER_DAILY_ALL_ENABLED` 時有三個相關工作：
+
+| 工作 | 間隔 | 需要模型 | 內容 |
+|---|---|---|---|
+| `daily_inputs` | 5 分鐘 | 否 | 鉅亨新聞（日快取累積）、RSS 存檔、主要追蹤與擴充名單的日 K、新鮮度檢查 |
+| `collection` | 60 分鐘 | 否 | ETF 持股、籌碼、官方財務（月營收、本益比、季報、股利）；當天收集完成後直接結束 |
+| `research` | 依設定 | 是 | 個股研究；模型額度被擋時排程不會啟動它 |
+
+**擴充名單**是追蹤的 ETF 本身、各 ETF 最新一期的台股持股，加上 `config/backtest_universe.json`。
+`daily_inputs` 以主要追蹤標的（`.env` 的 `SYMBOLS` 與觀察清單）最新的來源日為目標日，
+已到目標日的不連線；落後的逐檔抓，每輪最多 240 秒，沒抓完下一輪接續。
+結果在 `data/daily_research/<日期>/daily-inputs.json` 的 `extended`：
+
+- `pending`：還沒輪到，下一輪會抓。
+- `behind`：抓過但來源日仍較舊（停牌、下市），同一個目標日不重抓。
+- `failed`：同一個目標日已失敗的標的與原因；每檔最多試三次。
+
+海外持股（例如 `NVDA US`）沒有 TWSE／TPEx 來源，不在擴充名單內。
+新納入的標的先只有近一個月日 K；較早的歷史由 `history_fetch` 佇列補：佇列跑完後每天會把
+擴充名單併入一次，並依「月份由近到遠、同一個月內逐檔」的順序回補。
+
+**RSS 存檔**寫在 `data/news/rss_<日期>.json`，依網址去重、累積當天看過的項目；
+每個來源的狀態在同一個檔案的 `feeds`。手動執行：
+
+```powershell
+.venv\Scripts\python.exe -m bot.rss_archive --root C:\skymiku\stock
+```
+
+**新鮮度檢查**直接看資料本身的最新日期，不看工作有沒有回報成功：
+
+```powershell
+.venv\Scripts\python.exe -m bot.data_freshness --root C:\skymiku\stock
+```
+
+結束碼 0 全部正常、1 有警告、2 有落後。每輪 `daily_inputs` 也會把結果寫到
+`data/freshness_status.json`，並附在當天的 `summary.txt`。假日無法從資料判斷，
+所以落後一個工作日只算警告。
+
+只想補資料、不想動用模型時：
+
+```powershell
+.venv\Scripts\python.exe -m bot.daily_research --root C:\skymiku\stock --collect-only
+```
+
+注意：排程器是常駐程序，`collection` 這類**新增的工作**要重啟排程器後才會出現；
+既有工作的程式改動則在下一次執行時就生效，因為每次都是另開程序。
+
+---
+
 ## 一、每日操作流程
 
 ### 盤前（08:00 ~ 09:00）
