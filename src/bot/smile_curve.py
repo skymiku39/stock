@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Sequence, Tuple
 
@@ -74,6 +75,7 @@ class SmileCycleState:
     bottom_dca_done_dates: set[str] = field(default_factory=set)
     cycle_index: int = 0
     disabled: bool = False  # 單檔停損後停用：不再買進，需人工重啟
+    cooldown_until: str = ""  # 到期認賠出場後的冷卻期：此日期（YYYY-MM-DD）之前不買
 
 
 def parse_smile_buy_tiers(raw: str) -> List[SmileBuyTier]:
@@ -120,6 +122,11 @@ class SmileCurveEngine:
         self.tiers = parse_smile_buy_tiers(
             getattr(settings, "smile_buy_tiers", "1:1,3:2,5:3,8:4"),
         )
+        min_first = float(getattr(settings, "smile_min_first_tier_pct", 0.0))
+        if min_first > 0 and self.tiers[0].drop_pct + 1e-9 < min_first:
+            raise ValueError(
+                f"SMILE_BUY_TIERS 第一階 {self.tiers[0].drop_pct:g}% 小於 "
+                f"SMILE_MIN_FIRST_TIER_PCT={min_first:g}%")
         self.base_lot = max(1, int(getattr(settings, "smile_base_lot", 1)))
         self.sell_tax = (.001 if symbol == "0050" else
                          float(getattr(settings, "smile_regular_tax_rate", 0.003)))
@@ -205,6 +212,43 @@ class SmileCurveEngine:
         if pct <= 0 or not lots:
             return False
         return self.unrealized_pnl(price, lots) <= -pct / 100.0 * self._lot_cost(lots)
+
+    def take_profit_hit(self, price: float, lots=None) -> bool:
+        """出場條件。未設停利：回到標準價且整個部位有淨利；設了停利：淨利達持倉成本的該比例。"""
+        lots = list(self.state.lots if lots is None else lots)
+        if not lots:
+            return False
+        pct = float(getattr(self.settings, "smile_take_profit_pct", 0.0))
+        if pct <= 0:
+            return price >= self.state.reference and self._position_profitable(price, lots)
+        return self.unrealized_pnl(price, lots) >= pct / 100.0 * self._lot_cost(lots)
+
+    @staticmethod
+    def _date(value) -> Optional[dt.date]:
+        try:
+            return dt.date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None
+
+    def hold_expired(self, date: str) -> bool:
+        """持有到期：自該輪第一批成交日起算的日曆天數 >= SMILE_MAX_HOLD_DAYS。"""
+        limit = int(getattr(self.settings, "smile_max_hold_days", 0))
+        today = self._date(date)
+        starts = [d for d in (self._date(l.entry_date) for l in self.state.lots) if d]
+        if limit <= 0 or today is None or not starts:
+            return False
+        return (today - min(starts)).days >= limit
+
+    def in_cooldown(self, date: str) -> bool:
+        return bool(self.state.cooldown_until) and str(date)[:10] < self.state.cooldown_until
+
+    def finish_expiry(self, price: float, date: str, pnl_twd: float) -> SmileAction:
+        """到期出清後：重設標準價（不停用）；這一輪認賠時啟動再進場冷卻。"""
+        days = int(getattr(self.settings, "smile_reentry_cooldown_days", 0))
+        today = self._date(date)
+        if days > 0 and pnl_twd < 0 and today is not None:
+            self.state.cooldown_until = (today + dt.timedelta(days=days)).isoformat()
+        return self._reset_cycle(price, date)
 
     def _drop_pct(self, price: float) -> float:
         ref = self.state.reference
@@ -335,6 +379,8 @@ class SmileCurveEngine:
         return actions
 
     def bottom_dca_allowed(self) -> bool:
+        if not getattr(self.settings, "smile_bottom_dca_enabled", True):
+            return False
         max_days = int(getattr(self.settings, "smile_max_bottom_dca_days", 0))
         return max_days == 0 or len(self.state.bottom_dca_done_dates) < max_days
 
@@ -416,10 +462,18 @@ class SmileCurveEngine:
             return actions
         if not self.halted and self._unrealized_loss_breached(low):
             self.halted = True
-        if low < ref and not self.halted and not self.state.disabled:
+        expiring = self.hold_expired(date)
+        if (low < ref and not self.halted and not self.state.disabled
+                and not expiring and not self.in_cooldown(date)):
             actions.extend(self._dip_buy(date, low))
-        if high >= ref:
+        if self.take_profit_hit(high):
             actions.extend(self._rebound_sell(date, high))
+        if expiring and self.state.lots:
+            pnl = self.unrealized_pnl(close)
+            for lot in list(self.state.lots):
+                actions.append(self._record_sell(lot, close, date, "expiry"))
+            self.state.lots = []
+            actions.append(self.finish_expiry(close, date, pnl))
         self.trail_reference(close)
         return actions
 

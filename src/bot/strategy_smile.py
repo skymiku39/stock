@@ -29,6 +29,8 @@ class SmileCurveStrategy(BaseStrategy):
         self.engines: dict[str, SmileCurveEngine] = {}
         self._smile_intent: dict[str, tuple[int | None, str]] = {}
         self._smile_stop_selling: set[str] = set()  # 代號的在途賣單屬於單檔停損
+        # 代號的在途賣單屬於持有到期：[送單當天日期, 已成交部分的累計淨損益]
+        self._smile_expiry_selling: dict[str, list] = {}
         self._reference_saved_at = float("-inf")
         self._smile_lock = self._submission_lock
         self._smile_state_path = self._state_root / "data" / "smile_state.json"
@@ -42,16 +44,18 @@ class SmileCurveStrategy(BaseStrategy):
                     loaded[symbol] = (row["reference"], set(row["tiers_done"]),
                                       set(row["bottom_dates"]),
                                       [SmileLot(**lot) for lot in row["lots"]],
-                                      bool(row.get("disabled", False)))
+                                      bool(row.get("disabled", False)),
+                                      str(row.get("cooldown_until", "") or ""))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
                 path = self._smile_state_path.resolve()
                 raise RuntimeError(
                     f"smile_state.json 損毀：{path}（{type(exc).__name__}: {exc}）。"
                     "可從同目錄 smile_state.json.bak 還原（最後一次成功寫入前的版本）；"
                     "若確定沒有微笑持倉與未結委託，可刪除此檔讓策略重建標準價") from exc
-            for symbol, (ref, tiers, dates, lots, disabled) in loaded.items():
+            for symbol, (ref, tiers, dates, lots, disabled, cooldown) in loaded.items():
                 e = self._engine(symbol)
                 e.state.disabled = disabled
+                e.state.cooldown_until = cooldown
                 if disabled:
                     self.logger.warning("%s 已因單檔停損停用，不會再買進；重新啟用見 docs/operations.md 4.6", symbol)
                 e.state.reference = ref
@@ -70,7 +74,7 @@ class SmileCurveStrategy(BaseStrategy):
         self._smile_state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {s: dict(reference=e.state.reference, tiers_done=sorted(e.state.tiers_done),
                            bottom_dates=sorted(e.state.bottom_dca_done_dates),
-                           disabled=e.state.disabled,
+                           disabled=e.state.disabled, cooldown_until=e.state.cooldown_until,
                            lots=[asdict(lot) for lot in e.state.lots]) for s, e in self.engines.items()}
         temp = self._smile_state_path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
@@ -117,8 +121,12 @@ class SmileCurveStrategy(BaseStrategy):
                     e.state.bottom_dca_done_dates.add(day)
             else:
                 remaining = quantity
+                expiry = self._smile_expiry_selling.get(symbol)
                 for lot in list(e.state.lots):
                     sold = min(remaining, lot.quantity)
+                    if expiry is not None and sold:
+                        expiry[1] += net_pnl_twd(lot.entry_price, price, sold, lot.unit,
+                                                 settings=self.settings, sell_tax_rate=e.sell_tax)
                     lot.quantity -= sold
                     remaining -= sold
                     if not lot.quantity:
@@ -130,6 +138,12 @@ class SmileCurveStrategy(BaseStrategy):
                         self.logger.warning(
                             "%s 單檔停損已出清並停用，不會再買進；重新啟用見 docs/operations.md 4.6",
                             symbol)
+                    elif symbol in self._smile_expiry_selling:
+                        day, pnl = self._smile_expiry_selling.pop(symbol)
+                        e.finish_expiry(price, day, pnl)
+                        self.logger.warning(
+                            "%s 持有到期已出清（淨損益 %.0f 元）%s", symbol, pnl,
+                            f"，{e.state.cooldown_until} 之前不再買進" if e.in_cooldown(day) else "")
                     else:
                         e._reset_cycle(price, "")
             self._save_smile_state()
@@ -191,11 +205,18 @@ class SmileCurveStrategy(BaseStrategy):
             if self._has_pending(symbol):
                 return
             pos = self.positions.get(symbol)
+            day = tick.ts.date().isoformat()
+            holding = bool(pos and e.open_lots)
+            # 出場檢查順序：停利（或回到標準價且有淨利）→ 單檔停損 → 持有到期 → 買進。
+            if holding and e.take_profit_hit(price):
+                self._smile_stop_selling.discard(symbol)
+                self._smile_expiry_selling.pop(symbol, None)
+                self._place_stop_sell(symbol, pos.quantity, "smile",
+                                      limit_price=round_tick(price, True, symbol))
+                return
             if price >= e.state.reference:
-                if (pos and e.open_lots and e._position_profitable(price)):
-                    self._smile_stop_selling.discard(symbol)
-                    self._place_stop_sell(symbol, pos.quantity, "smile",
-                                          limit_price=round_tick(price, True, symbol))
+                if holding and e.hold_expired(day):
+                    self._place_expiry_sell(symbol, pos, price, day)
                 elif not pos and e.trail_reference(price):
                     # 新高可能每個 tick 都出現；最多每分鐘落盤一次，成交時另會儲存。
                     if time.monotonic() - self._reference_saved_at >= 60:
@@ -210,18 +231,18 @@ class SmileCurveStrategy(BaseStrategy):
                                              limit_price=round_tick(price, False, symbol)):
                     self._smile_stop_selling.discard(symbol)
                 return
-            if e.state.disabled:
+            if holding and e.hold_expired(day):
+                self._place_expiry_sell(symbol, pos, price, day)
+                return
+            if e.state.disabled or e.in_cooldown(day):
                 return
             if self._unrealized_loss_guard():
                 return
             drop = e._drop_pct(price)
-            day = tick.ts.date().isoformat()
-            max_days = self.settings.smile_max_bottom_dca_days
             candidates = [(idx, tier.multiplier) for idx, tier in enumerate(e.tiers)
                           if idx not in e.state.tiers_done and drop + 1e-9 >= tier.drop_pct]
             if (not candidates and drop + 1e-9 >= e.tiers[-1].drop_pct
-                    and day not in e.state.bottom_dca_done_dates
-                    and (max_days == 0 or len(e.state.bottom_dca_done_dates) < max_days)):
+                    and day not in e.state.bottom_dca_done_dates and e.bottom_dca_allowed()):
                 candidates = [(None, 1)]
             if candidates:
                 tier, multiplier = candidates[0]
@@ -231,6 +252,15 @@ class SmileCurveStrategy(BaseStrategy):
                     self._smile_intent[symbol] = (tier, day)
                     if not self._place_buy(symbol, price, qty, "smile", unit=unit):
                         self._smile_intent.pop(symbol, None)
+
+    def _place_expiry_sell(self, symbol, pos, price, day):
+        """持有到期：整個部位以現價限價賣出，不論賺賠；出清後重設標準價，不停用。"""
+        self._smile_stop_selling.discard(symbol)
+        entry = self._smile_expiry_selling.setdefault(symbol, [day, 0.0])
+        if not self._place_stop_sell(symbol, pos.quantity, "smile_expiry",
+                                     limit_price=round_tick(price, False, symbol)):
+            if entry[1] == 0.0 and symbol in self.positions:
+                self._smile_expiry_selling.pop(symbol, None)
 
     def _position_closure(self):
         # Smile is a swing strategy; daily closure must never sell losing batches.

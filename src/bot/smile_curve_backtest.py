@@ -268,6 +268,10 @@ class SmileCurveBacktester:
                                                  f"trailing_reference={self.settings.smile_trailing_reference}; "
                                                  f"symbol_stop_loss_pct={self.settings.smile_symbol_stop_loss_pct}; "
                                                  f"max_symbol_fund_pct={self.settings.smile_max_symbol_fund_pct}; "
+                                                 f"take_profit_pct={self.settings.smile_take_profit_pct}; "
+                                                 f"max_hold_days={self.settings.smile_max_hold_days}; "
+                                                 f"reentry_cooldown_days={self.settings.smile_reentry_cooldown_days}; "
+                                                 f"bottom_dca={self.settings.smile_bottom_dca_enabled}; "
                                                  f"tax={self.settings.smile_regular_tax_rate}; "
                                                  f"fee_discount={self.settings.broker_fee_discount}; "
                                                  f"min_fee={self.settings.broker_min_fee}; "
@@ -306,6 +310,10 @@ class SmileCurveBacktester:
 
         def exposure():
             return sum(cost(lot) for e in engines.values() for lot in e.open_lots)
+
+        def expiry_orders(e, date):
+            return [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity, expiry=True)
+                    for l in e.open_lots]
 
         for date, today in sorted(calendar.items()):
             opening_budget = min(out.cash, max(0.0, cap - exposure()))
@@ -357,6 +365,7 @@ class SmileCurveBacktester:
                 available_shares = self.execution.capacity(previous_volumes.get(sym))
                 orders, pending[sym] = pending[sym], []
                 sell_group_reason = "unset"
+                realized_before = e.realized_pnl_twd
                 for order in orders:
                     log = {k: v for k, v in order.items() if k != "lot"}
                     log.update(symbol=sym, execution_date=date, status="cancelled", filled_quantity=0)
@@ -379,10 +388,12 @@ class SmileCurveBacktester:
                         if sell_group_reason == "unset":
                             group = [o["lot"] for o in orders if o["side"] == "sell"]
                             group_shares = sum(l.quantity * qty_multiplier(l.unit) for l in group)
-                            is_stop = any(o.get("stop") for o in orders if o["side"] == "sell")
+                            # 停損與到期是強制出場，不要求開盤價仍有淨利。
+                            forced = any(o.get("stop") or o.get("expiry")
+                                         for o in orders if o["side"] == "sell")
                             if group_shares > available_shares:
                                 sell_group_reason = "volume_limit_whole_position_sell"
-                            elif not is_stop and not e._position_profitable(px, group):
+                            elif not forced and not e._position_profitable(px, group):
                                 sell_group_reason = "unprofitable_open"
                             else:
                                 sell_group_reason = None
@@ -391,6 +402,7 @@ class SmileCurveBacktester:
                             continue
                         lot = order["lot"]
                         e._record_sell(lot, px, date, "stop_loss_next_open" if order.get("stop")
+                                       else "expiry_next_open" if order.get("expiry")
                                        else "close_signal_next_open")
                         e.state.lots.remove(lot)
                         out.cash += sell_cash_received(px, lot.quantity, lot.unit,
@@ -401,6 +413,8 @@ class SmileCurveBacktester:
                             if order.get("stop"):
                                 e.state.disabled = True
                                 results[sym].stopped_date = date
+                            elif order.get("expiry"):
+                                e.finish_expiry(px, date, e.realized_pnl_twd - realized_before)
                             else:
                                 e._reset_cycle(px, date)
                     else:
@@ -465,17 +479,26 @@ class SmileCurveBacktester:
                     pending[sym] = []
                 elif e.state.disabled:
                     pending[sym] = []
-                elif close >= e.state.reference:
+                elif e.take_profit_hit(close):
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity)
-                                    for l in e.open_lots] if e._position_profitable(close) else []
-                    e.trail_reference(close)
-                    # 隨機進場不看跌幅，所以價格在標準價之上也能進場（沒有賣單排隊時）。
-                    may_buy = random_entry is not None and not pending[sym]
+                                    for l in e.open_lots]
+                elif close >= e.state.reference:
+                    if e.hold_expired(date):
+                        pending[sym] = expiry_orders(e, date)
+                    else:
+                        pending[sym] = []
+                        e.trail_reference(close)
+                        # 隨機進場不看跌幅，所以價格在標準價之上也能進場。
+                        may_buy = random_entry is not None
                 elif e.stop_loss_breached(close):
                     pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity,
                                          stop=True) for l in e.open_lots]
+                elif e.hold_expired(date):
+                    pending[sym] = expiry_orders(e, date)
                 else:
                     may_buy = True
+                if may_buy and e.in_cooldown(date):
+                    may_buy = False
                 if may_buy and out.halted_date is None and random_entry is not None:
                     for idx, tier in enumerate(e.tiers):
                         if idx not in e.state.tiers_done and random_entry.fires(idx):

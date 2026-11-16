@@ -259,9 +259,16 @@ class Settings(BaseSettings):
     smile_trailing_reference: bool = True  # 空手時標準價跟著新高上移；手動固定標準價的代號不跟
     smile_symbol_stop_loss_pct: float = 25.0  # 單檔部位淨損 >= 持倉成本此 % 即全賣並停用該檔（人工重啟）；0 停用
     smile_max_symbol_fund_pct: float = 0.0  # 單檔持倉成本上限占資金上限 %；0 不限（仍受 MAX_LOT_PER_SYMBOL）
+    smile_take_profit_pct: float = 0.0  # 整個部位淨利 >= 持倉成本此 % 即全賣；0＝回到標準價且有淨利才賣
+    smile_max_hold_days: int = 0  # 自該輪第一批成交日起算的日曆天數，到期全賣（不論賺賠）；0 停用
+    smile_reentry_cooldown_days: int = 0  # 到期認賠出場後，這麼多日曆天內該檔不買；0 停用
+    smile_bottom_dca_enabled: bool = True  # 跌破最深階後是否每日加碼
+    smile_min_first_tier_pct: float = 0.0  # 階梯第一階跌幅下限 %，小於此值即拒絕啟動；0 不檢查
 
     @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days",
-                     "smile_symbol_stop_loss_pct", "smile_max_symbol_fund_pct")
+                     "smile_symbol_stop_loss_pct", "smile_max_symbol_fund_pct",
+                     "smile_take_profit_pct", "smile_max_hold_days",
+                     "smile_reentry_cooldown_days", "smile_min_first_tier_pct")
     @classmethod
     def _validate_smile_guards(cls, v):
         if v < 0:
