@@ -652,3 +652,36 @@ def test_bottom_dca_switch_stops_daily_adds(tmp_path):
     for price in (99, 97, 96, 95):
         tick(strategy, price)
     assert len(api.trades) == 2
+
+
+def test_equity_sizing_grows_after_profit_and_survives_restart(tmp_path):
+    strategy, api = setup(tmp_path, smile_reference_prices={"0050": 100.0}, max_fund=100000,
+                          odd_lot_max_shares=999, smile_buy_tiers="1:1,50:1",
+                          smile_initial_fund=5000, smile_unit_equity_pct=50,
+                          smile_symbol_stop_loss_pct=0, smile_max_unrealized_loss_pct=0)
+    tick(strategy, 100)
+    tick(strategy, 99)  # 5000 × 50% ÷ 99 → 25 股
+    assert api.trades[0].order.quantity == 25
+    tick(strategy, 106)  # 回到標準價之上且有淨利：全賣
+    assert not strategy.positions
+    realized = strategy._smile_account.realized_pnl_twd
+    assert 150 < realized <= 175
+    saved = json.loads(strategy._smile_state_path.read_text(encoding="utf-8"))
+    assert saved["_account"]["realized_pnl_twd"] == pytest.approx(realized)
+    restored = _strategy(strategy.settings, strategy.broker, tmp_path)
+    restored._run_startup_safety_and_restore()
+    assert restored._smile_account.realized_pnl_twd == pytest.approx(realized)
+    assert set(restored.engines) == {"0050"}  # 帳戶資料不會被當成代號
+    tick(restored, 99)  # 權益約 5170 → 26 股
+    assert api.trades[-1].order.quantity == 26
+    assert str(api.trades[-1].order.action).endswith("Buy")
+
+
+def test_equity_cap_limits_buying_below_max_fund(tmp_path):
+    strategy, api = setup(tmp_path, smile_reference_prices={"0050": 100.0}, max_fund=100000,
+                          odd_lot_max_shares=999, smile_buy_tiers="1:1,50:1",
+                          smile_initial_fund=2000, smile_unit_equity_pct=500,
+                          smile_symbol_stop_loss_pct=0, smile_max_unrealized_loss_pct=0)
+    tick(strategy, 100)
+    tick(strategy, 99)  # 想買 101 股（約 1 萬元），但權益只有 2000
+    assert api.trades[0].order.quantity == 20

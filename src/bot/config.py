@@ -264,11 +264,14 @@ class Settings(BaseSettings):
     smile_reentry_cooldown_days: int = 0  # 到期認賠出場後，這麼多日曆天內該檔不買；0 停用
     smile_bottom_dca_enabled: bool = True  # 跌破最深階後是否每日加碼
     smile_min_first_tier_pct: float = 0.0  # 階梯第一階跌幅下限 %，小於此值即拒絕啟動；0 不檢查
+    smile_initial_fund: int = 0  # 複利的起始資金；權益＝起始資金＋累計已實現損益，資金上限取 min(MAX_FUND, 權益)；0 停用
+    smile_unit_equity_pct: float = 0.0  # 每階金額＝權益 × 此 % × 該階倍數；0＝沿用 SMILE_BASE_LOT（需搭配 SMILE_INITIAL_FUND）
 
     @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days",
                      "smile_symbol_stop_loss_pct", "smile_max_symbol_fund_pct",
                      "smile_take_profit_pct", "smile_max_hold_days",
-                     "smile_reentry_cooldown_days", "smile_min_first_tier_pct")
+                     "smile_reentry_cooldown_days", "smile_min_first_tier_pct",
+                     "smile_initial_fund", "smile_unit_equity_pct")
     @classmethod
     def _validate_smile_guards(cls, v):
         if v < 0:

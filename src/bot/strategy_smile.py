@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict
 
 from bot.models import MarketTick, qty_multiplier
-from bot.smile_curve import SmileCurveEngine, SmileLot
+from bot.smile_curve import SmileAccount, SmileCurveEngine, SmileLot, smile_fund_cap
 from bot.smile_execution import round_tick
 from bot.strategy import BaseStrategy
 from bot.trade_cost import max_affordable_qty, net_pnl_twd
@@ -27,6 +27,7 @@ class SmileCurveStrategy(BaseStrategy):
         if auto_merge_was_on:
             self.logger.warning("微笑策略不支援觀察池自動併入代號，已強制關閉 symbols_auto_merge")
         self.engines: dict[str, SmileCurveEngine] = {}
+        self._smile_account = SmileAccount()  # 累計已實現損益，所有代號共用，存進 smile_state.json
         self._smile_intent: dict[str, tuple[int | None, str]] = {}
         self._smile_stop_selling: set[str] = set()  # 代號的在途賣單屬於單檔停損
         # 代號的在途賣單屬於持有到期：[送單當天日期, 已成交部分的累計淨損益]
@@ -40,6 +41,8 @@ class SmileCurveStrategy(BaseStrategy):
             try:
                 data = json.loads(self._smile_state_path.read_text(encoding="utf-8"))
                 loaded = {}
+                self._smile_account.realized_pnl_twd = float(
+                    data.pop("_account", {}).get("realized_pnl_twd", 0.0))
                 for symbol, row in data.items():
                     loaded[symbol] = (row["reference"], set(row["tiers_done"]),
                                       set(row["bottom_dates"]),
@@ -68,6 +71,7 @@ class SmileCurveStrategy(BaseStrategy):
             raise ValueError(f"不支援的微笑策略代號：{symbol}。支援範圍：普通股 4 碼數字（非 0 開頭）與 0050")
         if symbol not in self.engines:
             self.engines[symbol] = SmileCurveEngine(symbol, self.settings)
+            self.engines[symbol].account = self._smile_account
         return self.engines[symbol]
 
     def _save_smile_state(self):
@@ -76,6 +80,7 @@ class SmileCurveStrategy(BaseStrategy):
                            bottom_dates=sorted(e.state.bottom_dca_done_dates),
                            disabled=e.state.disabled, cooldown_until=e.state.cooldown_until,
                            lots=[asdict(lot) for lot in e.state.lots]) for s, e in self.engines.items()}
+        payload["_account"] = dict(realized_pnl_twd=self._smile_account.realized_pnl_twd)
         temp = self._smile_state_path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8")
         if self._smile_state_path.exists():
@@ -124,9 +129,12 @@ class SmileCurveStrategy(BaseStrategy):
                 expiry = self._smile_expiry_selling.get(symbol)
                 for lot in list(e.state.lots):
                     sold = min(remaining, lot.quantity)
-                    if expiry is not None and sold:
-                        expiry[1] += net_pnl_twd(lot.entry_price, price, sold, lot.unit,
-                                                 settings=self.settings, sell_tax_rate=e.sell_tax)
+                    if sold:
+                        pnl = net_pnl_twd(lot.entry_price, price, sold, lot.unit,
+                                          settings=self.settings, sell_tax_rate=e.sell_tax)
+                        self._smile_account.realized_pnl_twd += pnl
+                        if expiry is not None:
+                            expiry[1] += pnl
                     lot.quantity -= sold
                     remaining -= sold
                     if not lot.quantity:
@@ -153,7 +161,7 @@ class SmileCurveStrategy(BaseStrategy):
 
     def _quantity(self, symbol, price, multiplier):
         unit = "share" if self.settings.use_odd_lot else "lot"
-        want = self.settings.smile_base_lot * multiplier
+        want = self._engine(symbol).tier_quantity(price, multiplier, unit)
         held = self.positions.get(symbol)
         if held is not None and held.unit != unit:
             return 0, unit
@@ -163,6 +171,11 @@ class SmileCurveStrategy(BaseStrategy):
         if unit == "share":
             want = min(want, self.settings.odd_lot_max_shares)
         budget = self.risk.effective_fund_remaining()
+        if self.settings.smile_initial_fund > 0:
+            # 複利：再受 min(MAX_FUND, 權益) 限制；RiskGuard 的 MAX_FUND 硬上限照舊。
+            held_cost = sum(eng._lot_cost(eng.state.lots) for eng in self.engines.values())
+            budget = min(budget, max(0.0, smile_fund_cap(self.settings, self._smile_account)
+                                     - held_cost))
         room = self._engine(symbol).symbol_fund_room()
         if room is not None:
             budget = min(budget, room)
@@ -179,7 +192,7 @@ class SmileCurveStrategy(BaseStrategy):
                         sell_tax_rate=eng.sell_tax)
             for s, eng in self.engines.items() for lot in eng.state.lots
         )
-        limit = pct / 100.0 * float(self.settings.effective_fund_cap())
+        limit = pct / 100.0 * smile_fund_cap(self.settings, self._smile_account)
         if pnl > -limit:
             return False
         if not self.risk.is_kill_switch_engaged():
