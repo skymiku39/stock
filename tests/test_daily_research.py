@@ -205,3 +205,24 @@ def test_model_retry_deadline_reaches_daily_status_and_clears_on_recovery(tmp_pa
     state = json.loads((out / 'status.json').read_text(encoding='utf-8'))
     assert not state['model_blocked'] and state['outcome'] == 'complete'
     assert state['next_retry_epoch'] == 0 and not state.get('error')
+
+
+def test_collect_only_runs_collection_without_model_and_scheduler_has_the_job(tmp_path, monkeypatch):
+    from bot import data_pipeline, verified_research_batch
+    from bot.scheduler import Scheduler
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "collect_daily_inputs", lambda *a, **k: {"complete": True})
+    monkeypatch.setattr(daily, "write_daily_summary", lambda *a: None)
+    runs = []
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", lambda cfg: runs.append(cfg) or SimpleNamespace(
+        run_id="r1", errors=[], warnings=[], focus_tickers=["2330"]))
+    official = [["mops down"], []]
+    monkeypatch.setattr(daily, "refresh_official", lambda root: official.pop(0))
+    monkeypatch.setattr(verified_research_batch, "main", lambda argv: pytest.fail("model must not be called"))
+    assert daily.run_daily(tmp_path, collect_only=True) == 3
+    assert daily.run_daily(tmp_path, collect_only=True) == 0
+    assert len(runs) == 1 and not runs[0].run_llm_analysis
+    assert daily.run_daily(tmp_path, collect_only=True) == 0 and not official
+    s = Scheduler(Settings(_env_file=None, scheduler_daily_all_enabled=True), project_root=tmp_path)
+    job = next(j for j in s.jobs if j.name == "collection")
+    assert job.module == "bot.daily_research" and job.extra_args[-1] == "--collect-only"

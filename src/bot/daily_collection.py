@@ -5,6 +5,8 @@ import datetime as dt
 import hashlib
 import json
 import math
+import re
+import time
 from pathlib import Path
 
 from bot.news_fetcher import fetch_today_news, load_cached_news_only
@@ -52,9 +54,9 @@ def collect_news(root, date):
                           for i in today.values()]}
 
 
-def collect_price(root, ticker):
+def collect_price(root, ticker, months=1):
     started = now_tw().replace(microsecond=0)
-    fetched = fetch_recent_kline(ticker, months=1, root=root, incremental=True)
+    fetched = fetch_recent_kline(ticker, months=months, root=root, incremental=True)
     cached = load_kline_from_db(ticker, months=1, root=root)
     if fetched.empty or cached.empty:
         raise ValueError("price fetch or database readback is empty")
@@ -82,6 +84,108 @@ def collect_price(root, ticker):
     return {"status": "ok", "collected_at": now_tw().isoformat(), "ticker": ticker,
             "source_date": bar.date, "close": bar.close, "source_url": source.url,
             "source_document_id": source.document_id, "retrieved_at": bar.retrieved_at}
+
+# 擴充名單：追蹤的 ETF 本身、各 ETF 最新一期的台股持股、回測名單。
+# 海外持股（如 "NVDA US"）沒有 TWSE／TPEx 日 K 來源，不在此收。
+_TW_SYMBOL = re.compile(r"^\d{4,6}[A-Z]?$")
+EXTENDED_BUDGET_SECONDS = 240      # 每次執行最多花在擴充名單的時間；沒抓完下次接續
+EXTENDED_DELAY_SECONDS = 2.0       # 每檔之間的間隔，避免 TWSE 擋連線
+EXTENDED_MAX_ATTEMPTS = 3          # 同一檔同一個目標日最多嘗試幾次
+EXTENDED_MAX_MONTHS = 6            # 落後太久時一次最多補幾個月；更早的交給 history_fetch
+
+
+def extended_price_symbols(root):
+    """回傳擴充名單的台股代號；任何一個來源讀不到都不影響其他來源。"""
+    from bot.active_etf import load_active_etfs, list_holdings_dates, load_holdings
+    symbols = set()
+    try:
+        for etf in load_active_etfs(root):
+            symbols.add(str(etf.symbol).strip())
+            dates = list_holdings_dates(etf.symbol, root)
+            snapshot = load_holdings(etf.symbol, dates[0], root) if dates else None
+            if snapshot:
+                symbols.update(str(h.ticker).strip() for h in snapshot.holdings)
+    except Exception:
+        pass
+    try:
+        universe = json.loads((Path(root) / "config/backtest_universe.json").read_text(encoding="utf-8"))
+        symbols.update(str(row.get("symbol", "")).strip() for row in universe.get("symbols", []))
+    except (OSError, ValueError, AttributeError):
+        pass
+    return sorted(s for s in symbols if _TW_SYMBOL.match(s))
+
+
+def latest_price_dates(root):
+    db = StockDB.open(root=root)
+    try:
+        return {row[0]: row[1] for row in db.conn.execute(
+            "SELECT symbol, MAX(date) FROM price_history GROUP BY symbol")}
+    finally:
+        db.close()
+
+
+def _months_to_fetch(latest, today):
+    try:
+        last = dt.date.fromisoformat(latest)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(EXTENDED_MAX_MONTHS, (today.year - last.year) * 12 + today.month - last.month + 1))
+
+
+def collect_extended_prices(root, symbols, target, previous, *, budget=None, delay=None):
+    """把擴充名單的日 K 補到 target（主要追蹤標的最新的來源日）。
+
+    已到 target 的不連線；落後的逐檔抓，受時間預算限制，沒抓完留到下次。
+    抓過但來源日仍早於 target 的（停牌、下市）記在 behind，同一個目標日不重抓。
+    """
+    budget = EXTENDED_BUDGET_SECONDS if budget is None else budget
+    delay = EXTENDED_DELAY_SECONDS if delay is None else delay
+    same = previous.get("target_date") == target
+    checked = dict(previous.get("checked", {})) if same else {}
+    attempts = dict(previous.get("attempts", {})) if same else {}
+    failed = dict(previous.get("failed", {})) if same else {}
+    out = {"target_date": target, "requested": len(symbols), "current": 0, "fetched": [],
+           "pending": [], "behind": {}, "failed": failed, "checked": checked,
+           "attempts": attempts, "complete": False}
+    if not target:
+        out["pending"] = list(symbols)
+        out["note"] = "主要追蹤標的沒有成功的行情，無法判定目標日"
+        return out
+    latest = latest_price_dates(root)
+    today = now_tw().date()
+    started = time.monotonic()
+    for ticker in symbols:
+        have = str(latest.get(ticker) or "")
+        if have >= target:
+            out["current"] += 1
+            failed.pop(ticker, None)
+            continue
+        if ticker in checked:
+            out["behind"][ticker] = checked[ticker]
+            continue
+        if attempts.get(ticker, 0) >= EXTENDED_MAX_ATTEMPTS:
+            continue
+        if time.monotonic() - started >= budget:
+            out["pending"].append(ticker)
+            continue
+        attempts[ticker] = attempts.get(ticker, 0) + 1
+        try:
+            price = collect_price(root, ticker, _months_to_fetch(have, today))
+            failed.pop(ticker, None)
+            checked[ticker] = price["source_date"]
+            out["fetched"].append(ticker)
+            if price["source_date"] >= target:
+                out["current"] += 1
+            else:
+                out["behind"][ticker] = price["source_date"]
+        except Exception as exc:
+            failed[ticker] = str(exc)
+            if attempts[ticker] < EXTENDED_MAX_ATTEMPTS:
+                out["pending"].append(ticker)
+        if delay > 0:
+            time.sleep(delay)
+    out["complete"] = not out["pending"] and not failed
+    return out
 
 
 def collect_daily_inputs(root, settings, *, force=False):
@@ -127,6 +231,15 @@ def _collect_daily_inputs(root, settings, *, force=False):
         if value.get("status") != "ok":
             result["errors"].append(f"{key}: {value.get('error', 'collection incomplete')}")
         atomic_json(path.with_name('daily-inputs-progress.json'), result)
+    # 擴充名單另外記錄，不影響 complete：單一檔抓不到不該讓每日研究永遠不完整。
+    target = max((p.get("source_date", "") for p in result["prices"].values()
+                  if p.get("status") == "ok"), default="")
+    try:
+        extended = [t for t in extended_price_symbols(root) if t not in symbols]
+        result["extended"] = collect_extended_prices(
+            root, extended, target, previous.get("extended", {}) if previous.get("date") == date else {})
+    except Exception as exc:
+        result["extended"] = {"complete": False, "error": str(exc)}
     result["complete"] = not result["errors"] and now_tw().date().isoformat() == date
     result["finished_at"] = now_tw().isoformat()
     atomic_json(path, result)
@@ -174,6 +287,17 @@ def _write_daily_summary(root, state):
                       f"擷取 {price['retrieved_at']}。", f"  {price['source_url']}"]
         else:
             lines.append(f"- {ticker}：未完成，{price.get('error', 'unknown')}")
+    ext = inputs.get("extended") or {}
+    if ext:
+        lines += ["", "擴充名單行情（ETF、ETF 台股持股、回測名單）",
+                  f"- 目標日 {ext.get('target_date') or '未確認'}：{ext.get('current', 0)} / {ext.get('requested', 0)} 檔已到目標日；"
+                  f"待抓 {len(ext.get('pending', []))}、失敗 {len(ext.get('failed', {}))}、"
+                  f"來源日較舊 {len(ext.get('behind', {}))}。"]
+        for label, key in (("失敗", "failed"), ("來源日較舊", "behind")):
+            if ext.get(key):
+                lines.append(f"- {label}：" + "、".join(f"{t}（{v}）" for t, v in sorted(ext[key].items())))
+        if ext.get("error") or ext.get("note"):
+            lines.append(f"- {ext.get('error') or ext.get('note')}")
     gaps = (inputs.get("errors", []) + state.get("collection_errors", [])
             + state.get("collection_warnings", []) + state.get("official_errors", []))
     if state.get("error"):

@@ -177,3 +177,43 @@ def test_price_readback_checks_every_ohlcv_value(tmp_path, monkeypatch, field, v
         SimpleNamespace(url="https://example.test", document_id="source"))
     with pytest.raises(ValueError, match="disagree"):
         collection.collect_price(tmp_path, "2330")
+
+
+def test_extended_symbols_cover_etfs_taiwan_holdings_and_backtest_universe(tmp_path, monkeypatch):
+    from bot import active_etf
+    monkeypatch.setattr(active_etf, "load_active_etfs", lambda root: [SimpleNamespace(symbol="00981A")])
+    monkeypatch.setattr(active_etf, "list_holdings_dates", lambda *a: [dt.date(2026, 11, 11)])
+    monkeypatch.setattr(active_etf, "load_holdings", lambda *a: SimpleNamespace(
+        holdings=[SimpleNamespace(ticker="2454"), SimpleNamespace(ticker="NVDA US"), SimpleNamespace(ticker="8306 JT")]))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/backtest_universe.json").write_text('{"symbols": [{"symbol": "2303"}]}', encoding="utf-8")
+    assert collection.extended_price_symbols(tmp_path) == ["00981A", "2303", "2454"]
+
+
+def test_extended_prices_skip_current_resume_on_budget_and_do_not_refetch(tmp_path, monkeypatch):
+    monkeypatch.setattr(collection, "now_tw", lambda: dt.datetime(2026, 11, 17, 15, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(collection, "latest_price_dates", lambda root: {"A1": "2026-11-16", "B1": "2026-10-15"})
+    calls = []
+    def price(root, ticker, months=1):
+        calls.append((ticker, months))
+        if ticker == "D1":
+            raise ValueError("boom")
+        return {"source_date": "2026-11-10" if ticker == "C1" else "2026-11-16"}
+    monkeypatch.setattr(collection, "collect_price", price)
+    symbols = ["A1", "B1", "C1", "D1"]
+    # 預算 0：已到目標日的不連線，其餘留待下次。
+    first = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", {}, budget=0, delay=0)
+    assert first["current"] == 1 and first["pending"] == ["B1", "C1", "D1"] and not calls and not first["complete"]
+    second = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", first, budget=60, delay=0)
+    assert calls == [("B1", 2), ("C1", 1), ("D1", 1)]          # 落後一個月的補兩個月
+    assert second["current"] == 2 and second["behind"] == {"C1": "2026-11-10"}
+    assert second["failed"] == {"D1": "boom"} and second["pending"] == ["D1"]
+    # 停牌的 C1 同一個目標日不重抓；失敗的 D1 最多三次。
+    state = second
+    for _ in range(4):
+        state = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", state, budget=60, delay=0)
+    assert [c[0] for c in calls].count("C1") == 1 and [c[0] for c in calls].count("D1") == 3
+    assert state["pending"] == [] and state["failed"] == {"D1": "boom"} and not state["complete"]
+    # 換目標日就重新開始。
+    assert collection.collect_extended_prices(tmp_path, ["C1"], "2026-11-17", state, budget=60, delay=0)["fetched"] == ["C1"]
+    assert collection.collect_extended_prices(tmp_path, symbols, "", {}, budget=60, delay=0)["pending"] == symbols

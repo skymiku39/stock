@@ -311,6 +311,10 @@ class Scheduler:
             jobs.append(Job(name='daily_inputs', console_script='stock-daily-collect',
                             module='bot.daily_collection', interval_min=5, market_hours_only=False,
                             extra_args=['--root', str(self.project_root)]))
+            # 研究被模型額度擋住時不會啟動；ETF 持股、籌碼與官方財務另外照常收集。
+            jobs.append(Job(name='collection', console_script='stock-daily-research',
+                            module='bot.daily_research', interval_min=60, market_hours_only=False,
+                            extra_args=['--root', str(self.project_root), '--collect-only']))
         elif s.scheduler_research_interval_min > 0:
             extra = [a for a in str(s.scheduler_research_args).split() if a]
             if not any(
@@ -557,9 +561,11 @@ class Scheduler:
             level = self.logger.info if rc == 0 else self.logger.warning
             level("■ 任務 %s 結束 (exit=%s)", job.name, rc)
             job_state = "succeeded" if rc == 0 else "failed"
-            if job.name in {'research', 'daily_inputs'} and rc == 4:
+            if job.name in {'research', 'daily_inputs', 'collection'} and rc == 4:
                 job_state, retryable = 'busy', False
                 next_retry = time.time() + 60
+            elif job.name == 'collection' and rc == 3:
+                job_state, retryable = 'partial', False
             elif job.name == 'research' and rc == 3:
                 state = read_json(self.project_root / 'data/daily_research' / now_tw().date().isoformat() / 'status.json')
                 job_state = 'blocked' if state.get('outcome') == 'blocked' else 'partial'

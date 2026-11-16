@@ -52,7 +52,7 @@ def refresh_official(root):
     return errors
 
 
-def run_daily(root):
+def run_daily(root, collect_only=False):
     from bot.data_pipeline import PipelineConfig, run_full_pipeline
     from bot.verified_research_batch import main as verified
     settings = Settings(_env_file=str(root / ".env"))
@@ -60,6 +60,9 @@ def run_daily(root):
     out = root / "data/daily_research" / date
     path = out / "status.json"
     state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if collect_only and state.get("date") == date and (
+            state.get("complete") or (state.get("collection_complete") and state.get("official_complete"))):
+        return 0
     state.pop("error", None)
     state.update(complete=False, phase="discovering", attempted_at=now_tw().isoformat())
     write_json(path, state)
@@ -93,6 +96,16 @@ def run_daily(root):
     if not state.get("official_complete"):
         state["official_errors"] = refresh_official(root)
         state["official_complete"] = not state["official_errors"]
+    if collect_only:
+        # 模型被擋時排程不會啟動研究；資料收集不該跟著停。
+        done = state.get("collection_complete", False) and state.get("official_complete", False)
+        state.update(tickers=tickers, requested=len(tickers), phase="collected" if done else "collecting",
+                     collected_at=now_tw().isoformat())
+        write_json(path, state)
+        write_daily_summary(root, state)
+        print(f"Daily {date} collect-only: tickers={len(tickers)} collection={state.get('collection_complete')} "
+              f"official={state.get('official_complete')}", flush=True)
+        return 0 if done else 3
     state.update(tickers=tickers, requested=len(tickers), phase="analysing")
     write_json(path, state)
     # Never infer identities for unrecognized source symbols.
@@ -162,6 +175,8 @@ def run_daily(root):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--collect-only", action="store_true",
+                        help="只做資料收集（ETF 持股、籌碼、官方財務），不呼叫模型")
     args = parser.parse_args(argv)
     from bot.scheduler import _ProcessLock
     # Separate from the daemon lock; also protects manual CLI invocations.
@@ -169,7 +184,7 @@ def main(argv=None):
     if not lock.acquire():
         return 4
     try:
-        return run_daily(args.root.resolve())
+        return run_daily(args.root.resolve(), collect_only=args.collect_only)
     finally:
         lock.release()
 
