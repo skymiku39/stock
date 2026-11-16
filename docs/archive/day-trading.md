@@ -39,6 +39,20 @@ SIMULATION=true
 
 建議先在模擬環境驗證，再考慮實單。
 
+### 封存閘門實際的判斷（`src/bot/archive_status.py`）
+
+`RUN_MODE=trade` 只有在下列條件**同時**成立時才會被阻擋：
+
+1. `SIMULATION=false`（模擬委託到不了正式帳戶，所以模擬下不擋，上面那組設定其實不需要解除封存）。
+2. `DAY_TRADING_ARCHIVED=true`（預設）。
+3. `DAY_TRADING_UNFREEZE` 不是 `true`。
+
+也就是說，**單獨把 `DAY_TRADING_ARCHIVED` 設成 `false` 就會解除這道閘門**，不需要 `DAY_TRADING_UNFREEZE`。
+請把這兩個設定都當成會放行真實委託的開關；平常維持 `DAY_TRADING_ARCHIVED=true`、不設 `DAY_TRADING_UNFREEZE`。
+是否要改成「一定要 `DAY_TRADING_UNFREEZE=true` 才放行」屬於 #38 的範圍，尚未決定。
+
+這道閘門只管 `stock-bot` 啟動；微笑策略另外有自己寫死的檢查（見 `docs/broker-fill-acceptance-plan.md`）。
+
 ## 新方向（規劃中）
 
 - 指定標的、可隔夜持股
