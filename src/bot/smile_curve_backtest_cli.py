@@ -115,6 +115,11 @@ def _print_summary(summary: SmileBacktestSummary) -> None:
           f"（已含在損益內）| 資料不足暫停訊號: {len(skipped)} 次")
     if summary.ex_rights_no_events:
         print(f"區間內查無除權息事件（未調整，可能是資料未收錄）: {', '.join(summary.ex_rights_no_events)}")
+    for d in summary.data_ended:
+        tail = (f"{d['forced_exit_date']} 以 {d['exit_price']:.2f} 強制平倉 {d['lot_count']} 批，"
+                f"損益 {d['pnl_twd']:,.0f} 元" if d["forced_exit_date"] else "當時無持倉")
+        print(f"資料中斷: {d['symbol']} 最後一根日 K {d['last_date']}（之後還有 "
+              f"{d['sessions_after']} 個交易日）；{tail}")
     print()
     for r in summary.results:
         if r.skip_reason:

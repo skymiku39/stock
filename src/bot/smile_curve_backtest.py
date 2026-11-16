@@ -105,6 +105,8 @@ class SmileBacktestSummary:
     distribution_total_twd: float = 0.0  # 入帳現金合計（已含在損益內）
     # 有套用調整、但區間內查不到任何除權息事件的代號：可能真的沒配發，也可能是資料沒收錄
     ex_rights_no_events: list[str] = field(default_factory=list)
+    # 資料中途停止的代號（下市、合併等）：有持倉者以最後收盤價強制平倉；見 run_histories
+    data_ended: list[dict] = field(default_factory=list)
 
     @property
     def unrealized_pnl_twd(self) -> float:
@@ -169,10 +171,12 @@ class SmileCurveBacktester:
     """日 K 微笑曲線回測。"""
 
     def __init__(self, settings: Optional[Settings] = None, *, execution: Optional[SmileExecution] = None,
-                 apply_ex_rights: bool = True):
+                 apply_ex_rights: bool = True, data_end_sessions: int = 20):
         self.settings = settings or Settings()
         self.execution = execution or SmileExecution()
         self.apply_ex_rights = apply_ex_rights
+        # 某檔最後一根日 K 之後，其他標的還有超過這麼多個交易日，就視為資料中斷；0 停用
+        self.data_end_sessions = int(data_end_sessions)
 
     def run_symbol(
         self,
@@ -226,6 +230,12 @@ class SmileCurveBacktester:
         reference_price / prev_close. Cash credited that morning does not fund that morning's buys.
         Events that cannot be computed pause that symbol's signals for the day.
 
+        Data end (#34): a symbol whose last bar is followed by more than data_end_sessions
+        sessions of other symbols is treated as ended (delisted, merged). On the first session
+        after its last bar any open position is sold at the last close (with slippage, fees and
+        tax), exit reason "data_end", and the symbol is disabled. This uses the fact that the
+        data stops, which the strategy could not know; it is a data treatment, not a signal.
+
         random_entry: 隨機進場基準（bot.random_entry.RandomEntry）。給定時買進訊號不看跌幅，
         改由各階各自的機率決定；出場、部位大小、資金與成交假設都不變。
         """
@@ -263,12 +273,26 @@ class SmileCurveBacktester:
                                                  f"min_fee={self.settings.broker_min_fee}; "
                                                  "收盤訊號→次日開盤；多檔共用現金；同日賣款不供開盤買單；"
                                                  "代號排序分配；權益含出清滑價與費稅；成交假設見 execution；"
+                                                 f"資料中斷：最後一根日 K 後超過 {self.data_end_sessions} 個交易日無資料者，"
+                                                 "以最後收盤價強制平倉並停用；"
                                                  + ("除權息：配發於除權息日入帳、成本與標準價同步調整，配股視為以參考價折現"
                                                     if ex_rights is not None else "除權息：未調整")))
         if ex_rights is not None:
             out.ex_rights_no_events = [s for s in engines if histories[s] and not ex_rights.get(s)]
         event_queue = {s: sorted(ex_rights.get(s, []), key=lambda ev: str(ev["ex_date"]))
                        for s in engines} if ex_rights else {}
+        sessions = sorted(calendar)
+        ended: dict[str, str] = {}  # 代號 → 最後一根日 K 的日期
+        if self.data_end_sessions > 0:
+            for sym, bars in histories.items():
+                if bars:
+                    last = max(b.date[:10] for b in bars)
+                    after = len(sessions) - sessions.index(last) - 1
+                    if after > self.data_end_sessions:
+                        ended[sym] = last
+                        out.data_ended.append(dict(symbol=sym, last_date=last, sessions_after=after,
+                                                   forced_exit_date=None, exit_price=None,
+                                                   lot_count=0, pnl_twd=0.0))
         pending: dict[str, list[dict]] = {s: [] for s in engines}
         marks: dict[str, float] = {}
         previous_volumes: dict[str, float] = {}
@@ -285,6 +309,23 @@ class SmileCurveBacktester:
 
         for date, today in sorted(calendar.items()):
             opening_budget = min(out.cash, max(0.0, cap - exposure()))
+            for record in out.data_ended:
+                sym = record["symbol"]
+                e = engines[sym]
+                if date <= record["last_date"] or e.state.disabled and not e.open_lots:
+                    continue
+                pending[sym] = []
+                if e.open_lots:
+                    px = self.execution.slipped(marks[sym], "sell", sym)
+                    before = e.realized_pnl_twd
+                    for lot in e.open_lots:
+                        e._record_sell(lot, px, date, "data_end")
+                        out.cash += sell_cash_received(px, lot.quantity, lot.unit,
+                                                      settings=self.settings, sell_tax_rate=e.sell_tax)
+                    record.update(forced_exit_date=date, exit_price=px, lot_count=len(e.open_lots),
+                                  pnl_twd=e.realized_pnl_twd - before)
+                    e.state.lots = []
+                e.state.disabled = True
             paused: set = set()
             for sym in sorted(today):
                 e, bar = engines[sym], today[sym]
