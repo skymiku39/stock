@@ -775,6 +775,16 @@ Windows Task Scheduler 範例：每天 06:30 跑一次 `uv run stock-macro-updat
 進度見 `data/daily_research/YYYY-MM-DD/status.json`；詳細規則見
 [每日全追蹤模式](docs/automation-plan.md)。此模式取代下述每輪 12 檔的舊 research 設定。
 
+每日全追蹤模式下，不需要模型的資料收集與研究是分開的工作，模型額度用完時資料仍會更新：
+
+- **daily_inputs**（每 5 分鐘）：鉅亨新聞（日快取累積）、RSS 存檔、主要追蹤標的與擴充名單
+  （追蹤的 ETF、ETF 的台股持股、回測名單）的日 K、除權息事件、日 K 交叉核對、前瞻追蹤。
+- **collection**（每 60 分鐘）：ETF 持股、籌碼、官方財務；排程器尚未重啟而沒有這個工作時，
+  `daily_inputs` 會每 90 分鐘代跑一次。
+- 想知道資料有沒有在更新，執行 `python -m bot.data_freshness`，或看儀表板側邊欄的「資料新鮮度」。
+
+細節與手動指令見 [docs/operations.md](docs/operations.md)「〇・三、每日資料收集與新鮮度檢查」。
+
 讓資料更新與盤中監測**持續在背景自動跑**，不必開著儀表板：
 
 ```bash
