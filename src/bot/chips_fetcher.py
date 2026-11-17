@@ -121,6 +121,9 @@ class ChipSummary:
     source_date_status: str = "unknown"
     metric_observation_days: Dict[str, int] = field(default_factory=dict)
     metric_source_dates: Dict[str, List[str]] = field(default_factory=dict)
+    # 回顧期間內全市場有籌碼資料的日數（假日、盤後尚未公布的當天不算）；
+    # -1 代表未計算。用來判斷個股是否真的缺資料。
+    market_days: int = -1
 
 
 # ----------------------------------------------------------------------
@@ -822,6 +825,7 @@ def build_chip_summary(
 
     rows: List[ChipDailyRow] = []
     observed_dates: List[dt.date] = []
+    market_days = 0
     foreign_total = 0.0
     trust_total = 0.0
     dealer_total = 0.0
@@ -838,6 +842,8 @@ def build_chip_summary(
         daily = fetch_daily_chips(
             d, session=sess, root=root, logger=logger,
         )
+        if daily:
+            market_days += 1
         row = daily.get(ticker)
         if row:
             rows.append(row)
@@ -896,6 +902,7 @@ def build_chip_summary(
             for metric in ("foreign_net", "investment_trust_net", "dealer_net",
                            "margin_balance", "short_balance", "borrow_balance")
         },
+        market_days=market_days,
     )
 
 
@@ -929,6 +936,7 @@ def summary_to_dict(s: ChipSummary) -> Dict[str, Any]:
         "source_date_status": s.source_date_status,
         "metric_observation_days": dict(s.metric_observation_days),
         "metric_source_dates": dict(s.metric_source_dates),
+        "market_days": s.market_days,
         "rows": [asdict(r) for r in s.rows],
     }
     for row in result["rows"]:

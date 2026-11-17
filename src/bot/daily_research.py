@@ -53,7 +53,7 @@ def refresh_official(root):
 
 
 def run_daily(root, collect_only=False):
-    from bot.data_pipeline import PipelineConfig, run_full_pipeline
+    from bot.data_pipeline import PipelineConfig, blocking_warnings, run_full_pipeline
     from bot.verified_research_batch import main as verified
     settings = Settings(_env_file=str(root / ".env"))
     date = now_tw().date().isoformat()
@@ -87,8 +87,11 @@ def run_daily(root, collect_only=False):
             state["collection_run"] = run.run_id
             state["collection_errors"] = list(run.errors)
             state["collection_warnings"] = list(run.warnings)
+            state["collection_advisory_warnings"] = list(getattr(run, "advisory_warnings", None) or [])
             tickers = sorted(set(tickers) | set(run.focus_tickers) | set(tracked_tickers(root, settings)))
-            state["collection_complete"] = not run.errors and not run.warnings
+            # 只需註明限制的 warnings（來源觀測日不同、個股少幾天籌碼）不算未完成；
+            # 否則每輪都會重跑整條收集管線（約 20 分鐘）。
+            state["collection_complete"] = not run.errors and not blocking_warnings(run)
         except Exception as exc:
             state["collection_errors"] = [str(exc)]
             state["collection_complete"] = False

@@ -66,7 +66,7 @@ def test_collection_failure_remains_partial_even_if_analysis_succeeds(tmp_path, 
         return 0
     monkeypatch.setattr(verified_research_batch, "main", verified)
     assert daily.run_daily(tmp_path) == 3
-    status = json.loads(next((tmp_path/"data/daily_research").glob("*/status.json")).read_text())
+    status = json.loads(next((tmp_path/"data/daily_research").glob("*/status.json")).read_text(encoding="utf-8"))
     assert not status["complete"] and status["excluded"] == ["UNKNOWN HK"]
 
 
@@ -226,3 +226,40 @@ def test_collect_only_runs_collection_without_model_and_scheduler_has_the_job(tm
     s = Scheduler(Settings(_env_file=None, scheduler_daily_all_enabled=True), project_root=tmp_path)
     job = next(j for j in s.jobs if j.name == "collection")
     assert job.module == "bot.daily_research" and job.extra_args[-1] == "--collect-only"
+
+
+def test_collect_only_completes_when_only_advisory_warnings_remain(tmp_path, monkeypatch):
+    from bot import data_pipeline
+    monkeypatch.setattr(daily, "Settings", lambda **kw: SimpleNamespace(llm_enabled=False))
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
+    advisory = "macro: source_date_status=mixed"
+    runs = []
+
+    def collect(config):
+        runs.append(config)
+        return SimpleNamespace(run_id="source", errors=[], warnings=[advisory],
+                               advisory_warnings=[advisory], focus_tickers=["2330"])
+
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", collect)
+    assert daily.run_daily(tmp_path, collect_only=True) == 0
+    status = json.loads(next((tmp_path / "data/daily_research").glob("*/status.json")).read_text(encoding="utf-8"))
+    assert status["collection_complete"] is True
+    assert status["collection_warnings"] == [advisory]
+    assert status["collection_advisory_warnings"] == [advisory]
+    # 當天已完成就不再重跑整條收集管線。
+    assert daily.run_daily(tmp_path, collect_only=True) == 0
+    assert len(runs) == 1
+
+
+def test_collect_only_stays_incomplete_on_blocking_warning(tmp_path, monkeypatch):
+    from bot import data_pipeline
+    monkeypatch.setattr(daily, "Settings", lambda **kw: SimpleNamespace(llm_enabled=False))
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", lambda *a: SimpleNamespace(
+        run_id="source", errors=[], warnings=["chips: 1 個焦點標的沒有可用交易日資料"],
+        advisory_warnings=[], focus_tickers=["2330"]))
+    assert daily.run_daily(tmp_path, collect_only=True) == 3
+    status = json.loads(next((tmp_path / "data/daily_research").glob("*/status.json")).read_text(encoding="utf-8"))
+    assert status["collection_complete"] is False
