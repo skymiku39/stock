@@ -430,7 +430,9 @@ class Settings(BaseSettings):
     scheduler_cloud_sync_interval_min: int = 0
     # 慢速補齊歷史日 K (TWSE/yfinance 月別)；<=0 停用；由 stock-scheduler 呼叫 stock-history-fetch
     scheduler_history_fetch_interval_min: int = 60
-    scheduler_history_fetch_args: str = "--once --batch-size 5 --delay 5"
+    # 每批 60 項、間隔 5 秒（約 6 分鐘）。為什麼：2026-11-17 擴充名單併入後佇列有 261 檔 × 83 月，
+    # 原本每批 5 項、每天 10 批要一年以上；60 項約 36 天補完，請求速率不變（仍是每 5 秒一次）。
+    scheduler_history_fetch_args: str = "--once --batch-size 60 --delay 5"
     # 僅在收盤後時段執行（台股 13:30 收盤，預設 14:00~23:00 每小時一批）
     scheduler_history_fetch_time: datetime.time = datetime.time(14, 0)
     scheduler_history_fetch_end_time: datetime.time = datetime.time(23, 0)
