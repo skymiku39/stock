@@ -156,3 +156,21 @@ def test_registration_reserves_writer_before_reading_manifest(tmp_path, monkeypa
     finally:
         other.close()
         db.close()
+
+
+def test_summary_counts_states_and_samples_unresolved():
+    from bot.source_recovery import summarize
+    report = {
+        "dry_run": True, "policy": "exact_receipt_and_hash_only", "applied": 0,
+        "receipts": [
+            {"receipt_id": "a", "state": "registered"},
+            {"receipt_id": "b", "state": "registered"},
+            {"receipt_id": "c", "state": "unresolved", "reason": "raw missing"},
+        ],
+        "unresolved_raw": ["data/raw/x.json", "data/raw/y.json"],
+    }
+    summary = summarize(report, sample=1)
+    assert summary["receipt_states"] == {"registered": 2, "unresolved": 1}
+    assert summary["unresolved_reasons"] == {"raw missing": 1}
+    assert summary["unresolved_raw_count"] == 2
+    assert summary["unresolved_raw_sample"] == ["data/raw/x.json"]
