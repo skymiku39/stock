@@ -92,3 +92,18 @@ def test_raw_registration_failure_does_not_publish_cache(tmp_path, monkeypatch):
     session.get.return_value.json.return_value = {"fields": ["代號"], "data": [["2330"]]}
     assert chips._fetch_endpoint("qfii_daily", dt.date(2026, 10, 14), root=tmp_path, session=session) is None
     assert not chips._cache_path("qfii_daily", dt.date(2026, 10, 14), tmp_path).exists()
+
+
+def test_chip_summary_counts_market_days_and_missing_dates(monkeypatch):
+    import datetime as dt
+    from bot import chips_fetcher as chips
+
+    open_day = dt.date(2026, 11, 13)
+    row = chips.ChipDailyRow(ticker="2330")
+    monkeypatch.setattr(chips, "fetch_daily_chips",
+                        lambda d, **kw: {"2330": row} if d == open_day else {})
+    monkeypatch.setattr(chips, "_fetch_endpoint", lambda *a, **kw: None)
+    summary = chips.build_chip_summary("2330", end_date=dt.date(2026, 11, 17), days=3)
+    assert summary.market_days == 1
+    assert summary.market_missing_dates == ["2026-11-16", "2026-11-17"]
+    assert len(summary.rows) == 1

@@ -69,6 +69,28 @@ def _is_date_alignment_note(note: str) -> bool:
     )
 
 
+def _trading_days(root: Path, dates: List[str]) -> Optional[List[str]]:
+    """dates 中資料庫有任何日 K 的日子（交易日）。沒有資料庫或查詢失敗回 None。"""
+    if not dates:
+        return []
+    import sqlite3
+    from bot.stock_db import default_db_path
+    path = default_db_path(Path(root))
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+        try:
+            marks = ",".join("?" * len(dates))
+            found = {r[0] for r in conn.execute(
+                f"SELECT DISTINCT date FROM price_history WHERE date IN ({marks})", dates)}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return [d for d in dates if d in found]
+
+
 def blocking_warnings(run: "PipelineRun") -> List[str]:
     """代表收集沒有完成的 warnings（扣除只需註明限制的項目）。"""
     advisory = set(getattr(run, "advisory_warnings", None) or [])
@@ -541,6 +563,20 @@ def run_full_pipeline(
         run.warnings.append(
             f"chips: {len(chip_no_data)} 個焦點標的沒有可用交易日資料"
             f"（{sample}{suffix}）；不等於籌碼為 0"
+        )
+    # 全市場都沒有籌碼的日子若是「已經過去的交易日」，代表來源中斷（403、逾時），
+    # 不是假日也不是盤後尚未公布；這時個股不會被列為缺資料，必須另外擋下。
+    market_missing = sorted({
+        d for summary in chip_map.values() for d in summary.market_missing_dates
+        if d < today.isoformat()
+    })
+    outage_days = _trading_days(config.project_root, market_missing)
+    if outage_days is None:
+        outage_days = market_missing          # 沒有日 K 可對照時保守處理
+    if outage_days:
+        run.warnings.append(
+            f"chips: 全市場籌碼在 {len(outage_days)} 個交易日沒有資料"
+            f"（{', '.join(outage_days[:5])}）；來源可能中斷，下一輪重試"
         )
     if chip_partial:
         sample = ", ".join(chip_partial[:12])

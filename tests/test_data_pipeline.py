@@ -182,3 +182,41 @@ def test_persist_run_replaces_non_finite_values(tmp_path: Path) -> None:
     saved = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
     assert saved["macro_summary"]["top_movers"][0]["pct_change"] is None
     assert any("非有限數值" in w and "top_movers[0].pct_change" in w for w in saved["warnings"])
+
+
+def _price_calendar(root: Path, dates: list[str]) -> None:
+    import sqlite3
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(root / "data/stock.db")
+    conn.execute("CREATE TABLE price_history (symbol TEXT, date TEXT)")
+    conn.executemany("INSERT INTO price_history VALUES ('2330', ?)", [(d,) for d in dates])
+    conn.commit()
+    conn.close()
+
+
+def test_pipeline_blocks_when_chip_source_is_down_on_trading_days(tmp_path: Path) -> None:
+    from bot.data_pipeline import blocking_warnings
+
+    _price_calendar(tmp_path, ["2020-01-02", "2020-01-03"])
+    config = replace(_config(tmp_path), fetch_etf_holdings=False, fetch_chips=True,
+                     focus_tickers=["2330"])
+    # 籌碼端點全斷：全市場每天都沒資料，market_days=0，個股不會被列為缺資料。
+    down = ChipSummary(ticker="2330", days=5, rows=[], market_days=0,
+                       market_missing_dates=["2020-01-02", "2020-01-03", "2020-01-06"])
+    with patch("bot.data_pipeline.build_chip_summary", return_value=down):
+        run = run_full_pipeline(config)
+
+    outage = [w for w in run.warnings if "來源可能中斷" in w]
+    assert len(outage) == 1 and "2 個交易日" in outage[0]       # 01-06 不是交易日（日 K 沒有）
+    assert outage[0] in blocking_warnings(run)
+
+
+def test_pipeline_ignores_market_gaps_on_holidays(tmp_path: Path) -> None:
+    _price_calendar(tmp_path, ["2020-01-02"])
+    config = replace(_config(tmp_path), fetch_etf_holdings=False, fetch_chips=True,
+                     focus_tickers=["2330"])
+    holiday = ChipSummary(ticker="2330", days=5, rows=[], market_days=0,
+                          market_missing_dates=["2020-01-20", "2020-01-21"])
+    with patch("bot.data_pipeline.build_chip_summary", return_value=holiday):
+        run = run_full_pipeline(config)
+    assert not any("來源可能中斷" in w for w in run.warnings)
