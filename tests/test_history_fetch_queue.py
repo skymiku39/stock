@@ -150,6 +150,28 @@ def test_recent_months_are_filled_for_every_symbol_before_older_ones(root: Path,
     assert order == [("A", 2), ("B", 2), ("A", 1), ("B", 1)]
 
 
+def test_empty_response_marks_finished_months_only_not_the_current_month(
+    root: Path, db: StockDB, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bot import daily_collection, history_fetch_queue as queue
+    from bot.history_fetch_queue import FetchRunResult, process_batch
+
+    monkeypatch.setattr(queue, "now_tw", lambda: dt.datetime(2026, 2, 2, 15))
+    monkeypatch.setattr(daily_collection, "extended_price_symbols", lambda r: ["X"])
+    init_state(root=root, start_date="2026-01-01", end_date="2026-02-02", symbols=["X"])
+    calls = []
+
+    def fake(item, **kw):
+        calls.append((item.year, item.month))
+        return FetchRunResult(item=item, ok=False, http_status=200, message="無資料")
+
+    monkeypatch.setattr(queue, "run_one_daily", fake)
+    process_batch(root=root, batch_size=2, delay_sec=0, db=db)
+    assert calls == [(2026, 2), (2026, 1)]
+    # 當月可能只是還沒有交易日，不標空月份；上個月已結束才標。
+    assert load_state(root).empty_months == {"X:2026-01": "2026-02-02"}
+
+
 def test_exhausted_queue_adopts_tracked_universe_once_per_day_and_skips_known_empty_months(
     root: Path, db: StockDB, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

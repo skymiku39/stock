@@ -507,8 +507,12 @@ def _process_batch_open_db(
             state.stats_rows += result.rows
         else:
             state.stats_fail += 1
-            if not result.rate_limited and result.http_status == 200:   # 來源有回應但沒有資料
-                state.empty_months[f"{item.symbol}:{item.year:04d}-{item.month:02d}"] = now_tw().date().isoformat()
+            # 來源有回應但沒有資料。當月（或未來月份）可能只是還沒有交易日／資料還沒發布，
+            # 標成空月份會 30 天不重抓，所以只標已結束的月份。
+            today = now_tw().date()
+            if (not result.rate_limited and result.http_status == 200
+                    and (item.year, item.month) < (today.year, today.month)):
+                state.empty_months[f"{item.symbol}:{item.year:04d}-{item.month:02d}"] = today.isoformat()
             if result.rate_limited:
                 _set_cooldown(state, item.symbol, cooldown_minutes)
                 log.warning(

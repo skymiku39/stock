@@ -93,6 +93,7 @@ _TW_SYMBOL = re.compile(r"^\d{4,6}[A-Z]?$")
 EXTENDED_BUDGET_SECONDS = 240      # 每次執行最多花在擴充名單的時間；沒抓完下次接續
 EXTENDED_DELAY_SECONDS = 2.0       # 每檔之間的間隔，避免 TWSE 擋連線
 EXTENDED_MAX_ATTEMPTS = 3          # 同一檔同一個目標日最多嘗試幾次
+EXTENDED_BEHIND_RETRY_SECONDS = 3600  # 來源日仍落後的標的，距上次抓取多久後可再抓一次
 RSS_REFRESH_SECONDS = 1800         # RSS 存檔全部來源輪過一遍後，隔多久再抓
 EXTENDED_RETIRED_DAYS = 90         # 最新日 K 比目標日舊這麼多天的標的視為已下市或長期停牌
 EXTENDED_MAX_MONTHS = 6            # 落後太久時一次最多補幾個月；更早的交給 history_fetch
@@ -103,14 +104,19 @@ def extended_price_symbols(root):
     from bot.active_etf import load_active_etfs, list_holdings_dates, load_holdings
     symbols = set()
     try:
-        for etf in load_active_etfs(root):
-            symbols.add(str(etf.symbol).strip())
+        etfs = list(load_active_etfs(root))
+    except Exception:
+        etfs = []
+    for etf in etfs:
+        symbols.add(str(etf.symbol).strip())
+        # 單一 ETF 的持股讀不到只略過那一檔，否則一檔壞資料會讓所有 ETF 的持股都消失。
+        try:
             dates = list_holdings_dates(etf.symbol, root)
             snapshot = load_holdings(etf.symbol, dates[0], root) if dates else None
             if snapshot:
                 symbols.update(str(h.ticker).strip() for h in snapshot.holdings)
-    except Exception:
-        pass
+        except Exception:
+            continue
     try:
         universe = json.loads((Path(root) / "config/backtest_universe.json").read_text(encoding="utf-8"))
         symbols.update(str(row.get("symbol", "")).strip() for row in universe.get("symbols", []))
@@ -147,7 +153,8 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
     """把擴充名單的日 K 補到 target（主要追蹤標的最新的來源日）。
 
     已到 target 的不連線；落後的逐檔抓，受時間預算限制，沒抓完留到下次。
-    抓過但來源日仍早於 target 的（停牌、下市）記在 behind，同一個目標日不重抓。
+    抓過但來源日仍早於 target 的（停牌、下市、或來源當天還沒更新）記在 behind；
+    距上次抓取超過 EXTENDED_BEHIND_RETRY_SECONDS 才會再抓，且仍受 EXTENDED_MAX_ATTEMPTS 限制。
     """
     budget = EXTENDED_BUDGET_SECONDS if budget is None else budget
     delay = EXTENDED_DELAY_SECONDS if delay is None else delay
@@ -155,9 +162,10 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
     checked = dict(previous.get("checked", {})) if same else {}
     attempts = dict(previous.get("attempts", {})) if same else {}
     failed = dict(previous.get("failed", {})) if same else {}
+    checked_at = dict(previous.get("checked_at", {})) if same else {}
     out = {"target_date": target, "requested": len(symbols), "current": 0, "fetched": [],
            "pending": [], "behind": {}, "retired": {}, "failed": failed, "checked": checked,
-           "attempts": attempts, "complete": False}
+           "checked_at": checked_at, "attempts": attempts, "complete": False}
     if not target:
         out["pending"] = list(symbols)
         out["note"] = "主要追蹤標的沒有成功的行情，無法判定目標日"
@@ -172,8 +180,14 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
             failed.pop(ticker, None)
             continue
         if ticker in checked:
-            out["behind"][ticker] = checked[ticker]
-            continue
+            # 來源可能比主要標的晚更新當天日 K；隔一段時間可再抓，但嘗試次數用完就維持 behind。
+            try:
+                idle = (now_tw() - dt.datetime.fromisoformat(checked_at[ticker])).total_seconds()
+            except (KeyError, ValueError, TypeError):
+                idle = float("inf")   # 舊狀態沒有時間戳：視為可重抓
+            if idle < EXTENDED_BEHIND_RETRY_SECONDS or attempts.get(ticker, 0) >= EXTENDED_MAX_ATTEMPTS:
+                out["behind"][ticker] = checked[ticker]
+                continue
         if have and _days_between(have, target) > EXTENDED_RETIRED_DAYS:
             # 已經很久沒有日 K（下市、長期停牌）：不每天去問，也不算失敗。恢復交易時用 history_fetch 補。
             out["retired"][ticker] = have
@@ -189,6 +203,7 @@ def collect_extended_prices(root, symbols, target, previous, *, budget=None, del
             price = collect_price(root, ticker, _months_to_fetch(have, today))
             failed.pop(ticker, None)
             checked[ticker] = price["source_date"]
+            checked_at[ticker] = now_tw().isoformat()
             out["fetched"].append(ticker)
             if price["source_date"] >= target:
                 out["current"] += 1

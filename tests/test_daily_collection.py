@@ -231,6 +231,54 @@ def test_extended_prices_skip_current_resume_on_budget_and_do_not_refetch(tmp_pa
     assert collection.collect_extended_prices(tmp_path, symbols, "", {}, budget=60, delay=0)["pending"] == symbols
 
 
+def test_extended_behind_symbol_is_refetched_after_retry_interval_within_attempt_limit(tmp_path, monkeypatch):
+    tz = dt.timezone(dt.timedelta(hours=8))
+    clock = {"now": dt.datetime(2026, 11, 17, 15, tzinfo=tz)}
+    monkeypatch.setattr(collection, "now_tw", lambda: clock["now"])
+    monkeypatch.setattr(collection, "latest_price_dates", lambda root: {"S1": "2026-11-13"})
+    source = {"date": "2026-11-13"}
+    calls = []
+    def price(root, ticker, months=1):
+        calls.append(ticker)
+        return {"source_date": source["date"]}
+    monkeypatch.setattr(collection, "collect_price", price)
+    run = lambda state: collection.collect_extended_prices(tmp_path, ["S1"], "2026-11-16", state, budget=60, delay=0)
+    first = run({})
+    assert first["behind"] == {"S1": "2026-11-13"} and calls == ["S1"] and first["complete"]
+    # 未超過重試間隔：不重抓。
+    clock["now"] += dt.timedelta(seconds=collection.EXTENDED_BEHIND_RETRY_SECONDS - 1)
+    assert run(first)["behind"] == {"S1": "2026-11-13"} and calls == ["S1"]
+    # 超過間隔且來源已更新：再抓並變 current，從 behind 移除。
+    clock["now"] += dt.timedelta(seconds=2)
+    source["date"] = "2026-11-16"
+    second = run(first)
+    assert calls == ["S1", "S1"] and second["behind"] == {} and second["current"] == 1
+    # 舊狀態沒有 checked_at：視為可重抓。
+    legacy = {"target_date": "2026-11-16", "checked": {"S1": "2026-11-13"}, "attempts": {"S1": 1}}
+    source["date"] = "2026-11-13"
+    assert run(legacy)["fetched"] == ["S1"]
+    # attempts 用完：即使超過間隔也維持 behind、不再抓。
+    calls.clear()
+    spent = {"target_date": "2026-11-16", "checked": {"S1": "2026-11-13"},
+             "checked_at": {"S1": (clock["now"] - dt.timedelta(hours=5)).isoformat()},
+             "attempts": {"S1": collection.EXTENDED_MAX_ATTEMPTS}}
+    out = run(spent)
+    assert not calls and out["behind"] == {"S1": "2026-11-13"}
+
+
+def test_extended_symbols_survive_one_etf_holdings_failure(tmp_path, monkeypatch):
+    from bot import active_etf
+    monkeypatch.setattr(active_etf, "load_active_etfs", lambda root: [
+        SimpleNamespace(symbol="00981A"), SimpleNamespace(symbol="00982A"), SimpleNamespace(symbol="00983A")])
+    monkeypatch.setattr(active_etf, "list_holdings_dates", lambda *a: [dt.date(2026, 11, 11)])
+    def holdings(symbol, *a):
+        if symbol == "00982A":
+            raise ValueError("broken holdings")
+        return SimpleNamespace(holdings=[SimpleNamespace(ticker="2454" if symbol == "00981A" else "2317")])
+    monkeypatch.setattr(active_etf, "load_holdings", holdings)
+    assert collection.extended_price_symbols(tmp_path) == ["00981A", "00982A", "00983A", "2317", "2454"]
+
+
 def test_ex_rights_refresh_keeps_universe_symbols_and_runs_once_per_day(tmp_path, monkeypatch):
     from bot import ex_rights
     from bot.stock_db import StockDB
