@@ -1859,26 +1859,30 @@ class StockDB:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS research_chunks_fts "
                 "USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, text)"
             )
-            conn.execute("DROP TRIGGER IF EXISTS research_chunks_ai")
-            conn.execute("DROP TRIGGER IF EXISTS research_chunks_ad")
-            conn.execute("DROP TRIGGER IF EXISTS research_chunks_au")
-            conn.execute(
-                "CREATE TRIGGER research_chunks_ai AFTER INSERT ON research_chunks "
-                "BEGIN INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
-                "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); END"
-            )
-            conn.execute(
-                "CREATE TRIGGER research_chunks_ad AFTER DELETE ON research_chunks "
-                "BEGIN DELETE FROM research_chunks_fts WHERE rowid = old.rowid; END"
-            )
-            conn.execute(
-                "CREATE TRIGGER research_chunks_au AFTER UPDATE ON research_chunks "
-                "BEGIN "
-                "DELETE FROM research_chunks_fts WHERE rowid = old.rowid; "
-                "INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
-                "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); "
-                "END"
-            )
+            # 觸發器內容沒變就不重建。為什麼：DROP／CREATE 每次都會讓 PRAGMA schema_version
+            # 加一，使其他行程的結構指紋失效而重跑完整初始化（每 5 分鐘就有新的排程行程）。
+            for name, sql in (
+                ("research_chunks_ai",
+                 "CREATE TRIGGER research_chunks_ai AFTER INSERT ON research_chunks "
+                 "BEGIN INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
+                 "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); END"),
+                ("research_chunks_ad",
+                 "CREATE TRIGGER research_chunks_ad AFTER DELETE ON research_chunks "
+                 "BEGIN DELETE FROM research_chunks_fts WHERE rowid = old.rowid; END"),
+                ("research_chunks_au",
+                 "CREATE TRIGGER research_chunks_au AFTER UPDATE ON research_chunks "
+                 "BEGIN "
+                 "DELETE FROM research_chunks_fts WHERE rowid = old.rowid; "
+                 "INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
+                 "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); "
+                 "END"),
+            ):
+                current = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+                ).fetchone()
+                if current is None or current[0] != sql:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(sql)
             actual = int(conn.execute("SELECT COUNT(*) FROM research_chunks").fetchone()[0])
             indexed = int(conn.execute("SELECT COUNT(*) FROM research_chunks_fts").fetchone()[0])
             if actual != indexed:
