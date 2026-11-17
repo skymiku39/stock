@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-LABELS = {"smile": "微笑方案（改造後）", "swing": "波段原型"}
+LABELS = {"smile": "微笑方案（改造後）", "swing": "波段原型", "c2": "選股策略 C2"}
 AXIS_LABELS = {"smile_take_profit_pct": "停利 %", "smile_symbol_stop_loss_pct": "單檔停損 %",
-               "breakout_days": "突破天數", "trail_atr": "移動停利 ATR 倍數"}
+               "breakout_days": "突破天數", "trail_atr": "移動停利 ATR 倍數",
+               "max_hold_days": "持有期限（天）"}
 REASONS = {"take_profit": "停利", "stop_loss": "停損", "trailing_stop": "移動停利",
            "expiry": "到期", "data_end": "資料中斷"}
 

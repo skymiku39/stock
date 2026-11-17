@@ -1,4 +1,4 @@
-"""前瞻追蹤：把 #19 選定的兩組參數凍結，只用驗證段之後的新行情記帳。只讀資料庫、只跑回測。
+"""前瞻追蹤：把 #19 選定的兩組參數（以及之後的選股策略 C2）凍結，只用驗證段之後的新行情記帳。只讀資料庫、只跑回測。
 
 為什麼需要：#19 的驗證段（2024-01-01～2026-10-31）已經用過一次，之後再看那段資料就不算驗證。
 新的證據只能來自之後的行情，所以從 2026-11-01 起，用同一份名單、同一組成交假設與選定參數，
@@ -9,7 +9,7 @@
 結果在 data/forward_tracking/：latest.json、latest.md，以及每個資料日一份 <日期>.json。
 
 限制：
-- 兩種策略都從 FORWARD_START 以 50 萬的新帳戶開始，不接續驗證段結束時的部位。
+- 各策略都從 FORWARD_START 以 50 萬的新帳戶開始，不接續驗證段結束時的部位。
 - 初期樣本很少，報告會標示「樣本不足」；判定是否有證據仍用 docs/swing-strategy-design.md 四之 5。
 - 還沒有隨機進場基準（樣本夠了再跑才有意義）。
 """
@@ -27,11 +27,14 @@ from bot.utils import now_tw
 FORWARD_START = "2026-11-01"          # #19 驗證段結束的隔天
 SWING_WARMUP_START = "2026-05-01"     # 只用來暖機波段指標，不產生訊號
 # #19 依事先訂好的規則選定的參數（docs/reports/strategy-comparison.md）。
+# c2：選股策略（docs/reports/selection-strategy.md），2026-11-17 只用參數決定段選定後凍結；
+# 進場條件固定在 bot.selection_strategy.C2_FIXED。
 FROZEN = {
     "smile": {"smile_take_profit_pct": 0.0, "smile_symbol_stop_loss_pct": 15.0},
     "swing": {"breakout_days": 20, "trail_atr": 4.0},
+    "c2": {"max_hold_days": 90, "trail_atr": 4.0},
 }
-LABELS = {"smile": "微笑方案", "swing": "波段原型"}
+LABELS = {"smile": "微笑方案", "swing": "波段原型", "c2": "選股策略 C2"}
 MIN_COVERAGE = 0.9                    # 名單中至少這個比例的標的有當日日 K，才算這一天可以記帳
 OUTPUT_REL = "data/forward_tracking"
 
@@ -65,7 +68,8 @@ def run_forward(root: Path, *, end: str = "") -> dict:
     from bot.stock_db import StockDB, default_db_path
     from bot.strategy_comparison import (EXECUTION, INITIAL_CASH, REFERENCE_ROUNDS, _smile_backtester,
                                          _swing_backtester)
-    from bot.swing_backtest import load_histories
+    from bot.selection_strategy import _c2_backtester
+    from bot.swing_backtest import load_histories, load_revenue
 
     root = Path(root)
     symbols = load_universe(root / "config" / "backtest_universe.json")
@@ -74,6 +78,7 @@ def run_forward(root: Path, *, end: str = "") -> dict:
     try:
         forward, forward_events = load_histories(db, symbols, start=FORWARD_START, end=end)
         warm, warm_events = load_histories(db, symbols, start=SWING_WARMUP_START, end=end)
+        revenue = load_revenue(db, symbols)
         last_event = db.conn.execute("SELECT MAX(ex_date), MAX(retrieved_at) FROM ex_rights_events").fetchone()
     finally:
         db.close()
@@ -93,8 +98,11 @@ def run_forward(root: Path, *, end: str = "") -> dict:
         forward, start=FORWARD_START, end=end, ex_rights=forward_events)
     swing = _swing_backtester(FROZEN["swing"]).run_histories(
         warm, trade_start=FORWARD_START, ex_rights=warm_events)
+    c2 = _c2_backtester(FROZEN["c2"]).run_histories(
+        warm, trade_start=FORWARD_START, ex_rights=warm_events, revenue=revenue)
     result["strategies"] = dict(smile=_strategy_result(smile, FROZEN["smile"]),
-                                swing=_strategy_result(swing, FROZEN["swing"]))
+                                swing=_strategy_result(swing, FROZEN["swing"]),
+                                c2=_strategy_result(c2, FROZEN["c2"]))
     return result
 
 
@@ -133,7 +141,7 @@ def render(result: dict) -> str:
     lines += ["## 怎麼讀", "",
               "- 這是樣本外的實際走法，不是調參數的依據；看到結果後改參數，這段就不再是樣本外。",
               "- 輪數少的時候每輪期望值與勝率沒有意義，先看有沒有照規則進出場、有沒有異常。",
-              "- 兩種策略都從期間起點開新帳戶，數字不能和 #19 驗證段的帳戶直接相加。", ""]
+              "- 各策略都從期間起點開新帳戶，數字不能和 #19 驗證段的帳戶直接相加。", ""]
     return "\n".join(lines)
 
 

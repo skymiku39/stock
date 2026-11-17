@@ -22,11 +22,11 @@ def bars(symbol, closes, *, spread=1.0, volume=100000):
             for i, (o, c) in enumerate(zip(opens, closes))]
 
 
-def run(histories, *, initial_cash=1000000, execution=None, **params):
+def run(histories, *, initial_cash=1000000, execution=None, revenue=None, **params):
     backtester = SwingBacktester(Settings(**SETTINGS), SwingParams(**{**SMALL, **params}),
                                  execution=execution or SmileExecution.ideal(),
                                  initial_cash=initial_cash)
-    return backtester.run_histories(histories)
+    return backtester.run_histories(histories, revenue=revenue)
 
 
 def fills(result, side):
@@ -163,3 +163,53 @@ def test_stop_exit_sells_within_volume_cap_across_days():
     assert rnd.exit_reason == "stop_loss" and rnd.exit_date == sells[-1][0]
     assert rnd.pnl_twd == pytest.approx((95 - 104) * bought - 95 * bought * 0.003)
     assert r.open_positions == []
+
+
+# 規則二（entry="rs_revenue"）：相對強度排名 + 已公告的月營收年增率。
+RS = dict(entry="rs_revenue", rs_min=0.6, yoy_min=0.0)
+RISING = [100 + 2 * i for i in range(12)]
+FLAT12 = [100] * 12
+FALLING = [100 - 2 * i for i in range(12)]
+
+
+def rs_histories():
+    return {"A": bars("A", RISING), "B": bars("B", FLAT12), "C": bars("C", FALLING)}
+
+
+def test_rs_revenue_buys_only_strong_symbols_with_growing_revenue():
+    revenue = {"A": [("2025-12-11", 15.0)], "B": [("2025-12-11", 30.0)], "C": [("2025-12-11", 50.0)]}
+    r = run(rs_histories(), revenue=revenue, **RS)
+    assert {o["symbol"] for o in r.orders if o["side"] == "buy"} == {"A"}  # B、C 排名不夠
+    first = next(o for o in r.orders if o["side"] == "buy")
+    assert first["rs"] == 1.0
+
+
+def test_rs_revenue_needs_published_positive_yoy():
+    shrinking = {"A": [("2025-12-11", -5.0)]}
+    assert run(rs_histories(), revenue=shrinking, **RS).orders == []
+    # 營收要到 2026-01-09 才公告：之前的訊號不算。
+    late = {"A": [("2026-01-09", 15.0)]}
+    buys = [o for o in run(rs_histories(), revenue=late, **RS).orders if o["side"] == "buy"]
+    assert buys and min(o["signal_date"] for o in buys) >= "2026-01-09"
+
+
+def test_rs_revenue_requires_revenue_data_and_valid_params():
+    with pytest.raises(ValueError):
+        run(rs_histories(), **RS)
+    with pytest.raises(ValueError):
+        SwingParams(entry="other")
+    with pytest.raises(ValueError):
+        SwingParams(entry="rs_revenue", rs_min=1.0)
+
+
+def test_load_revenue_shifts_availability_to_next_month():
+    import sqlite3
+    from types import SimpleNamespace
+    from bot.swing_backtest import load_revenue
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE monthly_revenue (symbol TEXT, year_month TEXT, yoy_pct REAL)")
+    conn.executemany("INSERT INTO monthly_revenue VALUES (?,?,?)",
+                     [("A", "2025-11", 12.0), ("A", "2025-12", -3.0), ("A", "2026-01", None),
+                      ("B", "2025-12", float("nan"))])
+    out = load_revenue(SimpleNamespace(conn=conn), ["A", "B"])
+    assert out == {"A": [("2025-12-11", 12.0), ("2026-01-11", -3.0)], "B": []}
