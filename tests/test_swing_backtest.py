@@ -146,3 +146,20 @@ def test_params_validation():
         SwingParams(risk_pct=0)
     with pytest.raises(ValueError):
         SwingBacktester(Settings(**SETTINGS), initial_cash=0)
+
+
+def test_stop_exit_sells_within_volume_cap_across_days():
+    # 買進後成交量萎縮到每天 500 張 → 0.1% 參與率每天只能賣 500 股；停損分多天賣完，算成同一輪。
+    h = bars("A", FLAT + [104, 104, 95, 95, 95, 95, 95])
+    for bar in h[6:]:
+        bar.volume = 500
+    model = SmileExecution(slippage_bps=0, participation=.001, limit_guard=False, tick_rounding=False)
+    r = run({"A": h}, execution=model)
+    (_, _, bought), = fills(r, "buy")
+    sells = fills(r, "sell")
+    assert [q for _, _, q in sells] == [500] * (bought // 500) + [bought % 500]
+    assert sells[0][0] == "2026-01-09"
+    rnd, = r.rounds
+    assert rnd.exit_reason == "stop_loss" and rnd.exit_date == sells[-1][0]
+    assert rnd.pnl_twd == pytest.approx((95 - 104) * bought - 95 * bought * 0.003)
+    assert r.open_positions == []

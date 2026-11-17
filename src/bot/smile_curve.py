@@ -65,6 +65,8 @@ class SmileRoundTrip:
     pnl_pct: float
     reference: float
     distribution_twd: float = 0.0  # 持有期間的除權息配發（已含在 pnl_twd）
+    # 分多日賣完的強制出場（停損、到期）：各筆都記出場起始日，彙整成同一輪。空字串＝以 exit_date 分輪。
+    round_id: str = ""
 
 
 @dataclass

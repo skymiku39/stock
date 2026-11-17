@@ -70,6 +70,17 @@ class SwingPosition:
     initial_stop: float
     highest_close: float
     distribution_twd: float = 0.0
+    # 出場受成交量上限、分多日賣完時：已賣部分的實收現金，以及進場股數（估算剩餘曝險用）。
+    received_twd: float = 0.0
+    entry_shares: int = 0
+
+    def __post_init__(self):
+        if self.entry_shares <= 0:
+            self.entry_shares = self.shares
+
+    @property
+    def open_cost_twd(self) -> float:
+        return self.paid_twd * self.shares / self.entry_shares if self.entry_shares else self.paid_twd
 
 
 @dataclass
@@ -224,7 +235,7 @@ class SwingBacktester:
             received = sell_cash_received(px, pos.shares, UNIT, settings=self.settings,
                                           sell_tax_rate=SELL_TAX)
             out.cash += received
-            pnl = received + pos.distribution_twd - pos.paid_twd
+            pnl = received + pos.received_twd + pos.distribution_twd - pos.paid_twd
             out.rounds.append(Round(symbol=pos.symbol, entry_date=pos.entry_date, exit_date=date,
                                     lot_count=1, cost_twd=pos.paid_twd, pnl_twd=pnl,
                                     return_pct=100.0 * pnl / pos.paid_twd if pos.paid_twd else 0.0,
@@ -276,10 +287,23 @@ class SwingBacktester:
                     log["blocked"] = "invalid_open"
                     continue
                 px, blocked = self.execution.quote(float(bar.open), "sell", marks.get(sym), sym)
-                if not blocked and pos.shares > self.execution.capacity(volumes.get(sym)):
-                    blocked = "volume_limit_whole_position_sell"
+                qty = pos.shares
+                if not blocked:
+                    # 賣出與買進受同一個成交量上限；賣不完的部分留在佇列隔天續賣。
+                    capacity = self.execution.capacity(volumes.get(sym))
+                    if not math.isinf(capacity):
+                        qty = min(qty, int(capacity))
+                    if qty <= 0:
+                        blocked = "volume_limit_partial_exit"
                 if blocked:
                     log["blocked"] = blocked  # 留在佇列，下一個交易日再試
+                    continue
+                if qty < pos.shares:
+                    got = sell_cash_received(px, qty, UNIT, settings=self.settings, sell_tax_rate=SELL_TAX)
+                    out.cash += got
+                    pos.received_twd += got
+                    pos.shares -= qty
+                    log.update(status="filled", filled_quantity=qty, execution_price=px, partial=True)
                     continue
                 log.update(status="filled", filled_quantity=pos.shares, execution_price=px)
                 close_position(pos, px, date, pending_sells[sym])
@@ -366,7 +390,7 @@ class SwingBacktester:
                 sell_cash_received(self.execution.slipped(marks[s], "sell", s), pos.shares, UNIT,
                                    settings=self.settings, sell_tax_rate=SELL_TAX)
                 for s, pos in positions.items())
-            exposure = sum(pos.paid_twd for pos in positions.values())
+            exposure = sum(pos.open_cost_twd for pos in positions.values())
             if trade_start and date < trade_start:
                 # 暖機期只用來累積指標，不算帳戶期間；算進去會稀釋年化報酬、資金使用率與週轉率
                 # （#19 驗證段的年化 20.9% 是用 2023-07 起算，交易期 2024-01 起算約 25%）。

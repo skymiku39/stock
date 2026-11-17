@@ -46,12 +46,18 @@ def _day(value: str) -> dt.date:
 
 
 def group_rounds(trips: Iterable, cost_fn: Callable) -> list[Round]:
-    """Group lot round-trips by (symbol, exit_date) into rounds."""
+    """Group lot round-trips by (symbol, round_id or exit_date) into rounds.
+
+    A forced exit that needs several sessions to sell (volume cap) tags every piece with the
+    same round_id, so it stays one round; its exit date is the last piece's date.
+    """
     groups: dict[tuple[str, str], list] = {}
     for t in trips:
-        groups.setdefault((t.symbol, str(t.exit_date)[:10]), []).append(t)
+        key = str(getattr(t, "round_id", "") or t.exit_date)[:10]
+        groups.setdefault((t.symbol, key), []).append(t)
     rounds: list[Round] = []
-    for (symbol, exit_date), lots in groups.items():
+    for (symbol, _key), lots in groups.items():
+        exit_date = max(str(t.exit_date)[:10] for t in lots)
         entry = min(str(t.entry_date)[:10] for t in lots)
         cost = float(sum(cost_fn(t) for t in lots))
         pnl = float(sum(t.pnl_twd for t in lots))
