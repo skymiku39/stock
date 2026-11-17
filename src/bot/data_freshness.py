@@ -215,6 +215,28 @@ def _crosscheck(root: Path) -> Dict[str, Any]:
     return _check("日 K 交叉核對", status, describe(result) if "matched" in result else f"{latest} 的紀錄無法讀取")
 
 
+def _collection(root: Path, now: dt.datetime) -> Dict[str, Any]:
+    """今天的收集管線有沒有完成。
+
+    為什麼需要：2026-11-01 起 collection_complete 每天都是 false（籌碼一直回報海外持股沒資料），
+    管線每輪重跑約 20 分鐘，但其他檢查都看資料日期，所以沒有任何警示。
+    """
+    state = read_json(root / "data/daily_research" / now.date().isoformat() / "status.json")
+    if not state:
+        return _check("每日收集", INFO if now.hour < 6 else WARN, "今天還沒有收集紀錄")
+    errors = list(state.get("collection_errors") or []) + list(state.get("official_errors") or [])
+    advisory = set(state.get("collection_advisory_warnings") or [])
+    blocking = [w for w in state.get("collection_warnings") or [] if w not in advisory]
+    if state.get("collection_complete") and state.get("official_complete"):
+        tail = f"（{len(advisory)} 則只需註明限制的提醒）" if advisory else ""
+        return _check("每日收集", OK, f"今天已完成，收集於 {state.get('collected_at') or state.get('attempted_at') or '未知'}{tail}")
+    sample = "；".join(str(x)[:80] for x in (errors + blocking)[:3])
+    return _check("每日收集", WARN,
+                  f"今天尚未完成（已嘗試 {state.get('attempts', 0)} 次；錯誤 {len(errors)} 則、"
+                  f"未完成原因 {len(blocking)} 則）" + (f"：{sample}" if sample else ""),
+                  errors=errors[:10], blocking_warnings=blocking[:10])
+
+
 def _model(root: Path, now: dt.datetime) -> Dict[str, Any]:
     state = read_json(root / "data/llm_availability.json")
     if not state:
@@ -240,6 +262,7 @@ def check_data_freshness(root: Path, *, settings: Any = None, now: Optional[dt.d
     expected = expected_market_date(now)
     steps: List[Callable[[], Any]] = [
         lambda: _scheduler(root, now),
+        lambda: _collection(root, now),
         lambda: _news(root, now),
         lambda: _prices(root, now, core, extended),
         lambda: _crosscheck(root),

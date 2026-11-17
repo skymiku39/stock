@@ -86,3 +86,26 @@ def test_dead_scheduler_and_missing_data_fail(tmp_path, monkeypatch):
     assert checks["日 K（主要追蹤）"]["status"] == "fail" and checks["日 K（主要追蹤）"]["extra"]["lag"] == 4
     assert checks["新聞（鉅亨）"]["status"] == "fail" and checks["RSS 存檔"]["status"] == "fail"
     assert checks["月營收"]["status"] == "ok"      # 20 日已過公布期限，10 月資料已有
+
+
+def test_collection_status_separates_advisory_from_blocking(tmp_path):
+    now = dt.datetime(2026, 11, 17, 12, tzinfo=TZ)
+    assert fresh._collection(tmp_path, now)["status"] == fresh.WARN          # 中午還沒有紀錄
+    assert fresh._collection(tmp_path, now.replace(hour=3))["status"] == fresh.INFO
+    folder = tmp_path / "data/daily_research/2026-11-17"
+    folder.mkdir(parents=True)
+    status = folder / "status.json"
+    advisory = "macro: source_date_status=mixed"
+    status.write_text(json.dumps({
+        "attempts": 3, "collection_complete": False, "official_complete": True,
+        "collection_errors": [], "collection_warnings": [advisory, "chips: 1 個焦點標的沒有可用交易日資料"],
+        "collection_advisory_warnings": [advisory]}), encoding="utf-8")
+    check = fresh._collection(tmp_path, now)
+    assert check["status"] == fresh.WARN
+    assert check["extra"]["blocking_warnings"] == ["chips: 1 個焦點標的沒有可用交易日資料"]
+    assert "已嘗試 3 次" in check["detail"]
+    status.write_text(json.dumps({
+        "collection_complete": True, "official_complete": True, "collected_at": "2026-11-17T11:00:00+08:00",
+        "collection_warnings": [advisory], "collection_advisory_warnings": [advisory]}), encoding="utf-8")
+    check = fresh._collection(tmp_path, now)
+    assert check["status"] == fresh.OK and "1 則只需註明限制" in check["detail"]
