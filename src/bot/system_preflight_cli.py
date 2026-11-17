@@ -24,6 +24,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--imports", action="store_true", help="逐一 import 所有 bot 模組")
     parser.add_argument("--json", action="store_true", help="輸出 JSON")
+    parser.add_argument("--skip-audit", action="store_true",
+                        help="略過完整資料稽核（正式資料約 5 分鐘）；完整稽核請另跑 stock-data-audit")
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
@@ -38,6 +40,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             root,
             settings=settings,
             check_imports=args.imports,
+            check_audit=not args.skip_audit,
         )
     if args.json:
         print(json.dumps(report_to_dict(report), ensure_ascii=False, indent=2, default=str))

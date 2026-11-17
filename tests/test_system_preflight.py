@@ -288,3 +288,15 @@ def test_memory_capacity_preflight_treats_full_short_layer_as_normal(tmp_path, m
     assert capacity(max_active_short_chars=1000).status == "ok"
     over = capacity(max_active_short_chars=8)  # 超過上限：自動封存沒有生效
     assert over.status == "warn" and "short" in over.detail and "自動封存未生效" in over.detail
+
+
+def test_skip_audit_does_not_run_the_full_audit(monkeypatch, tmp_path):
+    def fail(_root):
+        raise AssertionError("audit_project should not run")
+
+    monkeypatch.setattr(module, "audit_project", fail)
+    report = module.run_system_preflight(tmp_path, settings=_settings(), check_audit=False)
+
+    audit = [item for item in report.checks if item.name == "本地資料稽核"]
+    assert len(audit) == 1 and audit[0].status == "info"
+    assert not report.has_fail()
