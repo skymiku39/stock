@@ -17,6 +17,8 @@
 - market_ma > 0：名單等權指數（收盤對收盤日報酬取平均，除權息日以還原後前收計算）低於自己的
   market_ma 日均線時，不產生新的買單；指數根數不足時不限制。已持有的部位照原規則出場。
 - max_new_per_day > 0：每天最多送出這麼多筆新買單（依漲幅排序取前幾筆）。
+- vol_scale_days > 0：依大盤波動度縮小新部位。等權指數近 20 日日報酬標準差高於自己過去
+  vol_scale_days 日的中位數時，新買單股數 × (中位數 ÷ 目前波動度)；不放大。根數不足時不調整。
 
 成交假設沿用 SmileExecution（次日開盤、滑價、前一日成交量上限、漲跌停），以零股計。
 除權息：指標用的歷史價格在除權息日向前還原；持倉收到配發現金，成本與停損價同步下修。
@@ -60,14 +62,15 @@ class SwingParams:
     yoy_min: float = 0.0             # 規則二：月營收年增率下限（%）
     market_ma: int = 0               # 回撤控制：大盤濾網均線天數（0＝關閉）
     max_new_per_day: int = 0         # 回撤控制：每天新買單上限（0＝不限）
+    vol_scale_days: int = 0          # 回撤控制：波動度縮放的中位數回看天數（0＝關閉）
 
     def __post_init__(self):
-        for name in ("market_ma", "max_new_per_day"):
+        for name in ("market_ma", "max_new_per_day", "vol_scale_days"):
             value = getattr(self, name)
             if not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
         for name, value in asdict(self).items():
-            if name in ("entry", "rs_min", "yoy_min", "market_ma", "max_new_per_day"):
+            if name in ("entry", "rs_min", "yoy_min", "market_ma", "max_new_per_day", "vol_scale_days"):
                 continue
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -263,6 +266,7 @@ class SwingBacktester:
         marks: dict[str, float] = {}
         volumes: dict[str, float] = {}
         index_levels: list[float] = []  # 名單等權指數（回撤控制用）
+        index_vols: list[float] = []    # 等權指數近 20 日日報酬標準差
 
         def valid(value) -> bool:
             return value is not None and math.isfinite(float(value)) and float(value) > 0
@@ -363,8 +367,9 @@ class SwingBacktester:
                 if blocked:
                     log["blocked"] = blocked
                     continue
-                want = min(order["quantity"],
-                           int(equity_base() * p.max_position_pct / 100.0 // px))
+                want = int(min(order["quantity"],
+                               int(equity_base() * p.max_position_pct / 100.0 // px))
+                           * order.get("scale", 1.0))
                 capacity = self.execution.capacity(volumes.get(sym))
                 if not math.isinf(capacity):
                     want = min(want, int(capacity))
@@ -455,6 +460,19 @@ class SwingBacktester:
             if (p.market_ma and len(index_levels) >= p.market_ma
                     and index_levels[-1] < sum(index_levels[-p.market_ma:]) / p.market_ma):
                 candidates = []  # 大盤濾網：指數在均線下，不開新倉
+            if len(index_levels) >= 21:
+                rets = [index_levels[k] / index_levels[k - 1] - 1.0
+                        for k in range(len(index_levels) - 20, len(index_levels))]
+                mean = sum(rets) / 20
+                index_vols.append(math.sqrt(sum((r - mean) ** 2 for r in rets) / 20))
+            scale = 1.0
+            if p.vol_scale_days and len(index_vols) >= p.vol_scale_days and index_vols[-1] > 0:
+                recent = sorted(index_vols[-p.vol_scale_days:])
+                median = recent[len(recent) // 2]
+                scale = min(1.0, median / index_vols[-1])
+            if scale < 1.0:
+                for c in candidates:
+                    c[2]["scale"] = scale
             slots = p.max_positions - len(positions)
             if p.max_new_per_day:
                 slots = min(slots, p.max_new_per_day)

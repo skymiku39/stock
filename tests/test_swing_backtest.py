@@ -241,3 +241,21 @@ def test_drawdown_control_params_validation():
         SwingParams(market_ma=-1)
     with pytest.raises(ValueError):
         SwingParams(max_new_per_day=1.5)
+
+
+def test_vol_scale_shrinks_new_positions_when_market_turns_volatile():
+    n = 60
+    calm = [100 + (0.2 if i % 2 else 0) for i in range(30)]
+    wild = [100 + (8 if i % 2 else -8) for i in range(n - 30)]
+    h = {"A": bars("A", [100 * 1.01 ** i for i in range(n)], spread=0.5),
+         "B": bars("B", calm + wild, spread=0.5)}
+    revenue = {s: [("2025-12-11", 15.0)] for s in h}
+    params = dict(entry="rs_revenue", rs_min=0.5, max_hold_days=2, trail_atr=50, initial_stop_atr=10)
+    plain = [o for o in run(h, revenue=revenue, **params).orders if o["side"] == "buy" and o["symbol"] == "A"]
+    scaled = [o for o in run(h, revenue=revenue, vol_scale_days=10, **params).orders
+              if o["side"] == "buy" and o["symbol"] == "A"]
+    late = lambda orders: [o["filled_quantity"] for o in orders if o["signal_date"] >= "2026-02-15"]
+    early = lambda orders: [o["filled_quantity"] for o in orders if o["signal_date"] < "2026-01-25"]
+    assert early(plain) == early(scaled)           # 波動未升高前不調整
+    assert late(scaled) and sum(late(scaled)) < sum(late(plain))
+    assert all(o.get("scale", 1.0) <= 1.0 for o in scaled)
