@@ -16,6 +16,7 @@ import dataclasses
 import datetime as dt
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -890,11 +891,30 @@ def run_full_pipeline(
 # ----------------------------------------------------------------------
 
 
+def _replace_non_finite(value: Any, path: str, found: List[str]) -> Any:
+    """把 NaN／Infinity 換成 None 並記下位置；JSON 不接受這兩種值。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        found.append(path)
+        return None
+    if isinstance(value, dict):
+        return {k: _replace_non_finite(v, f"{path}.{k}", found) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_non_finite(v, f"{path}[{i}]", found) for i, v in enumerate(value)]
+    return value
+
+
 def _persist_run(run: PipelineRun, out_dir: Path, log: logging.Logger) -> None:
     try:
         run_path = out_dir / "run.json"
         from bot.runtime_state import atomic_json, atomic_text
-        atomic_json(run_path, asdict(run))
+        found: List[str] = []
+        payload = _replace_non_finite(asdict(run), "run", found)
+        if found:
+            # 一個欄位的 NaN 不該讓整份執行紀錄存不下來（2026-11-10～17 發生過 5 次）。
+            message = f"run.json: {len(found)} 個非有限數值已存成 null（{', '.join(found[:5])}）"
+            log.warning(message)
+            payload["warnings"] = list(payload.get("warnings") or []) + [message]
+        atomic_json(run_path, payload)
         mirror_file_to_cloud(run_path)
         if run.daily_brief_md:
             p = out_dir / "daily_brief.md"

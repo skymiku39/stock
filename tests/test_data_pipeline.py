@@ -168,3 +168,17 @@ def test_pipeline_partial_chips_compare_with_market_days(tmp_path: Path) -> None
     # 部分資料只需註明限制，不代表收集失敗。
     assert partial[0] in run.advisory_warnings
     assert partial[0] not in blocking_warnings(run)
+
+
+def test_persist_run_replaces_non_finite_values(tmp_path: Path) -> None:
+    import json
+    import logging
+    from bot.data_pipeline import PipelineRun, _persist_run
+
+    run = PipelineRun(run_id="r", started_at="2026-11-17T10:00:00+08:00")
+    run.macro_summary = {"top_movers": [{"symbol": "^TWII", "pct_change": float("nan")}]}
+    with patch("bot.data_pipeline.mirror_file_to_cloud"):
+        _persist_run(run, tmp_path, logging.getLogger("test"))
+    saved = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert saved["macro_summary"]["top_movers"][0]["pct_change"] is None
+    assert any("非有限數值" in w and "top_movers[0].pct_change" in w for w in saved["warnings"])
