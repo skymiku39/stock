@@ -1122,6 +1122,8 @@ def audit_project(root: Path, *, include_archived: bool = False) -> Dict[str, An
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    from bot.cli_encoding import configure_console
+    configure_console()  # 在 parse_args 之前，--help 導向檔案時才會是 UTF-8
     parser = argparse.ArgumentParser(
         prog="stock-data-audit",
         description="只讀盤點 SQLite、raw、cache、pipeline 與 LLM provenance 缺口",
