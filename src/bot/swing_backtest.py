@@ -13,6 +13,11 @@
 收盤時 momentum_days 日漲幅在當天有資料的名單內排名百分位 >= rs_min，且最近一期已公告的月營收
 年增率 > yoy_min 就進場（月營收在次月 11 日才視為已知）。出場、部位與成交假設與規則一相同。
 
+回撤控制（預設關閉，兩種進場規則與隨機進場基準都適用）：
+- market_ma > 0：名單等權指數（收盤對收盤日報酬取平均，除權息日以還原後前收計算）低於自己的
+  market_ma 日均線時，不產生新的買單；指數根數不足時不限制。已持有的部位照原規則出場。
+- max_new_per_day > 0：每天最多送出這麼多筆新買單（依漲幅排序取前幾筆）。
+
 成交假設沿用 SmileExecution（次日開盤、滑價、前一日成交量上限、漲跌停），以零股計。
 除權息：指標用的歷史價格在除權息日向前還原；持倉收到配發現金，成本與停損價同步下修。
 資料中斷的標的以最後收盤價強制平倉（與微笑回測相同，#34）。
@@ -53,10 +58,16 @@ class SwingParams:
     entry: str = "breakout"          # "breakout"（規則一）或 "rs_revenue"（規則二）
     rs_min: float = 0.6              # 規則二：相對強度百分位下限（0～1）
     yoy_min: float = 0.0             # 規則二：月營收年增率下限（%）
+    market_ma: int = 0               # 回撤控制：大盤濾網均線天數（0＝關閉）
+    max_new_per_day: int = 0         # 回撤控制：每天新買單上限（0＝不限）
 
     def __post_init__(self):
+        for name in ("market_ma", "max_new_per_day"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         for name, value in asdict(self).items():
-            if name in ("entry", "rs_min", "yoy_min"):
+            if name in ("entry", "rs_min", "yoy_min", "market_ma", "max_new_per_day"):
                 continue
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -251,6 +262,7 @@ class SwingBacktester:
         pending_sells: dict[str, str] = {}  # 代號 → 出場原因
         marks: dict[str, float] = {}
         volumes: dict[str, float] = {}
+        index_levels: list[float] = []  # 名單等權指數（回撤控制用）
 
         def valid(value) -> bool:
             return value is not None and math.isfinite(float(value)) and float(value) > 0
@@ -372,12 +384,16 @@ class SwingBacktester:
             candidates = []
             momenta: list[float] = []     # 規則二：當天所有算得出漲幅的代號，用來排名
             rs_pending: list[tuple] = []  # 規則二：等排名完才決定的候選
+            daily_returns: list[float] = []
             for sym in sorted(today):
                 bar = today[sym]
                 volumes[sym] = float(bar.volume) if bar.volume is not None else 0.0
                 if not (valid(bar.close) and valid(bar.high) and valid(bar.low)):
                     continue
                 close = float(bar.close)
+                prior = marks.get(sym)  # 除權息日已在步驟 1 還原
+                if prior and prior > 0 and abs(close / prior - 1.0) < 0.3:
+                    daily_returns.append(close / prior - 1.0)
                 marks[sym] = close
                 s = series[sym]
                 s.add(float(bar.high), float(bar.low), close)
@@ -432,7 +448,16 @@ class SwingBacktester:
                             candidates.append((-momentum, sym, dict(symbol=sym, signal_date=date,
                                                                     quantity=quantity, atr=atr,
                                                                     momentum=momentum, rs=rank)))
+            if daily_returns or index_levels:
+                last = index_levels[-1] if index_levels else 1.0
+                index_levels.append(last * (1.0 + (sum(daily_returns) / len(daily_returns)
+                                                   if daily_returns else 0.0)))
+            if (p.market_ma and len(index_levels) >= p.market_ma
+                    and index_levels[-1] < sum(index_levels[-p.market_ma:]) / p.market_ma):
+                candidates = []  # 大盤濾網：指數在均線下，不開新倉
             slots = p.max_positions - len(positions)
+            if p.max_new_per_day:
+                slots = min(slots, p.max_new_per_day)
             pending_buys = [c[2] for c in sorted(candidates, key=lambda c: c[:2])[:max(0, slots)]]
             # 5. 估值：持倉以收盤價扣出清滑價與費稅。
             liquidation = sum(

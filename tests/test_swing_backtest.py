@@ -213,3 +213,31 @@ def test_load_revenue_shifts_availability_to_next_month():
                       ("B", "2025-12", float("nan"))])
     out = load_revenue(SimpleNamespace(conn=conn), ["A", "B"])
     assert out == {"A": [("2025-12-11", 12.0), ("2026-01-11", -3.0)], "B": []}
+
+
+def test_market_filter_blocks_new_entries_when_index_below_its_average():
+    # A 上漲，B、C 大跌 → 等權指數下跌，低於 3 日均線；關掉濾網時 A 會進場。
+    h = {"A": bars("A", RISING), "B": bars("B", [100 - 4 * i for i in range(12)]),
+         "C": bars("C", [100 - 4 * i for i in range(12)])}
+    revenue = {s: [("2025-12-11", 15.0)] for s in h}
+    assert [o for o in run(h, revenue=revenue, **RS).orders if o["side"] == "buy"]
+    assert run(h, revenue=revenue, market_ma=3, **RS).orders == []
+
+
+def test_max_new_per_day_caps_same_day_buys():
+    h = {"A": bars("A", RISING), "B": bars("B", [100 + 1.5 * i for i in range(12)]),
+         "C": bars("C", FALLING), "D": bars("D", FLAT12)}
+    revenue = {s: [("2025-12-11", 15.0)] for s in h}
+    params = dict(entry="rs_revenue", rs_min=0.5, yoy_min=0.0)
+    first_day = lambda r: [o for o in r.orders if o["side"] == "buy"
+                           and o["signal_date"] == min(x["signal_date"] for x in r.orders)]
+    assert len(first_day(run(h, revenue=revenue, **params))) == 2
+    capped = first_day(run(h, revenue=revenue, max_new_per_day=1, **params))
+    assert [o["symbol"] for o in capped] == ["A"]  # 漲幅較大者優先
+
+
+def test_drawdown_control_params_validation():
+    with pytest.raises(ValueError):
+        SwingParams(market_ma=-1)
+    with pytest.raises(ValueError):
+        SwingParams(max_new_per_day=1.5)
