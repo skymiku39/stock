@@ -81,6 +81,10 @@ def commit_registration(db: StockDB, receipt_id: str, row: SourceDocumentRow,
 def recover_registrations(root: Path, *, apply: bool = False) -> dict:
     """Preview uses SQLite mode=ro and never initializes schema or cloud cache."""
     root = Path(root).resolve()
+    # 先列 raw 再讀資料庫：收集程序先寫 raw、再登錄 manifest。預覽要跑十幾分鐘，
+    # 最後才列 raw 的話，期間新寫入且已登錄的檔案會被誤列為 unresolved（2026-11-17 有 15 個）。
+    raw_listing = sorted(str(p.relative_to(root)).replace("\\", "/")
+                         for p in (root / "data" / "raw").rglob("*") if p.is_file())
     path = default_db_path(root)
     conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) if path.exists() else None
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} if conn else set()
@@ -170,10 +174,8 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
                     item.update(state="unresolved", reason=str(exc))
         finally:
             db.close()
-    report["unresolved_raw"] = sorted(str(p.relative_to(root)).replace("\\", "/")
-                                      for p in (root / "data" / "raw").rglob("*")
-                                      if p.is_file() and str(p.relative_to(root)).replace("\\", "/")
-                                      not in registered | provable_paths)
+    known = registered | provable_paths
+    report["unresolved_raw"] = [p for p in raw_listing if p not in known]
     return report
 
 

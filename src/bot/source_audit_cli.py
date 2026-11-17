@@ -804,11 +804,13 @@ def _db_report(db_path: Path, *, root: Optional[Path] = None) -> Dict[str, Any]:
 def audit_project(root: Path, *, include_archived: bool = False) -> Dict[str, Any]:
     """建立不抓外網、不改業務資料的專案 provenance 報告。"""
     root = Path(root).resolve()
-    db_report = _db_report(default_db_path(root), root=root)
     data_dir = root / "data"
     raw_dir = data_dir / "raw"
-    registered = set(db_report.get("registered_content_paths") or [])
+    # 先列 raw 再讀資料庫：收集程序是先寫 raw、再登錄 manifest。資料庫報告要跑好幾分鐘，
+    # 反過來做的話，這段期間新寫入且已登錄的檔案會被誤報為未登錄（2026-11-17 有 6 個）。
     raw_files = set(_relative_files(root, raw_dir))
+    db_report = _db_report(default_db_path(root), root=root)
+    registered = set(db_report.get("registered_content_paths") or [])
     unregistered_raw = sorted(raw_files - registered)
     historical_archive = {}
     if not include_archived:
