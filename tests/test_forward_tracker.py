@@ -63,3 +63,20 @@ def test_update_writes_once_per_data_day_and_waits_for_coverage(tmp_path, monkey
     assert forward.update(root)["generated_at"] == first["generated_at"]
     assert (out / "latest.json").stat().st_mtime_ns == stamp
     assert forward.update(root, force=True)["generated_at"] != first["generated_at"]
+
+
+def test_update_rewrites_when_same_day_prices_are_corrected(tmp_path, monkeypatch):
+    monkeypatch.setattr(forward, "now_tw", lambda: dt.datetime(2026, 11, 17, 16, tzinfo=TZ))
+    root = _project(tmp_path, ["1101", "1102"], dt.date(2026, 11, 16))
+    first = forward.update(root)
+    # 同一個資料日、同樣的檔數，但 11-16 的日 K 事後被修正：結果不同就要重寫。
+    db = StockDB.open(root=tmp_path)
+    try:
+        db.bulk_upsert_price_bars([PriceBar(symbol="1101", date="2026-11-16", open=20, high=21,
+                                            low=19, close=20, volume=5_000_000)])
+    finally:
+        db.close()
+    monkeypatch.setattr(forward, "now_tw", lambda: dt.datetime(2026, 11, 17, 18, tzinfo=TZ))
+    second = forward.update(root)
+    assert second["as_of"] == first["as_of"]
+    assert second["generated_at"] != first["generated_at"]

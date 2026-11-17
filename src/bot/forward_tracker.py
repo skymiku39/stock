@@ -143,7 +143,12 @@ def update(root: Path, *, force: bool = False, end: str = "") -> dict:
     out = root / OUTPUT_REL
     latest = read_json(out / "latest.json")
     result = run_forward(root, end=end)
-    if not force and latest.get("as_of") == result["as_of"] and latest.get("symbols_at_as_of") == result["symbols_at_as_of"]:
+    # 比較除了產生時間以外的全部內容：同一天的日 K 事後被修正（例如重抓、除權息事件補進來）
+    # 也要更新，不能只看資料日與檔數。
+    # 經過 JSON 來回再比，避免 tuple／list 之類的型別差異被當成內容改變。
+    comparable = json.loads(json.dumps(result, ensure_ascii=False))
+    unchanged = {k: v for k, v in latest.items() if k != "generated_at"} ==         {k: v for k, v in comparable.items() if k != "generated_at"}
+    if not force and unchanged:
         return latest
     if not result["coverage_ok"] and not force:
         return latest or result
