@@ -367,6 +367,10 @@ class SwingBacktester:
                                    settings=self.settings, sell_tax_rate=SELL_TAX)
                 for s, pos in positions.items())
             exposure = sum(pos.paid_twd for pos in positions.values())
+            if trade_start and date < trade_start:
+                # 暖機期只用來累積指標，不算帳戶期間；算進去會稀釋年化報酬、資金使用率與週轉率
+                # （#19 驗證段的年化 20.9% 是用 2023-07 起算，交易期 2024-01 起算約 25%）。
+                continue
             out.equity_curve.append(dict(
                 date=date, cash=out.cash, equity=out.cash + liquidation,
                 realized_pnl_twd=out.realized_pnl_twd, cost_exposure=exposure,
