@@ -45,6 +45,16 @@
 - 盤中把累計已實現損益存在 `smile_state.json` 的 `_account.realized_pnl_twd`，重啟後接續。刪除狀態檔會讓權益回到起始資金。
 - 回測的起始現金是 `SMILE_INITIAL_FUND`（未設定時是 `MAX_FUND`），報酬率也以它為分母。
 
+**微笑時事與即時情緒（2026-11-18，只在盤中生效）**：
+
+兩個功能預設都停用；不設定時盤中行為與之前完全相同，也完全不讀新聞檔。**此規則只在盤中生效，日 K 引擎與組合回測沒有（歷史新聞不存在，無法回測），證據只能來自模擬盤的實際紀錄。** 下列門檻都是暫定值，未經驗證。
+
+- 情緒賣出（`SMILE_MOOD_SELL_ENABLED`，預設 false）：持倉「整個部位以實際送出的限價賣出、扣手續費與證交稅後淨利 > 0」（且達 `SMILE_MOOD_MIN_PROFIT_PCT`，預設 0＝淨利 > 0 即可；設了則須 >= 持倉成本的該 %），而且市場悲觀時，整個部位以現價限價賣出，不必等價格回到標準價。絕不因時事認賠賣出。檢查位置在停利之後、標準價判斷之前。出清後走一般獲利出場（重設標準價，不停用、不冷卻），委託原因標為 `smile_mood`。
+- 壞消息擋買（`SMILE_NEWS_BLOCK_ENABLED`，預設 false）：RSS 存檔中標記為該檔（`related_tickers`）、且標題含公司層級壞消息詞（掏空、背信、財報不實、下市、全額交割、跳票、遭搜索、起訴、fraud、delisting 等）的項目存在時，不買該檔。只擋買進，不觸發賣出。
+- 市場悲觀的判定：新聞悲觀＝視窗內（`SMILE_NEWS_WINDOW_HOURS`，預設 24）含悲觀詞的標題至少 `SMILE_MOOD_NEWS_MIN_NEGATIVE`（10）則，且 (悲觀−樂觀)/(悲觀+樂觀) >= `SMILE_MOOD_NEWS_SCORE`（0.3）；新聞存檔超過 `SMILE_NEWS_MAX_AGE_MINUTES`（90）分鐘沒更新或沒有，視為無法判斷。股價悲觀＝市場即時漲跌幅 <= −`SMILE_MOOD_MARKET_DROP_PCT`（1.5）%，市場漲跌幅用 0050 的（最新價/前收 − 1），監控清單沒有 0050 時取各代號的中位數。`SMILE_MOOD_REQUIRE`：`both`（預設，兩者都須成立，無法判斷視為不悲觀）、`any`、`news`、`price`。
+- 新聞來源只有本機 `data/news/rss_<date>.json`（今天與昨天），只比對標題關鍵字，官媒立場的項目排除；不連網、不呼叫 LLM。關鍵字清單在 `src/bot/smile_sentiment.py`。新聞最多每 60 秒重讀一次，股價每個 tick 重算。
+- 決策紀錄：每次情緒賣出送單、以及每檔每天第一次被壞消息擋買，寫一行 JSON 到 `smile_mood_log.jsonl`（模擬模式在 `data/simulation/data/`），內容含時間、代號、動作、價格、情緒或壞消息與佐證標題，同時記一行 warning log。
+
 ## 模擬買賣驗證
 
 不修改 `.env`、不解除正式交易封存的啟動方式：

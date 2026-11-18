@@ -267,11 +267,25 @@ class Settings(BaseSettings):
     smile_initial_fund: int = 0  # 複利的起始資金；權益＝起始資金＋累計已實現損益，資金上限取 min(MAX_FUND, 權益)；0 停用
     smile_unit_equity_pct: float = 0.0  # 每階金額＝權益 × 此 % × 該階倍數；0＝沿用 SMILE_BASE_LOT（需搭配 SMILE_INITIAL_FUND）
 
+    # 時事＋即時股價（只在盤中生效；門檻暫定，未經驗證）
+    smile_mood_sell_enabled: bool = False  # 持倉淨利為正且市場悲觀時，整個部位提早獲利了結；絕不因此認賠
+    smile_mood_min_profit_pct: float = 0.0  # 情緒賣出時整個部位淨利須 >= 持倉成本此 %；0＝淨利 > 0 即可
+    smile_news_block_enabled: bool = False  # 個股近期有公司層級壞消息時不買進（只擋買，不觸發賣出）
+    smile_news_window_hours: int = 24  # 只看這麼多小時內的新聞
+    smile_news_max_age_minutes: int = 90  # 新聞存檔超過這麼多分鐘沒更新就視為無法判斷
+    smile_mood_news_min_negative: int = 10  # 新聞悲觀：含悲觀詞的標題至少幾則
+    smile_mood_news_score: float = 0.3  # 新聞悲觀：(悲觀−樂觀)/(悲觀+樂觀) 至少多少
+    smile_mood_market_drop_pct: float = 1.5  # 股價悲觀：市場即時跌幅達此 %
+    smile_mood_require: Literal["both", "any", "news", "price"] = "both"  # 新聞與股價的判定組合
+
     @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days",
                      "smile_symbol_stop_loss_pct", "smile_max_symbol_fund_pct",
                      "smile_take_profit_pct", "smile_max_hold_days",
                      "smile_reentry_cooldown_days", "smile_min_first_tier_pct",
-                     "smile_initial_fund", "smile_unit_equity_pct")
+                     "smile_initial_fund", "smile_unit_equity_pct",
+                     "smile_mood_min_profit_pct", "smile_news_window_hours",
+                     "smile_news_max_age_minutes", "smile_mood_news_min_negative",
+                     "smile_mood_news_score", "smile_mood_market_drop_pct")
     @classmethod
     def _validate_smile_guards(cls, v):
         if v < 0:
