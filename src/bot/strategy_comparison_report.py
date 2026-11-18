@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-LABELS = {"smile": "微笑方案（改造後）", "swing": "波段原型", "c2": "選股策略 C2", "crash": "大跌分批加碼"}
+LABELS = {"smile": "微笑方案（改造後）", "swing": "波段原型", "c2": "選股策略 C2", "crash": "大跌分批加碼",
+          "crash_aggr": "大跌分批加碼（積極版）"}
 AXIS_LABELS = {"smile_take_profit_pct": "停利 %", "smile_symbol_stop_loss_pct": "單檔停損 %",
                "breakout_days": "突破天數", "trail_atr": "移動停利 ATR 倍數",
-               "max_hold_days": "持有期限（天）", "first_drop_pct": "首次加碼跌幅 %"}
+               "max_hold_days": "持有期限（天）", "first_drop_pct": "首次加碼跌幅 %",
+               "weighting": "每批分配"}
+VALUE_LABELS = {"equal": "平均", "front": "前重（1/2、1/4、1/4）", "all_in": "一次全押"}
 REASONS = {"take_profit": "停利", "stop_loss": "停損", "trailing_stop": "移動停利",
            "expiry": "到期", "data_end": "資料中斷"}
 
@@ -19,7 +22,8 @@ def _num(value, digits: int = 2, suffix: str = "") -> str:
 
 
 def _params(params: dict) -> str:
-    return "、".join(f"{AXIS_LABELS.get(k, k)} {v:g}" for k, v in params.items())
+    return "、".join(f"{AXIS_LABELS.get(k, k)} {VALUE_LABELS.get(v, v) if isinstance(v, str) else format(v, 'g')}"
+                    for k, v in params.items())
 
 
 def _table(header: list, rows: list) -> list:

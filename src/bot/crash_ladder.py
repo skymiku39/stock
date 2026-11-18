@@ -9,7 +9,8 @@
   次日開盤買一批。同一天跨過幾階就買幾批的量。
 - 買什麼：名單內當天有有效開盤價的全部標的，等金額（零股）。研究顯示大跌時買強勢或弱勢股沒有一致差異，
   所以不挑股。
-- 每批金額：權益（起始資金 + 已實現損益）÷ tranches，不超過開盤前的現金。
+- 每批金額：權益（起始資金 + 已實現損益）× 該階權重，不超過開盤前的現金。權重由 weighting 決定：
+  equal＝每階 1/tranches；front＝第一階 1/2、其餘平分另一半；all_in＝第一階 100%、之後各階不買。
 - 出場：每批持有 max_hold_days 日曆天，到期次日開盤賣出。沒有停損（大跌加碼本來就是承受再跌）。
 - 成交假設沿用 SmileExecution（滑價、前一日成交量上限、漲跌停）；賣不完的部分隔天續賣。
 - 除權息：持股收配發現金。資料中斷的標的以最後收盤價賣出（#34）。
@@ -41,8 +42,11 @@ class CrashLadderParams:
     step_pct: float = 5.0
     tranches: int = 3
     max_hold_days: int = 60
+    weighting: str = "equal"   # equal／front／all_in（見模組說明）
 
     def __post_init__(self):
+        if self.weighting not in ("equal", "front", "all_in"):
+            raise ValueError("weighting must be equal, front or all_in")
         if not (math.isfinite(self.first_drop_pct) and 0 < self.first_drop_pct < 100):
             raise ValueError("first_drop_pct must be in (0, 100)")
         if not (math.isfinite(self.step_pct) and self.step_pct >= 0):
@@ -55,6 +59,15 @@ class CrashLadderParams:
     @property
     def levels(self) -> list[float]:
         return [self.first_drop_pct + k * self.step_pct for k in range(self.tranches)]
+
+    @property
+    def weights(self) -> list[float]:
+        n = self.tranches
+        if self.weighting == "all_in" or n == 1:
+            return [1.0] + [0.0] * (n - 1)
+        if self.weighting == "front":
+            return [0.5] + [0.5 / (n - 1)] * (n - 1)
+        return [1.0 / n] * n
 
 
 @dataclass
@@ -279,14 +292,18 @@ class CrashLadderBacktester:
                 drop = 100.0 * (1.0 - level / peak)
                 newly = sum(1 for x in p.levels[crossed:] if drop + 1e-9 >= x)
                 if newly and pending_buy is None:
+                    weight = sum(p.weights[crossed:crossed + newly])
                     crossed += newly
-                    pending_buy = dict(signal_date=date, label=f"drop_{p.levels[crossed - 1]:g}%",
-                                       amount=equity_base() / p.tranches * newly, drop_pct=drop)
+                    if weight > 0:
+                        pending_buy = dict(signal_date=date, label=f"drop_{p.levels[crossed - 1]:g}%",
+                                           amount=equity_base() * weight, drop_pct=drop)
             if trading and random_entry is not None:
                 fired = random_entry.fires("entry")  # 每天都抽，亂數序列才不會錯位
-                if fired and len(tranches) < p.tranches and pending_buy is None:
+                # 隨機基準的第 k 批（依目前持有批數）用第 k 階的權重；權重為 0 的階不買。
+                slot = len(tranches)
+                if fired and slot < p.tranches and pending_buy is None and p.weights[slot] > 0:
                     pending_buy = dict(signal_date=date, label="random",
-                                       amount=equity_base() / p.tranches)
+                                       amount=equity_base() * p.weights[slot])
             for t in tranches:
                 if not t.exiting and _days(t.entry_date, date) >= p.max_hold_days:
                     t.exiting = True

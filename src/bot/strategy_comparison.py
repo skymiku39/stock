@@ -188,7 +188,8 @@ def _swing_backtester(params: dict) -> SwingBacktester:
 def evaluate(name: str, axes, run_train: Callable[[dict], object],
              run_validation: Callable[[dict], object],
              random_baseline: Callable[[dict], dict], *, validate: bool, log,
-             index_mdd: Optional[float] = None) -> dict:
+             index_mdd: Optional[float] = None, chooser: Optional[Callable] = None) -> dict:
+    """chooser：自訂的事先選法（預設 choose，取期望值最高且相鄰組合為正者）。"""
     combos = grid(axes)
     for combo in combos:
         summary = run_train(combo["params"])
@@ -196,7 +197,7 @@ def evaluate(name: str, axes, run_train: Callable[[dict], object],
         combo["train_yearly_pnl_twd"] = yearly_pnl(summary.equity_curve, summary.initial_cash)
         log(f"[{name}] train {combo['params']}: rounds={combo['train']['round_count']} "
             f"expectancy={combo['train']['expectancy_pct']:.2f}%")
-    chosen = choose(combos)
+    chosen = (chooser or choose)(combos)
     for combo in combos:
         combo["chosen"] = combo["index"] == chosen["index"]
         combo["index"] = list(combo["index"])

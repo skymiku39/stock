@@ -108,3 +108,19 @@ def test_compare_crash_train_only_grid_and_render():
     assert len(combos) == len(CRASH_AXES[0][1]) * len(CRASH_AXES[1][1])
     assert sum(c["chosen"] for c in combos) == 1
     assert "大跌分批加碼" in render(result)
+
+
+@pytest.mark.parametrize("weighting,amounts", [("equal", [100_000, 100_000]), ("front", [150_000, 75_000]),
+                                               ("all_in", [300_000])])
+def test_weighting_sets_tranche_amounts(weighting, amounts):
+    h = {"A": bars("A", PATH), "B": bars("B", PATH)}
+    r = run(h, first_drop_pct=10, step_pct=5, tranches=3, max_hold_days=30, weighting=weighting)
+    buys = [o for o in r.orders if o["side"] == "buy"]
+    assert [o["amount"] for o in buys] == pytest.approx(amounts)
+
+
+def test_weights_and_validation():
+    assert CrashLadderParams(weighting="front").weights == [0.5, 0.25, 0.25]
+    assert CrashLadderParams(weighting="all_in").weights == [1.0, 0.0, 0.0]
+    with pytest.raises(ValueError):
+        CrashLadderParams(weighting="double")

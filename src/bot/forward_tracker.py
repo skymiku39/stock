@@ -36,8 +36,12 @@ FROZEN = {
     # crash：大跌分批加碼（docs/reports/crash-ladder.md），2026-11-18 只用參數決定段選定後凍結；
     # 固定值在 bot.crash_ladder_strategy.CRASH_FIXED。
     "crash": {"first_drop_pct": 20.0, "max_hold_days": 90},
+    # crash_aggr：積極版（docs/reports/crash-ladder-aggressive.md），2026-11-18 只用參數決定段選定後凍結；
+    # 固定值在 bot.crash_ladder_strategy.AGGR_FIXED。驗證段比基本版差，留著追蹤以便比較。
+    "crash_aggr": {"first_drop_pct": 10.0, "weighting": "all_in"},
 }
-LABELS = {"smile": "微笑方案", "swing": "波段原型", "c2": "選股策略 C2", "crash": "大跌分批加碼"}
+LABELS = {"smile": "微笑方案", "swing": "波段原型", "c2": "選股策略 C2", "crash": "大跌分批加碼",
+          "crash_aggr": "大跌分批加碼（積極版）"}
 MIN_COVERAGE = 0.9                    # 名單中至少這個比例的標的有當日日 K，才算這一天可以記帳
 OUTPUT_REL = "data/forward_tracking"
 
@@ -73,7 +77,7 @@ def run_forward(root: Path, *, end: str = "") -> dict:
     from bot.stock_db import StockDB, default_db_path
     from bot.strategy_comparison import (EXECUTION, INITIAL_CASH, REFERENCE_ROUNDS, _smile_backtester,
                                          _swing_backtester)
-    from bot.crash_ladder_strategy import _crash_backtester
+    from bot.crash_ladder_strategy import _aggr_backtester, _crash_backtester
     from bot.selection_strategy import _c2_backtester
     from bot.swing_backtest import load_histories, load_revenue
 
@@ -114,7 +118,11 @@ def run_forward(root: Path, *, end: str = "") -> dict:
     result["strategies"] = dict(smile=_strategy_result(smile, FROZEN["smile"]),
                                 swing=_strategy_result(swing, FROZEN["swing"]),
                                 c2=_strategy_result(c2, FROZEN["c2"]),
-                                crash=_strategy_result(crash, FROZEN["crash"]))
+                                crash=_strategy_result(crash, FROZEN["crash"]),
+                                crash_aggr=_strategy_result(
+                                    _aggr_backtester(FROZEN["crash_aggr"]).run_histories(
+                                        warm, trade_start=FORWARD_START, ex_rights=warm_events),
+                                    FROZEN["crash_aggr"]))
     return result
 
 
