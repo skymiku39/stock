@@ -33,8 +33,11 @@ FROZEN = {
     "smile": {"smile_take_profit_pct": 0.0, "smile_symbol_stop_loss_pct": 15.0},
     "swing": {"breakout_days": 20, "trail_atr": 4.0},
     "c2": {"max_hold_days": 90, "trail_atr": 4.0},
+    # crash：大跌分批加碼（docs/reports/crash-ladder.md），2026-11-18 只用參數決定段選定後凍結；
+    # 固定值在 bot.crash_ladder_strategy.CRASH_FIXED。
+    "crash": {"first_drop_pct": 20.0, "max_hold_days": 90},
 }
-LABELS = {"smile": "微笑方案", "swing": "波段原型", "c2": "選股策略 C2"}
+LABELS = {"smile": "微笑方案", "swing": "波段原型", "c2": "選股策略 C2", "crash": "大跌分批加碼"}
 MIN_COVERAGE = 0.9                    # 名單中至少這個比例的標的有當日日 K，才算這一天可以記帳
 OUTPUT_REL = "data/forward_tracking"
 
@@ -48,7 +51,8 @@ def _open_positions(summary) -> list:
     out = []
     for p in summary.open_positions:
         row = p if isinstance(p, dict) else getattr(p, "__dict__", {})
-        out.append({k: row.get(k) for k in ("symbol", "entry_date", "entry_price", "shares", "paid_twd", "stop")})
+        out.append({k: row.get(k) for k in ("symbol", "entry_date", "entry_price", "shares", "paid_twd", "stop",
+                                            "label", "symbols") if k in row})
     return out
 
 
@@ -69,6 +73,7 @@ def run_forward(root: Path, *, end: str = "") -> dict:
     from bot.stock_db import StockDB, default_db_path
     from bot.strategy_comparison import (EXECUTION, INITIAL_CASH, REFERENCE_ROUNDS, _smile_backtester,
                                          _swing_backtester)
+    from bot.crash_ladder_strategy import _crash_backtester
     from bot.selection_strategy import _c2_backtester
     from bot.swing_backtest import load_histories, load_revenue
 
@@ -103,9 +108,13 @@ def run_forward(root: Path, *, end: str = "") -> dict:
         warm, trade_start=FORWARD_START, ex_rights=warm_events)
     c2 = _c2_backtester(FROZEN["c2"]).run_histories(
         warm, trade_start=FORWARD_START, ex_rights=warm_events, revenue=revenue)
+    # 大跌分批加碼：暖機期用來找前高（10-12 的高點在 FORWARD_START 之前）。
+    crash = _crash_backtester(FROZEN["crash"]).run_histories(
+        warm, trade_start=FORWARD_START, ex_rights=warm_events)
     result["strategies"] = dict(smile=_strategy_result(smile, FROZEN["smile"]),
                                 swing=_strategy_result(swing, FROZEN["swing"]),
-                                c2=_strategy_result(c2, FROZEN["c2"]))
+                                c2=_strategy_result(c2, FROZEN["c2"]),
+                                crash=_strategy_result(crash, FROZEN["crash"]))
     return result
 
 

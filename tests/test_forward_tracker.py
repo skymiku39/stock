@@ -42,6 +42,7 @@ def test_forward_run_uses_frozen_params_and_only_forward_dates(tmp_path, monkeyp
     assert result["strategies"]["smile"]["params"] == forward.FROZEN["smile"]
     assert result["strategies"]["swing"]["params"] == {"breakout_days": 20, "trail_atr": 4.0}
     assert result["strategies"]["c2"]["params"] == {"max_hold_days": 90, "trail_atr": 4.0}
+    assert result["strategies"]["crash"]["params"] == {"first_drop_pct": 20.0, "max_hold_days": 90}
     for data in result["strategies"].values():
         assert all(point["date"] >= forward.FORWARD_START for point in data["equity_curve"])
         assert all(r["entry_date"] >= forward.FORWARD_START for r in data["rounds"])
