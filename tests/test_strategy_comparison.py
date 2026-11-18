@@ -54,22 +54,51 @@ def metrics(**overrides):
 
 def test_judge_needs_every_core_condition():
     good = dict(metrics=metrics(), yearly_pnl_twd={"2024": 1, "2025": 2, "2026": 3})
-    verdict = sc.judge(good, 0.5, 1.5)
+    verdict = sc.judge(good, 0.5, 1.5, 30.0)
     assert verdict["has_evidence"] and all(r["met"] for r in verdict["reference"])
     cases = [
-        (dict(good, metrics=metrics(expectancy_pct=-0.1)), 0.5, 1.5),
-        (good, -0.1, 1.5),
-        (good, None, 1.5),
-        (dict(good, yearly_pnl_twd={"2024": 1, "2025": -2, "2026": 3}), 0.5, 1.5),
-        (good, 0.5, 2.5),
-        (good, 0.5, None),
-        (dict(good, metrics=metrics(max_drawdown_pct=20.1)), 0.5, 1.5),
+        (dict(good, metrics=metrics(expectancy_pct=-0.1)), 0.5, 1.5, 30.0),
+        (good, -0.1, 1.5, 30.0),
+        (good, None, 1.5, 30.0),
+        (dict(good, yearly_pnl_twd={"2024": 1, "2025": -2, "2026": 3}), 0.5, 1.5, 30.0),
+        (good, 0.5, 2.5, 30.0),
+        (good, 0.5, None, 30.0),
+        (dict(good, metrics=metrics(max_drawdown_pct=30.1)), 0.5, 1.5, 30.0),  # 比同期指數深
+        (good, 0.5, 1.5, None),                                                # 沒有指數可比
     ]
-    assert [sc.judge(*case)["has_evidence"] for case in cases] == [False] * 7
-    # 參考值不影響成敗，只加註記。
-    thin = sc.judge(dict(good, metrics=metrics(round_count=20, hold_days_mean=120)), 0.5, 1.5)
+    assert [sc.judge(*case)["has_evidence"] for case in cases] == [False] * 8
+    # 參考值不影響成敗，只加註記；20% 是 2026-11-18 前的核心條件，現在只列參考。
+    thin = sc.judge(dict(good, metrics=metrics(round_count=20, hold_days_mean=120, max_drawdown_pct=25.0)),
+                    0.5, 1.5, 30.0)
     assert thin["has_evidence"]
-    assert [r["note"] for r in thin["reference"]] == ["樣本不足，屬初步證據", "不符合短中期定位"]
+    assert [r["note"] for r in thin["reference"]] == ["樣本不足，屬初步證據", "不符合短中期定位",
+                                                      "超過原本的 20% 上限"]
+
+
+def test_rejudge_uses_saved_validation_and_index_drawdown():
+    v = dict(metrics=metrics(max_drawdown_pct=32.0), yearly_pnl_twd={"2024": 1, "2025": 2, "2026": 3})
+    result = dict(strategies=dict(x=dict(validation=v, bootstrap_p5_expectancy_pct=0.5,
+                                         random_entry=dict(distribution=dict(expectancy_pct=dict(p95=1.5))))))
+    assert sc.rejudge(result, 36.5)["strategies"]["x"]["verdict"]["has_evidence"]
+    assert not sc.rejudge(result, 30.0)["strategies"]["x"]["verdict"]["has_evidence"]
+    assert result["benchmark"]["index_max_drawdown_pct"] == 30.0
+
+
+def test_index_max_drawdown_handles_ex_rights_and_bad_ticks():
+    from bot.benchmark_index import equal_weight_levels, index_max_drawdown_pct
+    from bot.stock_db import PriceBar
+    bar = lambda s, d, c: PriceBar(s, d, open=c, high=c, low=c, close=c, volume=1)
+    h = {"A": [bar("A", "2024-01-01", 100), bar("A", "2024-01-02", 110), bar("A", "2024-01-03", 88)],
+         "B": [bar("B", "2024-01-01", 50), bar("B", "2024-01-02", 50), bar("B", "2024-01-03", 50)]}
+    levels = equal_weight_levels(h)
+    assert [round(v, 4) for _, v in levels] == [1.05, round(1.05 * 0.9, 4)]
+    assert index_max_drawdown_pct(h) == pytest.approx(10.0)
+    # B 除息：前收 50、參考價 45，當天收 45 不算下跌；A 單日 +60% 視為資料問題不計入。
+    h["B"][2] = bar("B", "2024-01-03", 45)
+    h["A"][2] = bar("A", "2024-01-03", 176)
+    events = {"B": [dict(ex_date="2024-01-03", prev_close=50, reference_price=45)]}
+    assert equal_weight_levels(h, events)[-1][1] == pytest.approx(1.05)
+    assert index_max_drawdown_pct({}) is None
 
 
 def synthetic(symbol, start, days, phase):

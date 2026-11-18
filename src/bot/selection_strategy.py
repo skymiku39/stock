@@ -23,11 +23,12 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from bot.backtest_universe import load_universe
+from bot.benchmark_index import index_max_drawdown_pct
 from bot.random_entry import DEFAULT_SEED, swing_random_baseline
 from bot.stock_db import StockDB, default_db_path
 from bot.strategy_comparison import (BOOTSTRAP_RUNS, COMMON, EXECUTION, INITIAL_CASH, RANDOM_RUNS,
                                      SWING_WARMUP_START, TRAIN, VALIDATION, _public, _swing_backtester,
-                                     evaluate)
+                                     evaluate, rejudge, validation_index_mdd)
 from bot.swing_backtest import SwingParams, load_histories, load_revenue
 
 C2_FIXED = dict(entry="rs_revenue", rs_min=0.6, yoy_min=0.0)
@@ -39,7 +40,7 @@ def _c2_backtester(params: dict):
 
 
 def compare_c2(data: dict, revenue: dict, *, validate: bool = True, runs: int = RANDOM_RUNS,
-               log=lambda message: None) -> dict:
+               log=lambda message: None, index_mdd: Optional[float] = None) -> dict:
     """data: train／warm 各為 (histories, ex_rights)；warm 是含暖機期的驗證段。"""
     (train, train_events), (warm, warm_events) = data["train"], data["warm"]
     c2 = evaluate(
@@ -49,14 +50,15 @@ def compare_c2(data: dict, revenue: dict, *, validate: bool = True, runs: int = 
                                                   ex_rights=warm_events, revenue=revenue),
         lambda p: swing_random_baseline(_c2_backtester(p), warm, ex_rights=warm_events,
                                         trade_start=VALIDATION[0], runs=runs, revenue=revenue),
-        validate=validate, log=log)
+        validate=validate, log=log, index_mdd=index_mdd)
     defaults = {k: v for k, v in vars(SwingParams(**C2_FIXED)).items()
                 if k not in ("breakout_days", "fast_ma", "slow_ma")}
     return dict(train=dict(start=TRAIN[0], end=TRAIN[1]),
                 validation=dict(start=VALIDATION[0], end=VALIDATION[1]),
                 initial_cash=INITIAL_CASH, execution=EXECUTION, common=_public(COMMON),
                 c2_defaults=defaults, random_runs=runs, bootstrap_runs=BOOTSTRAP_RUNS,
-                seed=DEFAULT_SEED, validated=validate, strategies=dict(c2=c2))
+                seed=DEFAULT_SEED, validated=validate, strategies=dict(c2=c2),
+                benchmark=dict(index_max_drawdown_pct=index_mdd))
 
 
 def run(root: Path, *, validate: bool = True, runs: int = RANDOM_RUNS,
@@ -69,13 +71,15 @@ def run(root: Path, *, validate: bool = True, runs: int = RANDOM_RUNS,
         revenue = load_revenue(db, symbols)
     finally:
         db.close()
-    result = compare_c2(data, revenue, validate=validate, runs=runs, log=log)
+    warm, warm_events = data["warm"]
+    index_mdd = index_max_drawdown_pct(warm, warm_events, start=VALIDATION[0], end=VALIDATION[1])
+    result = compare_c2(data, revenue, validate=validate, runs=runs, log=log, index_mdd=index_mdd)
     result.update(symbols=symbols, revenue_symbols=sum(1 for rows in revenue.values() if rows))
     return result
 
 
 def render(result: dict) -> str:
-    from bot.strategy_comparison_report import _strategy_section
+    from bot.strategy_comparison_report import _num, _strategy_section, notes_block
     s = result["strategies"]["c2"]
     d = result["c2_defaults"]
     lines = ["# 選股策略 C2：參數決定與驗證", "",
@@ -90,7 +94,10 @@ def render(result: dict) -> str:
              f"每筆承擔權益 {d['risk_pct']:g}% 的風險、單檔上限 {d['max_position_pct']:.0f}%、最多 {d['max_positions']} 檔。",
              "- 比較：持有期限與移動停利 ATR 倍數（各 3 個值）。", "",
              "> 驗證段的單因子結果在研究階段已看過，所以驗證段對 C2 只算弱證據；真正的檢驗是前瞻追蹤（2026-11 起）。",
-             ""]
+             ""] + notes_block(result)
+    index_mdd = (result.get("benchmark") or {}).get("index_max_drawdown_pct")
+    if index_mdd is not None:
+        lines += [f"同期（驗證段）60 檔等權指數的最大回撤：{_num(index_mdd, 1, '%')}。", ""]
     lines += _strategy_section("c2", s, result["validated"])
     if result["validated"]:
         failed = [c["name"] for c in s["verdict"]["core"] if not c["passed"]]
@@ -109,9 +116,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--json", type=Path, help="完整結果 JSON 路徑")
     parser.add_argument("--runs", type=int, default=RANDOM_RUNS, help="隨機進場重複次數")
     parser.add_argument("--train-only", action="store_true", help="只跑參數決定段，不碰驗證段")
+    parser.add_argument("--from-json", type=Path, help="不重跑回測，讀先前存下的結果")
+    parser.add_argument("--rejudge", action="store_true",
+                        help="搭配 --from-json：依目前的通過標準重新判定（讀資料庫算同期指數回撤）")
     args = parser.parse_args(argv)
-    result = run(args.root.resolve(), validate=not args.train_only, runs=args.runs,
-                 log=lambda message: print(message, file=sys.stderr, flush=True))
+    root = args.root.resolve()
+    if args.from_json:
+        result = json.loads(args.from_json.read_text(encoding="utf-8"))
+        if args.rejudge:
+            rejudge(result, validation_index_mdd(root, result["symbols"]))
+    else:
+        result = run(root, validate=not args.train_only, runs=args.runs,
+                     log=lambda message: print(message, file=sys.stderr, flush=True))
     text = render(result)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

@@ -65,6 +65,7 @@ def _strategy_result(summary, params: dict) -> dict:
 
 def run_forward(root: Path, *, end: str = "") -> dict:
     from bot.backtest_universe import load_universe
+    from bot.benchmark_index import index_max_drawdown_pct
     from bot.stock_db import StockDB, default_db_path
     from bot.strategy_comparison import (EXECUTION, INITIAL_CASH, REFERENCE_ROUNDS, _smile_backtester,
                                          _swing_backtester)
@@ -91,7 +92,9 @@ def run_forward(root: Path, *, end: str = "") -> dict:
         execution=EXECUTION, symbols=len(symbols), symbols_at_as_of=covered,
         coverage_ok=bool(symbols) and covered / len(symbols) >= MIN_COVERAGE,
         ex_rights_last_event=last_event[0], ex_rights_retrieved_at=last_event[1],
-        reference_rounds=REFERENCE_ROUNDS, strategies={})
+        reference_rounds=REFERENCE_ROUNDS, strategies={},
+        # 通過標準（2026-11-18 起）：策略最大回撤不超過同期 60 檔等權指數。
+        index_max_drawdown_pct=index_max_drawdown_pct(warm, warm_events, start=FORWARD_START, end=end))
     if not dates:
         return result
     smile = _smile_backtester(FROZEN["smile"]).run_histories(
@@ -124,7 +127,9 @@ def render(result: dict) -> str:
                   f"{'' if enough else '；**樣本不足，不能當證據**'}） |",
                   f"| 每輪期望值 | {m['expectancy_pct']:.2f}% |",
                   f"| 勝率 | {m.get('win_rate', 0):.1f}% |",
-                  f"| 最大回撤 | {m['max_drawdown_pct']:.2f}% |",
+                  f"| 最大回撤 | {m['max_drawdown_pct']:.2f}%" + (
+                      f"（同期等權指數 {result['index_max_drawdown_pct']:.2f}%）"
+                      if result.get("index_max_drawdown_pct") is not None else "") + " |",
                   f"| 成交買進次數 | {m['filled_buys']} |",
                   f"| 未平倉部位 | {len(data['open_positions'])} 檔 |", ""]
         if data["open_positions"]:

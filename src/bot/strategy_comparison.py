@@ -24,6 +24,7 @@ from typing import Callable, Optional, Sequence
 
 from bot.backtest_universe import load_universe
 from bot.config import Settings
+from bot.benchmark_index import index_max_drawdown_pct
 from bot.random_entry import (DEFAULT_SEED, flat_metrics, percentile, smile_random_baseline,
                               swing_random_baseline)
 from bot.smile_curve_backtest import SmileCurveBacktester
@@ -139,7 +140,13 @@ def _open_count(summary) -> int:
     return len(summary.open_positions)
 
 
-def judge(validation: dict, bootstrap: Optional[float], random_p95: Optional[float]) -> dict:
+def judge(validation: dict, bootstrap: Optional[float], random_p95: Optional[float],
+          index_mdd: Optional[float] = None) -> dict:
+    """index_mdd：同期 60 檔等權指數的最大回撤（%），見 bot.benchmark_index。
+
+    2026-11-18 使用者決定：回撤條件由「≤ 20%」改為「不超過同期等權指數」，20% 改列參考值。
+    原因：指數本身在參數決定段與驗證段的回撤就有 34～37%，只做多的股票策略幾乎不可能 ≤ 20%。
+    """
     m = validation["metrics"]
     years = validation["yearly_pnl_twd"]
     core = [
@@ -150,8 +157,8 @@ def judge(validation: dict, bootstrap: Optional[float], random_p95: Optional[flo
              passed=bool(years) and all(v > 0 for v in years.values())),
         dict(name="每輪期望值高於隨機進場第 95 百分位", value=dict(strategy=m["expectancy_pct"], random_p95=random_p95),
              passed=random_p95 is not None and m["round_count"] > 0 and m["expectancy_pct"] > random_p95),
-        dict(name=f"最大回撤 ≤ {MAX_DRAWDOWN_PCT:.0f}%", value=m["max_drawdown_pct"],
-             passed=m["max_drawdown_pct"] <= MAX_DRAWDOWN_PCT),
+        dict(name="最大回撤不超過同期等權指數", value=dict(strategy=m["max_drawdown_pct"], index=index_mdd),
+             passed=index_mdd is not None and m["max_drawdown_pct"] <= index_mdd),
     ]
     low, high = REFERENCE_HOLD_DAYS
     reference = [
@@ -161,6 +168,9 @@ def judge(validation: dict, bootstrap: Optional[float], random_p95: Optional[flo
         dict(name=f"平均持有天數（參考範圍 {low}～{high}）", value=m["hold_days_mean"],
              met=low <= m["hold_days_mean"] <= high,
              note="" if low <= m["hold_days_mean"] <= high else "不符合短中期定位"),
+        dict(name=f"最大回撤 ≤ {MAX_DRAWDOWN_PCT:.0f}%（2026-11-18 前的核心條件）", value=m["max_drawdown_pct"],
+             met=m["max_drawdown_pct"] <= MAX_DRAWDOWN_PCT,
+             note="" if m["max_drawdown_pct"] <= MAX_DRAWDOWN_PCT else "超過原本的 20% 上限"),
     ]
     return dict(core=core, reference=reference, has_evidence=all(c["passed"] for c in core))
 
@@ -177,7 +187,8 @@ def _swing_backtester(params: dict) -> SwingBacktester:
 
 def evaluate(name: str, axes, run_train: Callable[[dict], object],
              run_validation: Callable[[dict], object],
-             random_baseline: Callable[[dict], dict], *, validate: bool, log) -> dict:
+             random_baseline: Callable[[dict], dict], *, validate: bool, log,
+             index_mdd: Optional[float] = None) -> dict:
     combos = grid(axes)
     for combo in combos:
         summary = run_train(combo["params"])
@@ -202,7 +213,29 @@ def evaluate(name: str, axes, run_train: Callable[[dict], object],
     spread = baseline["random_entry"]["distribution"].get("expectancy_pct")
     result.update(validation=validation, bootstrap_p5_expectancy_pct=bootstrap,
                   random_entry=baseline["random_entry"],
-                  verdict=judge(validation, bootstrap, spread["p95"] if spread else None))
+                  verdict=judge(validation, bootstrap, spread["p95"] if spread else None, index_mdd))
+    return result
+
+
+def validation_index_mdd(root: Path, symbols: Sequence[str]) -> Optional[float]:
+    """驗證段的等權指數最大回撤（讀資料庫）。"""
+    db = StockDB.open(path=default_db_path(root))
+    try:
+        warm, events = load_histories(db, symbols, start=SWING_WARMUP_START, end=VALIDATION[1])
+    finally:
+        db.close()
+    return index_max_drawdown_pct(warm, events, start=VALIDATION[0], end=VALIDATION[1])
+
+
+def rejudge(result: dict, index_mdd: Optional[float]) -> dict:
+    """用已存的驗證段結果重新判定（通過標準改了、回測本身不用重跑時）。就地更新並傳回 result。"""
+    result.setdefault("benchmark", {})["index_max_drawdown_pct"] = index_mdd
+    for s in result["strategies"].values():
+        if "validation" not in s:
+            continue
+        spread = s["random_entry"]["distribution"].get("expectancy_pct")
+        s["verdict"] = judge(s["validation"], s.get("bootstrap_p5_expectancy_pct"),
+                             spread["p95"] if spread else None, index_mdd)
     return result
 
 
@@ -224,6 +257,8 @@ def compare(symbols: Sequence[str], data: dict, *, validate: bool = True, runs: 
     """data: train／valid／warm 各為 (histories, ex_rights)。warm 是含暖機期的驗證段，給波段原型用。"""
     (train, train_events), (valid, valid_events), (warm, warm_events) = (
         data["train"], data["valid"], data["warm"])
+    # 指數從暖機期開始算，驗證段第一天也有前一日收盤可比；回撤只看驗證段。
+    index_mdd = index_max_drawdown_pct(warm, warm_events, start=VALIDATION[0], end=VALIDATION[1])
     smile = evaluate(
         "smile", SMILE_AXES,
         lambda p: _smile_backtester(p).run_histories(train, start=TRAIN[0], end=TRAIN[1],
@@ -232,7 +267,7 @@ def compare(symbols: Sequence[str], data: dict, *, validate: bool = True, runs: 
                                                      ex_rights=valid_events),
         lambda p: smile_random_baseline(_smile_backtester(p), valid, ex_rights=valid_events,
                                         start=VALIDATION[0], end=VALIDATION[1], runs=runs),
-        validate=validate, log=log)
+        validate=validate, log=log, index_mdd=index_mdd)
     swing = evaluate(
         "swing", SWING_AXES,
         lambda p: _swing_backtester(p).run_histories(train, ex_rights=train_events),
@@ -240,7 +275,7 @@ def compare(symbols: Sequence[str], data: dict, *, validate: bool = True, runs: 
                                                      ex_rights=warm_events),
         lambda p: swing_random_baseline(_swing_backtester(p), warm, ex_rights=warm_events,
                                         trade_start=VALIDATION[0], runs=runs),
-        validate=validate, log=log)
+        validate=validate, log=log, index_mdd=index_mdd)
     with_bars = [s for s in symbols if train.get(s) or valid.get(s)]
     return dict(
         symbols=symbols, symbols_with_data=len(with_bars),
@@ -249,6 +284,7 @@ def compare(symbols: Sequence[str], data: dict, *, validate: bool = True, runs: 
         initial_cash=INITIAL_CASH, execution=EXECUTION, common=_public(COMMON),
         smile_fixed=SMILE_FIXED, swing_defaults=_swing_defaults(), random_runs=runs,
         bootstrap_runs=BOOTSTRAP_RUNS, seed=DEFAULT_SEED, validated=validate,
+        benchmark=dict(index_max_drawdown_pct=index_mdd),
         strategies=dict(smile=smile, swing=swing))
 
 
@@ -274,11 +310,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="不重跑回測，只用先前存下的結果 JSON 重新產生報告")
     parser.add_argument("--train-only", action="store_true",
                         help="只跑參數決定段（開發與除錯用；不會碰驗證段）")
+    parser.add_argument("--rejudge", action="store_true",
+                        help="搭配 --from-json：依目前的通過標準重新判定（會讀資料庫算同期指數回撤），"
+                             "結果寫回 --json")
     args = parser.parse_args(argv)
     root = args.root.resolve() if args.root else Path.cwd()
     if args.from_json:
         source = args.from_json if args.from_json.is_absolute() else root / args.from_json
         result = json.loads(source.read_text(encoding="utf-8"))
+        if args.rejudge:
+            rejudge(result, validation_index_mdd(root, result["symbols"]))
     else:
         result = run_comparison(root, validate=not args.train_only, runs=args.runs,
                                 log=lambda message: print(message, file=sys.stderr, flush=True))
@@ -288,7 +329,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(text.encode("utf-8"))
 
-    if not args.from_json:
+    if not args.from_json or args.rejudge:
         write(args.json, json.dumps(result, ensure_ascii=False, indent=2))  # 先存結果，再產生報告
     report = render(result)
     write(args.output, report)
