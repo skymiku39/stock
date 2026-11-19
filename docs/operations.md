@@ -195,6 +195,36 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
 
 ---
 
+## 〇・四、實際持股的微笑盯盤（只提醒、不下單）
+
+微笑策略只認模擬帳戶的部位。要用微笑規則盯券商帳戶裡的實際持股，用：
+
+```powershell
+.venv\Scripts\python.exe -m bot.smile_watch --symbol 1514 --reference 105
+```
+
+- **排程**：`config/smile_watch.json` 存在時，排程器會有 `smile_watch` 工作（平日 09:00～13:30，
+  執行 `--config config/smile_watch.json --max-minutes 50`；每輪 50 分鐘正常結束、下一分鐘再啟動，
+  避開 `scheduler_job_timeout_seconds`）。`SCHEDULER_SMILE_WATCH_ENABLED=false` 可停用。
+  改名單不用重啟排程器（下一輪就會讀到）；第一次新增名單檔才要重啟。盤中這個工作幾乎一直是
+  running，重啟排程器前「沒有工作在執行」的檢查可以不算它（中斷只會少盯幾十秒）。
+- 名單格式：`{"targets": [{"symbol": "1514", "reference": 105}]}`；每筆可加 `stop_loss_pct`
+  （覆寫 `SMILE_SYMBOL_STOP_LOSS_PCT`）與 `holding`（`"4@85.65"`，手動給張數與均價、不讀券商）。
+- 啟動時與之後每 30 分鐘唯讀查詢一次券商實際庫存（只登入與列出持股），整個部位視為一批、
+  成本用券商的均價。名單內的標的沒有庫存時不盯，之後買進會在下一次查詢時開始盯。
+- 每 20 秒輪詢公開資訊觀測站的報價（成交價優先，這一輪沒有成交價時用委買委賣中間價）；
+  手動執行時 13:30 自動結束。假日沒有當日報價，不會有任何判斷。
+- 訊號：`take_profit`（回到標準價且整個部位有淨利，或達 `SMILE_TAKE_PROFIT_PCT`）、
+  `breakeven`（部位轉為淨利）、`stop_loss`（達 `SMILE_SYMBOL_STOP_LOSS_PCT`，可用
+  `--stop-loss-pct` 覆寫）、`stop_near`（距停損價 3% 以內）、`add_buy`（跌幅已達階梯且張數低於
+  `MAX_LOT_PER_SYMBOL`）。同一個訊號每個交易日只提醒一次。
+- 輸出在 `data/smile_watch/`：`status-<代號>.json`（最新狀態）、`alerts.jsonl`（每次提醒）、
+  `state.json`（當天已提醒的訊號）。有設定 Telegram 才會推播，否則只寫紀錄與 log。
+- 程式不建立也不送出任何委託，買賣由使用者自己操作。沒有逐批成交紀錄，所以不知道已經買過
+  哪幾階；也沒有「時事＋即時股價」的情緒賣出判斷。
+
+---
+
 ## 一、每日操作流程
 
 ### 盤前（08:00 ~ 09:00）

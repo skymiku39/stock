@@ -20,10 +20,10 @@ def _settings(**overrides) -> Settings:
 # ---------------------------------------------------------------------------
 
 
-def test_scheduler_builds_both_jobs_by_default() -> None:
+def test_scheduler_builds_both_jobs_by_default(tmp_path) -> None:
     from bot.scheduler import Scheduler
 
-    sch = Scheduler(_settings(), dry_run=True)
+    sch = Scheduler(_settings(), project_root=tmp_path, dry_run=True)
     names = {j.name for j in sch.jobs}
     assert names == {"macro", "fundamentals", "research", "company", "history_fetch"}
 
@@ -38,10 +38,31 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_research_interval_min=0,
             scheduler_company_interval_min=0,
             scheduler_history_fetch_interval_min=0,
+            scheduler_smile_watch_enabled=False,
         ),
         dry_run=True,
     )
     assert sch.jobs == []
+
+
+def test_scheduler_smile_watch_job_needs_config_file(tmp_path) -> None:
+    import datetime as dt
+
+    from bot.scheduler import Scheduler
+
+    def job(**kw):
+        sch = Scheduler(_settings(**kw), project_root=tmp_path, dry_run=True)
+        return next((j for j in sch.jobs if j.name == "smile_watch"), None)
+
+    assert job() is None  # 沒有名單檔就不排
+    config = tmp_path / "config" / "smile_watch.json"
+    config.parent.mkdir()
+    config.write_text('{"targets": [{"symbol": "1514", "reference": 105}]}', encoding="utf-8")
+    assert job(scheduler_smile_watch_enabled=False) is None
+    found = job()
+    assert found.module == "bot.smile_watch" and not found.run_once_per_day
+    assert found.extra_args == ["--config", str(config), "--max-minutes", "50"]
+    assert (found.window_start, found.window_end) == (dt.time(9, 0), dt.time(13, 30))
 
 
 def test_scheduler_research_extra_args_parsed() -> None:

@@ -425,6 +425,8 @@ class Settings(BaseSettings):
     scheduler_monitor_mode: Literal["watch", "report", "trade"] = "watch"
     # 只看不買：約 10 元熱度 + 熱門個股期貨快照 (分鐘)；<=0 停用
     scheduler_watch_snapshot_interval_min: int = 0
+    # 實際持股的微笑盯盤（只提醒、不下單）；名單在 config/smile_watch.json，檔案不存在就不排
+    scheduler_smile_watch_enabled: bool = True
 
     # --- 本地股票資料庫 (SQLite) ---
     # 留空 = 預設 data/stock.db；可指向同步資料夾，例如:

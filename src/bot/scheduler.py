@@ -413,6 +413,20 @@ class Scheduler:
                 interval_min=s.scheduler_watch_snapshot_interval_min,
                 market_hours_only=True,
             ))
+        smile_watch_config = Path(self.project_root) / "config" / "smile_watch.json"
+        if getattr(s, "scheduler_smile_watch_enabled", True) and smile_watch_config.exists():
+            # 實際持股的微笑盯盤（只提醒、不下單）。每輪最多 50 分鐘就正常結束、下一分鐘再啟動，
+            # 才不會碰到 scheduler_job_timeout_seconds；名單是空的時程式會直接結束。
+            jobs.append(Job(
+                name="smile_watch",
+                console_script="",
+                module="bot.smile_watch",
+                interval_min=1,
+                market_hours_only=False,
+                extra_args=["--config", str(smile_watch_config), "--max-minutes", "50"],
+                window_start=dt.time(9, 0),
+                window_end=dt.time(13, 30),
+            ))
         return jobs
 
     # ------------------------------------------------------------------
