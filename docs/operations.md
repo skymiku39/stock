@@ -221,7 +221,8 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
 - 輸出在 `data/smile_watch/`：`status-<代號>.json`（最新狀態）、`alerts.jsonl`（每次提醒）、
   `state.json`（當天已提醒的訊號）。提醒會跳本機通知（見下方）；有設定 Telegram 另外推播。
 - **本機通知**（`bot/local_notify.py`，`LOCAL_NOTIFY_ENABLED=false` 可停用）：在這台電腦跳 Windows
-  桌面通知，不經外部服務、不用額外套件。排程器的程序在工作階段 0（S4U），從那裡發的通知不會出現在
+  桌面通知，不經外部服務、不用額外套件。做法和 Hello Streamer 用的 winotify 相同，通知上的程式名稱是
+  「股票研究 Stock Lab」（要關閉或調整，在 Windows 設定 → 系統 → 通知裡找這個名稱）。排程器的程序在工作階段 0（S4U），從那裡發的通知不會出現在
   桌面，所以背景程序只把通知寫進 `data/notifications/pending/`，再觸發排程工作
   「SkyMiku Stock Local Notify」（以互動方式登入）到桌面上顯示。這個工作要先註冊一次：
   `powershell -ExecutionPolicy Bypass -File scripts\install_local_notify_task.ps1`（加 `-Remove` 移除；

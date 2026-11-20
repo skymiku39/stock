@@ -9,7 +9,8 @@
 「以互動方式登入」的排程工作（`scripts/install_local_notify_task.ps1` 註冊）到桌面上顯示。
 已經在桌面工作階段的程序（手動執行）則直接顯示。
 
-不新增套件：用 Windows PowerShell 內建的 WinRT 通知介面（`scripts/show_toast.ps1`）。
+不新增套件：用 Windows PowerShell 內建的 WinRT 通知介面（`scripts/show_toast.ps1`），
+做法和 winotify 套件（Hello Streamer 用的）相同：傳統的 ToastImageAndText02 範本、用自己的程式名稱。
 """
 from __future__ import annotations
 
@@ -27,6 +28,9 @@ from typing import Callable, Optional
 from bot.utils import configure_utf8_stdio, get_logger, now_tw
 
 TASK_NAME = "SkyMiku Stock Local Notify"
+# 通知上顯示的程式名稱。和 Hello Streamer（winotify）一樣用自己的名稱，不借用
+# Windows PowerShell 的識別碼——借用時通知會歸在「Windows PowerShell」底下，使用者實測沒看到。
+APP_ID = "股票研究 Stock Lab"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MAX_AGE_HOURS = 12.0  # 排隊超過這個時間的通知不再跳出，只記為 expired
 _TAG = re.compile(r"</?(?:b|i|u|pre|code)>", re.IGNORECASE)
@@ -55,7 +59,8 @@ def split_text(text: str) -> tuple:
 def show_toast(title: str, body: str, *, root: Path = PROJECT_ROOT, timeout: float = 20.0) -> None:
     """直接顯示一則通知；失敗丟 RuntimeError。只能在桌面工作階段使用。"""
     script = Path(root) / "scripts" / "show_toast.ps1"
-    env = dict(os.environ, STOCK_TOAST_TITLE=title, STOCK_TOAST_BODY=body)
+    env = dict(os.environ, STOCK_TOAST_TITLE=title, STOCK_TOAST_BODY=body,
+               STOCK_TOAST_APP_ID=APP_ID)
     try:
         done = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
