@@ -182,10 +182,10 @@ def _prices(root: Path, now: dt.datetime, core: List[str], extended: List[str]) 
 
 
 def _etf_holdings(root: Path, now: dt.datetime) -> Dict[str, Any]:
-    from bot.active_etf import list_holdings_dates, load_active_etfs
+    from bot.active_etf import list_holdings_dates, load_tracked_etfs
     expected = expected_market_date(now, ready_hour=20)
     stale, missing, total = [], [], 0
-    for etf in load_active_etfs(root):
+    for etf in load_tracked_etfs(root):
         total += 1
         dates = list_holdings_dates(etf.symbol, root)
         if not dates:

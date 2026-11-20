@@ -101,10 +101,10 @@ EXTENDED_MAX_MONTHS = 6            # 落後太久時一次最多補幾個月；�
 
 def extended_price_symbols(root):
     """回傳擴充名單的台股代號；任何一個來源讀不到都不影響其他來源。"""
-    from bot.active_etf import load_active_etfs, list_holdings_dates, load_holdings
+    from bot.active_etf import load_tracked_etfs, list_holdings_dates, load_holdings
     symbols = set()
     try:
-        etfs = list(load_active_etfs(root))
+        etfs = list(load_tracked_etfs(root))
     except Exception:
         etfs = []
     for etf in etfs:
@@ -471,6 +471,12 @@ def main(argv=None):
             # 凍結參數的前瞻追蹤：資料日有前進且名單涵蓋率足夠時才重算。
             from bot.forward_tracker import update as update_forward
             update_forward(root)
+        except Exception:
+            pass
+        try:
+            # ETF 關注名單：只讀已存的持股快照，重算很快，每輪都更新。
+            from bot.etf_focus import update as update_etf_focus
+            update_etf_focus(root)
         except Exception:
             pass
         state = read_json(root / 'data/daily_research' / result['date'] / 'status.json')

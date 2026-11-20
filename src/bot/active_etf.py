@@ -121,6 +121,7 @@ class ActiveEtf:
     region: str = "台灣"
     freq: str = "-"
     holdings_url: str = ""  # 投信官方持股頁面 URL，供自動抓取使用
+    kind: str = "active"  # active＝主動式（含明星基金）；passive＝被動式（指數型）
 
 
 @dataclass
@@ -196,6 +197,48 @@ def load_active_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
         except Exception:
             pass
     return [ActiveEtf(**r) for r in DEFAULT_ACTIVE_ETFS]
+
+
+def passive_list_path(root: Optional[Path] = None) -> Path:
+    return (root or Path.cwd()) / "config" / "passive_etfs.json"
+
+
+def load_passive_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
+    """讀 config/passive_etfs.json 的大型被動式 ETF；檔案不存在或格式錯誤回傳空名單。
+
+    被動式 ETF 照指數規則選股，不代表經理人的判斷，所以不放進 `load_active_etfs`
+    （跟單策略、共識訊號、研究焦點都只看主動式）。要連同被動式一起處理的地方
+    （持股收集、每日日 K、ETF 關注名單）改用 `load_tracked_etfs`。
+    """
+    p = passive_list_path(root)
+    try:
+        rows = json.loads(p.read_text(encoding="utf-8")).get("etfs", [])
+    except (OSError, ValueError, AttributeError):
+        return []
+    out: List[ActiveEtf] = []
+    for row in rows:
+        try:
+            symbol = str(row["symbol"]).strip()
+            if not symbol:
+                continue
+            out.append(ActiveEtf(
+                symbol=symbol, name=str(row.get("name", symbol)),
+                issuer=str(row.get("issuer", "")), region=str(row.get("region", "台灣")),
+                freq=str(row.get("freq", "-")),
+                holdings_url=str(row.get("holdings_url")
+                                 or _ETFINFO_HOLDINGS.format(symbol=symbol)),
+                kind="passive"))
+        except (KeyError, TypeError, AttributeError):
+            continue
+    return out
+
+
+def load_tracked_etfs(root: Optional[Path] = None) -> List[ActiveEtf]:
+    """主動式加被動式；代號重複時以主動式名單為準。"""
+    etfs = list(load_active_etfs(root))
+    seen = {e.symbol for e in etfs}
+    etfs.extend(e for e in load_passive_etfs(root) if e.symbol not in seen)
+    return etfs
 
 
 def sync_etf_meta_to_db(
