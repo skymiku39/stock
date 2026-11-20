@@ -219,7 +219,16 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
   `--stop-loss-pct` 覆寫）、`stop_near`（距停損價 3% 以內）、`add_buy`（跌幅已達階梯且張數低於
   `MAX_LOT_PER_SYMBOL`）。同一個訊號每個交易日只提醒一次。
 - 輸出在 `data/smile_watch/`：`status-<代號>.json`（最新狀態）、`alerts.jsonl`（每次提醒）、
-  `state.json`（當天已提醒的訊號）。有設定 Telegram 才會推播，否則只寫紀錄與 log。
+  `state.json`（當天已提醒的訊號）。提醒會跳本機通知（見下方）；有設定 Telegram 另外推播。
+- **本機通知**（`bot/local_notify.py`，`LOCAL_NOTIFY_ENABLED=false` 可停用）：在這台電腦跳 Windows
+  桌面通知，不經外部服務、不用額外套件。排程器的程序在工作階段 0（S4U），從那裡發的通知不會出現在
+  桌面，所以背景程序只把通知寫進 `data/notifications/pending/`，再觸發排程工作
+  「SkyMiku Stock Local Notify」（以互動方式登入）到桌面上顯示。這個工作要先註冊一次：
+  `powershell -ExecutionPolicy Bypass -File scripts\install_local_notify_task.ps1`（加 `-Remove` 移除；
+  不需要系統管理員）。沒註冊時通知留在佇列、log 會有一則警告；排隊超過 12 小時的不再跳出。
+  沒有登入桌面時不會顯示，下次登入時補跳。檢查：`python -m bot.local_notify --status`；
+  測試：`--test "標題\n內文"`（直接顯示）、`--queue-test "標題\n內文"`（走排隊與排程工作）。
+  紀錄在 `data/notifications/history.jsonl`。Windows 的「請勿打擾」開啟時通知只會進通知中心。
 - 程式不建立也不送出任何委託，買賣由使用者自己操作。沒有逐批成交紀錄，所以不知道已經買過
   哪幾階；也沒有「時事＋即時股價」的情緒賣出判斷。
 

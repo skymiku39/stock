@@ -239,6 +239,8 @@ class Settings(BaseSettings):
     # --- Telegram 通知 (留空則不啟用) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # --- 本機通知（Windows 桌面通知，不經外部服務；見 bot/local_notify.py）---
+    local_notify_enabled: bool = True
 
     # --- 微笑曲線策略 (stock-smile-backtest / 規劃中 live) ---
     smile_buy_tiers: str = "1:1,3:2,5:3,8:4"

@@ -2,7 +2,7 @@
 
 微笑策略（`strategy_smile.py`）只認模擬帳戶的部位。這個模組把券商的實際庫存（唯讀查詢）
 當成一批微笑持倉，輪詢交易所公開報價，用同一個 `SmileCurveEngine` 的規則判斷，
-條件第一次成立時寫紀錄並發 Telegram（有設定才發）。買賣由使用者自己決定與操作。
+條件第一次成立時寫紀錄、跳本機通知，並發 Telegram（有設定才發）。買賣由使用者自己決定與操作。
 
     python -m bot.smile_watch --symbol 1514 --reference 105
     python -m bot.smile_watch --config config/smile_watch.json   # 排程器用
@@ -268,6 +268,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     from bot.config import Settings
+    from bot.local_notify import LocalNotifier
     from bot.market_source import TwsePublicMarketSource
     from bot.notifier import TelegramNotifier
 
@@ -312,13 +313,21 @@ def main(argv=None) -> int:
     engines = build_engines(holdings)
     notifier = TelegramNotifier(base_settings.telegram_bot_token, base_settings.telegram_chat_id,
                                 logger)
-    watcher = SmileWatcher(Path(args.out_dir), notifier.send if notifier.enabled else None, logger)
+    local = LocalNotifier(base_settings.local_notify_enabled, logger=logger)
+    senders = [n.send for n in (notifier, local) if n.enabled]
+
+    def notify_all(text: str) -> None:
+        for send in senders:
+            send(text)
+
+    watcher = SmileWatcher(Path(args.out_dir), notify_all if senders else None, logger)
     source = TwsePublicMarketSource([t.symbol for t in targets], logger=logger)
     for t in targets:
         h = holdings.get(t.symbol)
         logger.info("盯 %s：%s、標準價 %.2f", t.symbol,
                     f"{h.lots} 張、均價 {h.avg_price:.2f}" if h else "目前沒有庫存", t.reference)
-    logger.info("Telegram %s", "已啟用" if notifier.enabled else "未設定（只寫紀錄）")
+    logger.info("Telegram %s", "已啟用" if notifier.enabled else "未設定")
+    logger.info("本機通知 %s", f"已啟用（{local.mode}）" if local.enabled else "已停用")
 
     started = refreshed = time.monotonic()
     last_logged = float("-inf")
