@@ -278,6 +278,8 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
   - **持股併入每日收集（使用者決定：手動名單，加上目前持有的；曾經有紀錄的都留著）**：`src/bot/held_symbols.py`。`config/held_symbols.json`（手動，目前 1514）與 `data/held_symbols_seen.json`（微笑盯盤讀券商庫存時自動記下全部持股）取聯集、只增不減，併入 `extended_price_symbols`。為什麼分兩個檔：`config/` 進版控，背景程式不該自己改。限制：自動記錄依賴盯盤有在跑；不另外每天登入券商。
   - 11-18 手動啟動的日 K 回補程序留著，讓它補新增的股票（使用者決定）。
   - 今天的變更已提交並推送（`4781de5` 本機通知、`11b0f6c` ETF 關注名單）。
+  - **本機通知改成和 Hello Streamer 相同的做法（使用者 11-20 回報沒看到通知後決定）**：原本借用 Windows PowerShell 的應用程式識別碼，兩則測試通知查得到在通知中心（歸在「Windows PowerShell」底下），但使用者沒看到。Hello Streamer（`D:\skymiku\hello_streamer`）用 winotify 套件、以自己的名稱發通知。決策：不新增 winotify 相依，改寫 `scripts/show_toast.ps1` 成同樣的做法（ToastImageAndText02 範本、名稱「股票研究 Stock Lab」）。為什麼：winotify 本身也只是產生一段 PowerShell，照做不用動 `uv.lock`。實測 Windows 已登記這個名稱、狀態 Enabled、通知中心有 2 則；使用者是否真的看到橫幅仍待確認（若仍沒看到，下一個要查的是「請勿打擾」）。
+  - 手動跑一輪 `--collect-only`（使用者要求）：亞力 1514 的日 K 已入庫，11-02～11-20 共 15 根；更早的歷史由 `history_fetch` 佇列補。
 - 下一步由使用者決定：要不要設定 Telegram；情緒賣出的門檻、是否在模擬盤啟用；#38 要不要做。日 K 回補跑完後要產生 ETF 名單的因子報告。
 - 排程設計備忘：exit 4=busy 60 秒後重試；exit 3=blocked/partial 依 `next_retry_epoch`；重試次數用完只照一般間隔執行，直到成功才歸零。
 
