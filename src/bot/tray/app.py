@@ -1,10 +1,12 @@
-"""系統匣程式：圖示顏色顯示整體狀態，左鍵開狀態視窗，右鍵選單開報告與儀表板。
+"""系統匣程式：圖示外框顏色顯示整體狀態，左鍵開主視窗，右鍵選單開報告與儀表板。
 
     python -m bot.tray            # 或 stock-tray；要在登入的桌面執行
     pythonw -m bot.tray           # 不帶主控台視窗（登入時自動啟動用這個）
 
 這是前台：只讀背景工作寫好的狀態檔（見 bot/tray/status.py），不登入券商、不下單。
 排程器照舊在背景執行，關掉這個程式不影響資料收集。
+
+主視窗按 X 預設收進系統匣（程式繼續執行）；視窗上的開關可以改成按 X 就結束。
 
 執行緒：Tk 的主迴圈在主執行緒；pystray 用 run_detached 跑在自己的執行緒，選單動作一律
 丟進佇列，由 Tk 這邊定時取出執行——Tk 的元件只能在建立它的執行緒操作。
@@ -22,6 +24,7 @@ import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
 
+from bot.tray import settings as tray_settings
 from bot.tray import status as tray_status
 from bot.utils import get_logger, now_tw
 
@@ -31,21 +34,27 @@ DASHBOARD_PORT = 8501
 DASHBOARD_URL = f"http://127.0.0.1:{DASHBOARD_PORT}"
 DASHBOARD_START_TIMEOUT = 45.0
 MUTEX_NAME = "Local\\SkyMikuStockLabTray"
-LEVEL_COLOR = {tray_status.OK: "#2e9e5b", tray_status.WARN: "#e0a100",
-               tray_status.FAIL: "#d64545", tray_status.UNKNOWN: "#8a8f98"}
+LEVEL_COLOR = {tray_status.OK: "#00e676", tray_status.WARN: "#ffb300",
+               tray_status.FAIL: "#ef5350", tray_status.UNKNOWN: "#8a8f98"}
+ICON_FILL = "#0f3460"  # 與 Hello Streamer 的圖示同一個底色
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 EDGE_PATHS = (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
               r"C:\Program Files\Microsoft\Edge\Application\msedge.exe")
 
 
 def make_icon(level: str, size: int = 64):
-    """純色圓形加白色 S；顏色代表整體狀態。"""
+    """深藍圓角方塊加白色 S（造型同 Hello Streamer）；外框顏色代表整體狀態。
+
+    外框比 Hello Streamer 的粗：圖示在工作列只有 16 像素，細框看不出顏色。
+    """
     from PIL import Image, ImageDraw, ImageFont
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.ellipse((2, 2, size - 3, size - 3), fill=LEVEL_COLOR.get(level, LEVEL_COLOR["unknown"]))
+    draw.rounded_rectangle((2, 2, size - 3, size - 3), radius=size * 14 // 64, fill=ICON_FILL,
+                           outline=LEVEL_COLOR.get(level, LEVEL_COLOR["unknown"]),
+                           width=max(1, size // 8))
     try:
-        font = ImageFont.truetype("segoeuib.ttf", int(size * 0.62))
+        font = ImageFont.truetype("segoeuib.ttf", int(size * 0.5))
     except OSError:
         font = ImageFont.load_default()
     box = draw.textbbox((0, 0), "S", font=font)
@@ -127,18 +136,31 @@ class Dashboard:
 
 class TrayApp:
     def __init__(self, root: Path):
-        import tkinter as tk
+        import customtkinter as ctk
         self.root = Path(root)
         self.logger = get_logger("tray")
+        self.settings = tray_settings.load(self.root)
         self.dashboard = Dashboard(self.root, self.logger)
         self.snapshot = tray_status.read_snapshot(self.root, now_tw())
         self.actions: "queue.Queue[Callable[[], None]]" = queue.Queue()
-        self.tk = tk.Tk()
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        self.tk = ctk.CTk()
         self.tk.withdraw()
+        # pythonw 沒有標準錯誤輸出，Tk 回呼裡的例外要寫進日誌才看得到
+        self.tk.report_callback_exception = lambda *exc: self.logger.error(
+            "Tk 回呼發生例外", exc_info=exc)
         self.window = None
         self.icon = None
         self._icon_level = None
         self._busy = ""  # 進行中的工作，顯示在選單與視窗
+        self._opening_dashboard = False
+
+    def save_settings(self) -> None:
+        try:
+            tray_settings.save(self.root, self.settings)
+        except OSError:
+            self.logger.exception("儲存系統匣設定失敗")
 
     # ---- 開啟類動作 --------------------------------------------------------
     def open_path(self, relative: str) -> None:
@@ -150,6 +172,9 @@ class TrayApp:
 
     def open_dashboard(self) -> None:
         import threading
+        if self._opening_dashboard:  # 啟動要幾秒，期間再按不重複啟動
+            return
+        self._opening_dashboard = True
 
         def work():
             try:
@@ -166,6 +191,7 @@ class TrayApp:
                 self.actions.put(lambda: self.notify("開啟儀表板失敗", "請看 log 的 tray 紀錄。"))
             finally:
                 self._busy = ""
+                self._opening_dashboard = False
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -197,7 +223,7 @@ class TrayApp:
             rows += [Item(h.line()[:80], None, enabled=False) for h in snap.holdings]
             rows += [
                 Menu.SEPARATOR,
-                Item("狀態視窗", self._post(self.show_window)),
+                Item("顯示主視窗", self._post(self.show_window)),
                 Item("儀表板（獨立視窗）", self._post(self.open_dashboard)),
                 Item("開啟", Menu(
                     Item("ETF 關注名單", self._post(lambda: self.open_path("data/etf_focus/latest.md"))),
@@ -219,13 +245,25 @@ class TrayApp:
 
         return pystray.Menu(items)
 
-    # ---- 狀態視窗 ----------------------------------------------------------
+    # ---- 主視窗 ------------------------------------------------------------
     def show_window(self) -> None:
         from bot.tray.window import StatusWindow
         if self.window is None:
             self.window = StatusWindow(self)
+            self._set_window_icon()
         self.refresh()
         self.window.show()
+
+    def _set_window_icon(self) -> None:
+        """標題列與工作列用和系統匣同一個圖示（customtkinter 預設是它自己的）。"""
+        try:
+            path = tray_settings.settings_path(self.root).with_name("icon.ico")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            make_icon(tray_status.OK, 256).save(path, format="ICO",
+                                                sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+            self.tk.iconbitmap(str(path))
+        except Exception:  # noqa: BLE001
+            self.logger.exception("設定視窗圖示失敗")
 
     # ---- 更新 --------------------------------------------------------------
     def refresh(self) -> None:
@@ -291,7 +329,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Stock Lab 系統匣（前台顯示與管理）")
     parser.add_argument("--root", type=Path,
                         default=Path(__file__).resolve().parents[3], help="專案根目錄")
-    parser.add_argument("--show", action="store_true", help="啟動後直接打開狀態視窗")
+    parser.add_argument("--show", action="store_true", help="啟動後直接打開主視窗")
     args = parser.parse_args(argv)
     if acquire_single_instance() is None:
         print("Stock Lab 系統匣已經在執行。")

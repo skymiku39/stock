@@ -42,3 +42,29 @@ def test_dashboard_start_is_noop_when_already_running(tmp_path, monkeypatch):
     dashboard.start()
     assert started == [] and dashboard.process is None
     dashboard.stop_if_started_here()  # 不是這裡啟動的就不去結束它
+
+
+def test_settings_roundtrip_and_bad_file_falls_back(tmp_path):
+    from bot.tray import settings as tray_settings
+
+    assert tray_settings.load(tmp_path) == {"minimize_to_tray": True}
+    tray_settings.save(tmp_path, {"minimize_to_tray": False, "unknown": 1})
+    assert tray_settings.load(tmp_path) == {"minimize_to_tray": False}
+    tray_settings.settings_path(tmp_path).write_text('{"minimize_to_tray": "no"}', encoding="utf-8")
+    assert tray_settings.load(tmp_path) == {"minimize_to_tray": True}  # 型別不對用預設
+    tray_settings.settings_path(tmp_path).write_text("{broken", encoding="utf-8")
+    assert tray_settings.load(tmp_path) == {"minimize_to_tray": True}
+
+
+def test_content_signature_ignores_clock_and_heartbeat():
+    from bot.tray import window as tray_window
+
+    snap = tray_status.TraySnapshot(level=tray_status.OK, headline="一切正常", read_at="a",
+                                    heartbeat_age_seconds=3.0)
+    later = tray_status.TraySnapshot(level=tray_status.OK, headline="一切正常", read_at="b",
+                                     heartbeat_age_seconds=18.0)
+    changed = tray_status.TraySnapshot(level=tray_status.WARN, headline="有警告", read_at="b")
+    assert tray_window.content_signature(snap) == tray_window.content_signature(later)
+    assert tray_window.content_signature(snap) != tray_window.content_signature(changed)
+    assert tray_window.content_signature(snap) != tray_window.content_signature(snap, "啟動中")
+    assert "18 秒前有心跳" in tray_window.scheduler_line(later)
