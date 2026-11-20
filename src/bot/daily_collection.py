@@ -122,6 +122,12 @@ def extended_price_symbols(root):
         symbols.update(str(row.get("symbol", "")).strip() for row in universe.get("symbols", []))
     except (OSError, ValueError, AttributeError):
         pass
+    try:
+        # 使用者實際持有或曾經持有的股票（config/held_symbols.json 與自動記錄）。
+        from bot.held_symbols import load_held_symbols
+        symbols.update(load_held_symbols(Path(root)))
+    except Exception:
+        pass
     return sorted(s for s in symbols if _TW_SYMBOL.match(s))
 
 

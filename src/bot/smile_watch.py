@@ -233,6 +233,14 @@ def fetch_real_holdings(settings, symbols) -> dict:
     snapshot = fetch_shioaji_positions(settings.model_copy(update={"simulation": False}))
     if snapshot.error:
         raise RuntimeError(f"讀取券商庫存失敗：{snapshot.error}")
+    try:
+        # 查到的持股全部記下來（含名單外的），每日收集會把它們併入名單。
+        from bot.held_symbols import record_held
+        fresh = record_held(Path.cwd(), [p.symbol for p in snapshot.positions if p.qty > 0])
+        if fresh:
+            get_logger("smile-watch").info("新記下持股 %s，之後每日收集會包含", "、".join(fresh))
+    except Exception:  # noqa: BLE001 - 記錄失敗不影響盯盤
+        get_logger("smile-watch").exception("記錄持股失敗")
     out = {}
     for pos in snapshot.positions:
         if pos.symbol in symbols and pos.qty > 0:
