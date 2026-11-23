@@ -42,6 +42,7 @@ class Holding:
     symbol: str
     lots: int  # 張
     avg_price: float
+    broker_avg_price: Optional[float] = None  # 有值＝avg_price 已改用「賣出先扣最近買進」重算
 
 
 @dataclass
@@ -198,12 +199,15 @@ class WatchTarget:
     reference: float
     stop_loss_pct: Optional[float] = None  # None＝用 SMILE_SYMBOL_STOP_LOSS_PCT
     holding: Optional[Holding] = None  # 手動給的張數與均價；None＝讀券商庫存
+    latest_first_since: Optional[str] = None  # 這天起的賣出改扣最近買進的；None＝照券商先進先出
 
 
 def load_targets(path: Path) -> list:
-    """讀盯盤名單：[{"symbol": "1514", "reference": 105, "stop_loss_pct": 25, "holding": "4@85.65"}]。
+    """讀盯盤名單：[{"symbol": "1514", "reference": 105, "stop_loss_pct": 25, "holding": "4@85.65",
+    "sell_latest_first_since": "2026-11-23"}]。
 
-    後兩欄可省略。檔案不存在回傳空名單；內容不合法丟 ValueError。
+    後三欄可省略。sell_latest_first_since：這天起的賣出改認定為賣掉最近買進的那筆（券商是扣最舊的），
+    均價、損益兩平與停損價都照這個認定算；只對讀券商庫存的標的有效。檔案不存在回傳空名單；內容不合法丟 ValueError。
     """
     path = Path(path)
     if not path.exists():
@@ -217,20 +221,80 @@ def load_targets(path: Path) -> list:
             stop = row.get("stop_loss_pct")
             if not symbol or reference <= 0 or (stop is not None and float(stop) < 0):
                 raise ValueError(f"symbol、reference 或 stop_loss_pct 不合法：{row!r}")
+            since = row.get("sell_latest_first_since")
+            if since is not None:
+                since = dt.date.fromisoformat(str(since)).isoformat()
             targets.append(WatchTarget(
                 symbol, reference, None if stop is None else float(stop),
-                parse_holding(symbol, row["holding"]) if row.get("holding") else None))
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
+                parse_holding(symbol, row["holding"]) if row.get("holding") else None, since))
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ValueError(f"{path} 格式錯誤：{type(exc).__name__}: {exc}") from exc
     if len({t.symbol for t in targets}) != len(targets):
         raise ValueError(f"{path} 有重複的代號")
     return targets
 
 
-def fetch_real_holdings(settings, symbols) -> dict:
-    """唯讀查詢券商實際庫存（只登入與列出持股）。回傳 {代號: Holding}；查詢失敗丟 RuntimeError。"""
+def write_holdings_snapshot(root: Path, snapshot) -> Path:
+    """把券商回報的全部庫存（含名單外的與零股）寫到 data/smile_watch/holdings.json，給系統匣顯示。
+
+    優先用以股為單位的查詢結果（含零股）；沒有時用整張的結果換算成股數。
+    """
+    from bot.runtime_state import atomic_json
+    share_rows = [p for p in (getattr(snapshot, "share_positions", None) or []) if p.qty > 0]
+    rows = [(p, float(p.qty)) for p in share_rows] or [
+        (p, float(p.qty) * 1000.0) for p in snapshot.positions if p.qty > 0]
+    holdings = [{"symbol": str(p.symbol), "shares": shares,
+                 "avg_price": float(getattr(p, "avg_price", 0.0) or 0.0),
+                 "last_price": float(getattr(p, "last_price", 0.0) or 0.0),
+                 "pnl_twd": float(getattr(p, "pnl", 0.0) or 0.0)} for p, shares in rows]
+    path = Path(root) / "data" / "smile_watch" / "holdings.json"
+    atomic_json(path, {"asof": getattr(snapshot, "asof", "") or now_tw().isoformat(timespec="seconds"),
+                       "includes_odd_lots": bool(share_rows),
+                       "holdings": sorted(holdings, key=lambda h: h["symbol"])})
+    return path
+
+
+def latest_first_holding(root: Path, pos, history: Optional[dict], since: str) -> Optional[Holding]:
+    """用「賣出先扣最近買進」重算均價，並把明細寫到 data/smile_watch/lots-<代號>.json 給系統匣。
+
+    對不起來（張數和券商庫存不符、明細缺漏）時回傳 None，呼叫端改用券商帳面均價。
+    """
+    from bot.lot_view import rematch_latest_first
+    from bot.runtime_state import atomic_json
+    logger = get_logger("smile-watch")
+    path = Path(root) / "data" / "smile_watch" / f"lots-{pos.symbol}.json"
+    try:
+        if not history:
+            raise ValueError("沒有逐筆明細")
+        view = rematch_latest_first(history["remaining"], history["sales"], since)
+        if abs(view.qty - float(pos.qty)) > 1e-6 or view.cost <= 0:
+            raise ValueError(f"重算後 {view.qty:g} 張，券商庫存 {pos.qty:g} 張")
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning("%s 無法改用「賣出先扣最近買進」，沿用券商帳面均價：%s", pos.symbol, exc)
+        path.unlink(missing_ok=True)
+        return None
+    avg = round(view.cost / (view.qty * 1000.0), 2)
+    atomic_json(path, {
+        "symbol": pos.symbol, "asof": now_tw().isoformat(timespec="seconds"), "since": since,
+        "lots": int(view.qty), "avg_price": avg, "broker_avg_price": float(pos.avg_price),
+        "realized_pnl_twd": round(view.realized_pnl), "broker_realized_pnl_twd": round(view.broker_realized_pnl),
+        "remaining": [{"date": l.date, "lots": l.qty, "cost_twd": round(l.cost)} for l in view.lots],
+        "sales": [{"date": s.date, "lots": s.qty, "proceeds_twd": round(s.proceeds),
+                   "cost_twd": round(s.cost), "pnl_twd": round(s.pnl),
+                   "broker_pnl_twd": round(s.broker_pnl)} for s in view.sales]})
+    return Holding(pos.symbol, int(pos.qty), avg, float(pos.avg_price))
+
+
+def fetch_real_holdings(settings, symbols, latest_first_since: Optional[dict] = None) -> dict:
+    """唯讀查詢券商實際庫存（只登入與列出持股）。回傳 {代號: Holding}；查詢失敗丟 RuntimeError。
+
+    latest_first_since：{代號: 日期}，這些標的的均價改用「賣出先扣最近買進」重算。
+    """
     from bot.portfolio import fetch_shioaji_positions
-    snapshot = fetch_shioaji_positions(settings.model_copy(update={"simulation": False}))
+    real = settings.model_copy(update={"simulation": False})
+    rules = {s: d for s, d in (latest_first_since or {}).items() if s in symbols and d}
+    snapshot = (fetch_shioaji_positions(real, lots_since=rules) if rules
+                else fetch_shioaji_positions(real))
     if snapshot.error:
         raise RuntimeError(f"讀取券商庫存失敗：{snapshot.error}")
     try:
@@ -241,12 +305,26 @@ def fetch_real_holdings(settings, symbols) -> dict:
             get_logger("smile-watch").info("新記下持股 %s，之後每日收集會包含", "、".join(fresh))
     except Exception:  # noqa: BLE001 - 記錄失敗不影響盯盤
         get_logger("smile-watch").exception("記錄持股失敗")
+    try:
+        write_holdings_snapshot(Path.cwd(), snapshot)
+    except Exception:  # noqa: BLE001 - 同上
+        get_logger("smile-watch").exception("寫入全部持股快照失敗")
     out = {}
     for pos in snapshot.positions:
         if pos.symbol in symbols and pos.qty > 0:
             if pos.qty != int(pos.qty):
                 raise RuntimeError(f"{pos.symbol} 庫存 {pos.qty} 張不是整張，微笑盯盤只支援整張")
-            out[pos.symbol] = Holding(pos.symbol, int(pos.qty), float(pos.avg_price))
+            holding = None
+            if pos.symbol in rules:
+                if getattr(snapshot, "lot_history_error", ""):
+                    get_logger("smile-watch").warning("查詢逐筆庫存失敗：%s", snapshot.lot_history_error)
+                holding = latest_first_holding(
+                    Path.cwd(), pos, (getattr(snapshot, "lot_history", None) or {}).get(pos.symbol),
+                    rules[pos.symbol])
+            out[pos.symbol] = holding or Holding(pos.symbol, int(pos.qty), float(pos.avg_price))
+    for symbol in symbols:  # 不再用這個算法（或已經沒有庫存）的標的，清掉舊的明細檔
+        if symbol not in rules or symbol not in out:
+            (Path.cwd() / "data" / "smile_watch" / f"lots-{symbol}.json").unlink(missing_ok=True)
     return out
 
 
@@ -300,7 +378,9 @@ def main(argv=None) -> int:
     def load_holdings() -> dict:
         found = {t.symbol: t.holding for t in targets if t.holding is not None}
         if from_broker:
-            found.update(fetch_real_holdings(base_settings, from_broker))
+            found.update(fetch_real_holdings(
+                base_settings, from_broker,
+                {t.symbol: t.latest_first_since for t in targets if t.latest_first_since}))
         return found
 
     def build_engines(holdings: dict) -> dict:
@@ -333,7 +413,10 @@ def main(argv=None) -> int:
     for t in targets:
         h = holdings.get(t.symbol)
         logger.info("盯 %s：%s、標準價 %.2f", t.symbol,
-                    f"{h.lots} 張、均價 {h.avg_price:.2f}" if h else "目前沒有庫存", t.reference)
+                    f"{h.lots} 張、均價 {h.avg_price:.2f}" + (
+                        "" if h.broker_avg_price is None else
+                        f"（賣出先扣最近買進；券商帳面 {h.broker_avg_price:.2f}）")
+                    if h else "目前沒有庫存", t.reference)
     logger.info("Telegram %s", "已啟用" if notifier.enabled else "未設定")
     logger.info("本機通知 %s", f"已啟用（{local.mode}）" if local.enabled else "已停用")
 

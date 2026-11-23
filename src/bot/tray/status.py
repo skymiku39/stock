@@ -4,6 +4,7 @@
 - data/scheduler_status.json       排程器心跳與各工作狀態
 - data/freshness_status.json       資料新鮮度檢查（每輪 daily_inputs 重寫）
 - data/smile_watch/status-*.json   實際持股的盯盤狀態
+- data/smile_watch/holdings.json   券商回報的全部庫存（盯盤每次讀庫存時重寫）
 - data/notifications/history.jsonl 本機通知紀錄
 - data/etf_focus/latest.json       ETF 關注名單
 """
@@ -42,6 +43,7 @@ class HoldingStatus:
     signals: list
     ts: str
     stale: bool  # 不是今天的報價
+    cost_note: str = ""  # 成本不是券商帳面均價時的說明
 
     @property
     def stop_gap_pct(self) -> Optional[float]:
@@ -62,6 +64,32 @@ class HoldingStatus:
 
 
 @dataclass
+class OtherHolding:
+    """不在盯盤名單的持股：只有券商回報的數字（那次查詢當下的價格與損益）。"""
+    symbol: str
+    shares: float
+    avg_price: float
+    last_price: float
+    pnl_twd: float
+
+    @property
+    def quantity_text(self) -> str:
+        if self.shares >= 1000 and self.shares % 1000 == 0:
+            return f"{self.shares / 1000:.0f} 張"
+        return f"{self.shares:,.0f} 股"
+
+    @property
+    def pnl_pct(self) -> Optional[float]:
+        cost = self.shares * self.avg_price
+        return self.pnl_twd / cost * 100.0 if cost > 0 else None
+
+    def line(self) -> str:
+        pct = self.pnl_pct
+        return (f"{self.symbol}　{self.quantity_text}　現價 {self.last_price:.2f}　"
+                f"損益 {self.pnl_twd:+,.0f}" + ("" if pct is None else f"（{pct:+.1f}%）"))
+
+
+@dataclass
 class FocusSummary:
     as_of: str = ""
     focus_count: int = 0
@@ -76,6 +104,8 @@ class TraySnapshot:
     headline: str
     checks: List[Check] = field(default_factory=list)
     holdings: List[HoldingStatus] = field(default_factory=list)
+    other_holdings: List[OtherHolding] = field(default_factory=list)
+    holdings_asof: str = ""  # 券商庫存的查詢時間；空字串＝還沒有全部持股的資料
     notifications: List[dict] = field(default_factory=list)
     focus: FocusSummary = field(default_factory=FocusSummary)
     scheduler_state: str = ""
@@ -114,6 +144,24 @@ def _worst(levels) -> str:
     return max(levels, key=lambda level: _RANK.get(level, 1), default=UNKNOWN)
 
 
+def read_cost_note(root: Path, symbol: str, lots: int, avg_price: float) -> str:
+    """盯盤改用「賣出先扣最近買進」算成本時的說明；沒有改用或資料對不上就回傳空字串。
+
+    張數與均價都要和盯盤狀態一致才顯示：執行中的盯盤還是舊設定時，狀態檔仍是券商帳面均價。
+    """
+    data = _read_json(root / "data" / "smile_watch" / f"lots-{symbol}.json")
+    try:
+        if int(data["lots"]) != lots or abs(float(data["avg_price"]) - avg_price) > 0.005:
+            return ""
+        text = f"成本以「賣出先扣最近買進」計，券商帳面均價 {float(data['broker_avg_price']):.2f}"
+        if data.get("sales"):
+            text += (f"；{str(data['since'])[5:]} 起已實現 {float(data['realized_pnl_twd']):+,.0f} 元"
+                     f"（券商帳面 {float(data['broker_realized_pnl_twd']):+,.0f}）")
+        return text
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
 def read_holdings(root: Path, now: dt.datetime) -> List[HoldingStatus]:
     out = []
     for path in sorted((root / "data" / "smile_watch").glob("status-*.json")):
@@ -127,10 +175,30 @@ def read_holdings(root: Path, now: dt.datetime) -> List[HoldingStatus]:
                 pnl_pct=float(data["pnl_pct"]), breakeven_price=float(data["breakeven_price"]),
                 stop_price=None if data.get("stop_price") is None else float(data["stop_price"]),
                 signals=list(data.get("signals") or []), ts=str(data.get("ts", "")),
-                stale=str(data.get("ts", ""))[:10] != now.date().isoformat()))
+                stale=str(data.get("ts", ""))[:10] != now.date().isoformat(),
+                cost_note=read_cost_note(root, str(data["symbol"]), int(data["lots"]),
+                                         float(data["avg_price"]))))
         except (KeyError, TypeError, ValueError):
             continue
     return out
+
+
+def read_all_holdings(root: Path) -> tuple:
+    """券商回報的全部庫存。回傳（查詢時間, [OtherHolding]）；檔案不存在或壞掉回傳 ("", [])。"""
+    data = _read_json(root / "data" / "smile_watch" / "holdings.json")
+    if not isinstance(data, dict) or not isinstance(data.get("holdings"), list):
+        return "", []
+    out = []
+    for row in data["holdings"]:
+        try:
+            item = OtherHolding(symbol=str(row["symbol"]), shares=float(row["shares"]),
+                                avg_price=float(row["avg_price"]),
+                                last_price=float(row["last_price"]), pnl_twd=float(row["pnl_twd"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if item.shares > 0:
+            out.append(item)
+    return str(data.get("asof", "")), out
 
 
 def read_notifications(root: Path, limit: int = 5) -> List[dict]:
@@ -222,8 +290,12 @@ def read_snapshot(root: Path, now: dt.datetime) -> TraySnapshot:
             headline = f"{len(problems)} 項要注意：{names}"
         else:
             headline = "資料與排程都正常"
+    holdings = read_holdings(root, now)
+    watched = {h.symbol for h in holdings}
+    holdings_asof, everything = read_all_holdings(root)
     return TraySnapshot(level=level, headline=headline, checks=checks,
-                        holdings=read_holdings(root, now),
+                        holdings=holdings, holdings_asof=holdings_asof,
+                        other_holdings=[h for h in everything if h.symbol not in watched],
                         notifications=read_notifications(root), focus=read_focus(root),
                         scheduler_state=scheduler_state, heartbeat_age_seconds=heartbeat_age,
                         running_jobs=running, read_at=now.isoformat(timespec="seconds"))

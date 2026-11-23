@@ -1,5 +1,5 @@
 {
   "targets": [
-    {"symbol": "1514", "reference": 105}
+    {"symbol": "1514", "reference": 105, "sell_latest_first_since": "2026-11-23"}
   ]
 }

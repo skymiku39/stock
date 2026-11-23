@@ -187,24 +187,40 @@ class StatusWindow:
         for child in self.body.winfo_children():
             child.destroy()
 
-        card = self._section("持股")
-        if snap.holdings:
-            for h in snap.holdings:
-                self._row(card, f"{h.symbol}　{h.lots} 張、均價 {h.avg_price:.2f}　現價 {h.price:.2f}",
-                          bold=True, size=14)
-                self._row(card, f"損益 {h.pnl_twd:+,.0f} 元（{h.pnl_pct:+.1f}%）",
-                          color=CLR_LOSS if h.pnl_twd < 0 else CLR_GAIN, bold=True)
-                detail = f"損益兩平 {h.breakeven_price:.2f}"
-                if h.stop_price is not None:
-                    detail += f"　停損價 {h.stop_price:.2f}（還差 {h.stop_gap_pct:.1f}%）"
-                self._row(card, detail, color=CLR_TEXT_SECONDARY, size=12)
-                if h.signals:
-                    self._row(card, "訊號：" + "、".join(h.signals), color=CLR_LOSS, bold=True)
-                if h.stale:
-                    self._row(card, f"報價時間 {h.ts[:16].replace('T', ' ')}，不是今天的",
-                              color=CLR_TEXT_MUTED, size=12)
+        card = self._section(f"持股（{len(snap.holdings) + len(snap.other_holdings)}）")
+        for h in snap.holdings:
+            self._row(card, f"{h.symbol}　{h.lots} 張、均價 {h.avg_price:.2f}　現價 {h.price:.2f}",
+                      bold=True, size=14)
+            self._row(card, f"損益 {h.pnl_twd:+,.0f} 元（{h.pnl_pct:+.1f}%）",
+                      color=CLR_LOSS if h.pnl_twd < 0 else CLR_GAIN, bold=True)
+            detail = f"損益兩平 {h.breakeven_price:.2f}"
+            if h.stop_price is not None:
+                detail += f"　停損價 {h.stop_price:.2f}（還差 {h.stop_gap_pct:.1f}%）"
+            self._row(card, detail, color=CLR_TEXT_SECONDARY, size=12)
+            if h.cost_note:
+                self._row(card, h.cost_note, color=CLR_TEXT_MUTED, size=12)
+            if h.signals:
+                self._row(card, "訊號：" + "、".join(h.signals), color=CLR_LOSS, bold=True)
+            if h.stale:
+                self._row(card, f"報價時間 {h.ts[:16].replace('T', ' ')}，不是今天的",
+                          color=CLR_TEXT_MUTED, size=12)
+        for o in snap.other_holdings:
+            self._row(card, f"{o.symbol}　{o.quantity_text}、均價 {o.avg_price:.2f}　"
+                            f"現價 {o.last_price:.2f}", bold=True, size=14)
+            pct = o.pnl_pct
+            self._row(card, f"損益 {o.pnl_twd:+,.0f} 元" + ("" if pct is None else f"（{pct:+.1f}%）"),
+                      color=CLR_LOSS if o.pnl_twd < 0 else CLR_GAIN, bold=True)
+        if not snap.holdings and not snap.other_holdings:
+            self._row(card, "沒有持股" if snap.holdings_asof else "沒有盯盤中的持股",
+                      color=CLR_TEXT_MUTED)
+        if snap.holdings_asof:
+            note = f"券商庫存查詢於 {snap.holdings_asof[5:16].replace('T', ' ')}"
+            if snap.other_holdings:
+                note += "；沒有盯盤的持股，價格與損益是那次查詢當下的數字"
+            self._row(card, note, color=CLR_TEXT_MUTED, size=12)
         else:
-            self._row(card, "沒有盯盤中的持股", color=CLR_TEXT_MUTED)
+            self._row(card, "還沒有券商庫存的完整清單（下次盯盤讀庫存時產生），目前只列盯盤中的",
+                      color=CLR_TEXT_MUTED, size=12)
 
         problems = snap.problems()
         card = self._section(f"要注意（{len(problems)}）" if problems else "系統")

@@ -101,6 +101,11 @@ class BrokerPositionsSnapshot:
     simulation: bool
     positions: List[BrokerPosition] = field(default_factory=list)
     error: str = ""
+    # 以「股」為單位的同一份庫存（含零股）；qty 是股數。查不到時是空的，不影響 positions。
+    share_positions: List[BrokerPosition] = field(default_factory=list)
+    # 有要求時才查：{代號: {"remaining": [Lot], "sales": [Sale]}}（見 bot/lot_view.py）
+    lot_history: Dict[str, Dict[str, list]] = field(default_factory=dict)
+    lot_history_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -131,7 +136,42 @@ def fetch_broker_positions(settings: Any, *, timeout: int = 8000) -> BrokerPosit
     return fetch_shioaji_positions(settings, timeout=timeout)
 
 
-def fetch_shioaji_positions(settings: Any, *, timeout: int = 8000) -> BrokerPositionsSnapshot:
+def _shioaji_lot_history(api: Any, account: Any, positions: Iterable[Any],
+                         lots_since: Dict[str, str], timeout: int) -> Dict[str, Dict[str, list]]:
+    """唯讀查詢逐筆庫存與指定日期以後的已實現損益明細，整理成 lot_view 的輸入。
+
+    數量單位是張；逐筆庫存的 price 與已實現明細的 cost 都是該筆含手續費的總成本（元）。
+    賣出淨額 = 券商回報的損益 + 被扣掉的成本。
+    """
+    from bot.lot_view import Lot, Sale
+
+    history: Dict[str, Dict[str, list]] = {s: {"remaining": [], "sales": []} for s in lots_since}
+    for pos in positions:
+        code = str(_get_attr(pos, "code", default="") or "").strip()
+        if code in history:
+            for d in api.list_position_detail(account, _get_attr(pos, "id"), timeout=timeout):
+                history[code]["remaining"].append(Lot(
+                    str(_get_attr(d, "date", default="")), _to_float(_get_attr(d, "quantity", default=0)),
+                    _to_float(_get_attr(d, "price", default=0)), str(_get_attr(d, "dseq", default=""))))
+    today = _now_iso()[:10]
+    for row in api.list_profit_loss(account, min(lots_since.values()), today, timeout=timeout):
+        code = str(_get_attr(row, "code", default="") or "").strip()
+        date = str(_get_attr(row, "date", default=""))
+        if code not in history or date < lots_since[code]:
+            continue
+        matched = [Lot(str(_get_attr(d, "date", default="")),
+                       _to_float(_get_attr(d, "quantity", default=0)),
+                       _to_float(_get_attr(d, "cost", default=0)), str(_get_attr(d, "dseq", default="")))
+                   for d in api.list_profit_loss_detail(account, _get_attr(row, "id"), timeout=timeout)]
+        history[code]["sales"].append(Sale(
+            date, _to_float(_get_attr(row, "quantity", default=0)),
+            _to_float(_get_attr(row, "pnl", default=0)) + sum(lot.cost for lot in matched),
+            tuple(matched), str(_get_attr(row, "dseq", default=""))))
+    return history
+
+
+def fetch_shioaji_positions(settings: Any, *, timeout: int = 8000,
+                            lots_since: Optional[Dict[str, str]] = None) -> BrokerPositionsSnapshot:
     if not getattr(settings, "api_key", "") or not getattr(settings, "secret_key", ""):
         return BrokerPositionsSnapshot(
             broker="shioaji",
@@ -177,12 +217,29 @@ def fetch_shioaji_positions(settings: Any, *, timeout: int = 8000) -> BrokerPosi
             broker_position_from_shioaji(p, account=account_label)
             for p in positions
         ]
+        try:  # 整張的查詢不含零股，另外以股為單位再查一次；失敗不影響整張的結果
+            share_rows = [
+                broker_position_from_shioaji(p, account=account_label)
+                for p in api.list_positions(account, unit=Unit.Share, timeout=timeout)
+            ]
+        except Exception:
+            share_rows = []
+        lot_history: Dict[str, Dict[str, list]] = {}
+        lot_history_error = ""
+        if lots_since:
+            try:
+                lot_history = _shioaji_lot_history(api, account, positions, lots_since, timeout)
+            except Exception as exc:  # 查不到逐筆明細時仍回傳庫存，呼叫端改用券商帳面均價
+                lot_history_error = f"{type(exc).__name__}: {exc}"
         return BrokerPositionsSnapshot(
             broker="shioaji",
             account=account_label,
             asof=_now_iso(),
             simulation=bool(getattr(settings, "simulation", False)),
             positions=[p for p in rows if p.symbol and p.qty != 0],
+            share_positions=[p for p in share_rows if p.symbol and p.qty != 0],
+            lot_history=lot_history,
+            lot_history_error=lot_history_error,
         )
     except Exception as exc:
         return BrokerPositionsSnapshot(

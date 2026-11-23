@@ -220,7 +220,8 @@ class TrayApp:
                          self._post(self.show_window), default=True)]
             if self._busy:
                 rows.append(Item(self._busy, None, enabled=False))
-            rows += [Item(h.line()[:80], None, enabled=False) for h in snap.holdings]
+            rows += [Item(h.line()[:80], None, enabled=False)
+                     for h in list(snap.holdings) + list(snap.other_holdings)]
             rows += [
                 Menu.SEPARATOR,
                 Item("顯示主視窗", self._post(self.show_window)),

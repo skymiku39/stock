@@ -107,3 +107,39 @@ def test_tooltip_fits_windows_limit(tmp_path):
           freshness([(f"很長的檢查項目名稱{i}", "warn", "") for i in range(20)]))
     snap = tray_status.read_snapshot(tmp_path, NOW)
     assert len(snap.tooltip()) <= 127 and snap.tooltip().startswith("Stock Lab：有警告")
+
+
+def test_all_holdings_listed_and_watched_ones_not_repeated(tmp_path):
+    import datetime as dt
+    import json
+
+    folder = tmp_path / "data" / "smile_watch"
+    folder.mkdir(parents=True)
+    (folder / "status-1514.json").write_text(json.dumps({
+        "symbol": "1514", "ts": "2026-11-20T13:29:40+08:00", "price": 66.9, "lots": 5,
+        "avg_price": 82.12, "pnl_twd": -77400.79, "pnl_pct": -18.84, "breakeven_price": 82.43,
+        "stop_price": 61.82, "signals": []}), encoding="utf-8")
+    (folder / "holdings.json").write_text(json.dumps({
+        "asof": "2026-11-20T13:00:00+08:00", "holdings": [
+            {"symbol": "1514", "shares": 5000, "avg_price": 82.12, "last_price": 66.9, "pnl_twd": -77400},
+            {"symbol": "2603", "shares": 300, "avg_price": 200.0, "last_price": 210.0, "pnl_twd": 2900},
+            {"symbol": "0050", "shares": 2000, "avg_price": 90.0, "last_price": 95.0, "pnl_twd": 9800},
+            {"symbol": "9999", "shares": 0, "avg_price": 1, "last_price": 1, "pnl_twd": 0},
+            {"symbol": "bad"}]}), encoding="utf-8")
+    now = dt.datetime(2026, 11, 20, 14, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    snap = tray_status.read_snapshot(tmp_path, now)
+    assert [h.symbol for h in snap.holdings] == ["1514"]
+    assert [h.symbol for h in snap.other_holdings] == ["2603", "0050"]
+    assert snap.holdings_asof == "2026-11-20T13:00:00+08:00"
+    odd, whole = snap.other_holdings
+    assert odd.quantity_text == "300 股" and whole.quantity_text == "2 張"
+    assert round(odd.pnl_pct, 1) == 4.8
+    assert "2603" in odd.line() and "+2,900" in odd.line()
+
+
+def test_no_holdings_file_keeps_watched_only(tmp_path):
+    import datetime as dt
+
+    snap = tray_status.read_snapshot(tmp_path, dt.datetime(2026, 11, 20, 14, 0,
+                                                           tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    assert snap.other_holdings == [] and snap.holdings_asof == ""

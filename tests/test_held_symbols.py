@@ -56,3 +56,29 @@ def test_smile_watch_records_every_broker_position(tmp_path, monkeypatch):
     found = smile_watch.fetch_real_holdings(settings, ["1514"])
     assert found == {"1514": smile_watch.Holding("1514", 5, 82.12)}
     assert load_held_symbols(tmp_path) == ["1514", "2603"]
+
+
+def test_smile_watch_writes_all_holdings_snapshot(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    common = [SimpleNamespace(symbol="1514", qty=5, avg_price=82.12, last_price=66.9, pnl=-77400.0)]
+    shares = [SimpleNamespace(symbol="1514", qty=5000, avg_price=82.12, last_price=66.9, pnl=-77400.0),
+              SimpleNamespace(symbol="2603", qty=300, avg_price=200.0, last_price=210.0, pnl=2900.0)]
+    settings = SimpleNamespace(model_copy=lambda update: SimpleNamespace(**update))
+    path = tmp_path / "data" / "smile_watch" / "holdings.json"
+
+    monkeypatch.setattr(portfolio, "fetch_shioaji_positions", lambda settings: SimpleNamespace(
+        error="", asof="2026-11-20T13:00:00+08:00", positions=common, share_positions=shares))
+    smile_watch.fetch_real_holdings(settings, ["1514"])
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["includes_odd_lots"] is True
+    assert [(h["symbol"], h["shares"]) for h in data["holdings"]] == [("1514", 5000.0), ("2603", 300.0)]
+
+    # 以股為單位的查詢沒有結果時，用整張的結果換算
+    monkeypatch.setattr(portfolio, "fetch_shioaji_positions", lambda settings: SimpleNamespace(
+        error="", asof="2026-11-20T13:30:00+08:00", positions=common, share_positions=[]))
+    smile_watch.fetch_real_holdings(settings, ["1514"])
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["includes_odd_lots"] is False
+    assert [(h["symbol"], h["shares"]) for h in data["holdings"]] == [("1514", 5000.0)]
