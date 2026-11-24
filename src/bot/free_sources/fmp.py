@@ -27,10 +27,13 @@ class FmpClient(BaseClient):
     def _classify_http_error(self, status: int, body: str) -> Optional[str]:
         if status != 402:
             return None
-        if _PARAM_ERROR.search(body or ""):
-            return "invalid_params"
+        # 先判「方案不含」：2026-11-24 排程實測 ASML 回
+        # "Premium Query Parameter: 'Special Endpoint : This value set for 'symbol' is not available
+        # under your current subscription"，兩種字樣都有；它只影響該檔，不能當成參數錯誤整批停掉。
         if _PLAN_RESTRICTED.search(body or ""):
             return "plan_restricted"
+        if _PARAM_ERROR.search(body or ""):
+            return "invalid_params"
         return None  # 其餘 402 仍視為額度用完
 
     def _statement(self, path: str, symbol: str, period: str, limit: int) -> List[dict]:

@@ -81,3 +81,9 @@
   - `summaries_for_tw("2330", [NVDA])`：TSM（relation=adr、currency=TWD）排第一，NVDA（supply_chain、USD）其次；最新季營收年增 TSM 50.95%、NVDA 103.21%。
 - 合併注意：`config.py`、`scheduler.py`、`ticker_view.py` 各是一段獨立新增區塊；兩個排程測試只多一行參數，和其他分支衝突時保留雙方即可。
 
+
+## 2026-11-24 排程實跑發現
+
+- 免費方案**不含 ASML、AVGO、MU、UMC、ASX**（402「Special Endpoint : This value set for 'symbol' is not available under your current subscription」）。14 檔裡實際能抓 9 檔：NVDA、AMD、AAPL、MSFT、GOOGL、META、AMZN、TSLA、TSM。
+- 這個訊息同時含「Premium Query Parameter」，原本先比對參數錯誤，被判成 `invalid_params` 而整批停止（AVGO 之後都沒查）。已改為先判 `plan_restricted`：只跳過該檔、繼續下一檔；只有 `plan_restricted` 錯誤時結束碼為 0，排程器不會反覆重試。
+- 不從名單移除這 5 檔：每週各浪費 1 次請求（共 5 次，上限 230），之後若方案或對方政策改變能自動恢復。

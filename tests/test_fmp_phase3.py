@@ -208,3 +208,25 @@ def test_ticker_snapshot_includes_us_fundamentals(tmp_path, monkeypatch):
     assert snap.us_fundamentals and snap.us_fundamentals[0]["symbol"] == "TSM"
     assert snap.us_fundamentals[0]["relation"] == "adr"
     assert ticker_view.snapshot_to_dict(snap)["us_fundamentals"] == snap.us_fundamentals
+
+
+# ---------------- 20. 代號不在方案內（2026-11-24 排程實測 ASML） ----------------
+ASML_402 = ("Premium Query Parameter: 'Special Endpoint : This value set for 'symbol' is not available "
+            "under your current subscription please visit our subscription page to upgrade your plan")
+
+
+def test_fmp_402_symbol_not_in_plan_is_plan_restricted(tmp_path):
+    assert _fmp_error(tmp_path, ASML_402).kind == "plan_restricted"
+    assert _fmp_error(tmp_path, LIMIT_402).kind == "invalid_params"
+
+
+def test_main_exit_zero_when_only_plan_restricted(tmp_path, monkeypatch):
+    monkeypatch.setattr(cf, "collect", lambda *a, **k: {
+        "fetched": ["NVDA"], "errors": {"ASML": "plan_restricted: x"}, "skipped_week": [],
+        "not_attempted": [], "requests_planned": 6, "dry_run": False, "stopped_reason": ""})
+    monkeypatch.setattr("bot.config.Settings", lambda *a, **k: type("S", (), {"fmp_api_key": "k"})())
+    assert cf.main(["--root", str(tmp_path)]) == 0
+    monkeypatch.setattr(cf, "collect", lambda *a, **k: {
+        "fetched": [], "errors": {"AMD": "network: x"}, "skipped_week": [],
+        "not_attempted": [], "requests_planned": 6, "dry_run": False, "stopped_reason": ""})
+    assert cf.main(["--root", str(tmp_path)]) == 1

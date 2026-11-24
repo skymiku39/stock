@@ -371,7 +371,9 @@ def main(argv: Optional[List[str]] = None, *, root: Optional[Path] = None, sessi
         if registry is not None:
             registry.close()
     print(json.dumps(res, ensure_ascii=False))
-    return 1 if res["errors"] else 0
+    # 方案不含的代號（plan_restricted）每週都會一樣，不算失敗，免得排程器反覆重試
+    real = [e for e in res["errors"].values() if not str(e).startswith("plan_restricted")]
+    return 1 if real else 0
 
 
 if __name__ == "__main__":
