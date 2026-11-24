@@ -50,6 +50,7 @@ class TestSchedulerEvents:
                 scheduler_overnight_brief_enabled=False,
                 scheduler_finmind_crosscheck_enabled=False,
                 scheduler_fmp_enabled=False,
+                scheduler_smile_mood_log_enabled=False,
                 scheduler_supervise_monitor=False,
             ),
             dry_run=True,

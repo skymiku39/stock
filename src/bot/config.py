@@ -470,6 +470,13 @@ class Settings(BaseSettings):
     scheduler_watch_snapshot_interval_min: int = 0
     # 實際持股的微笑盯盤（只提醒、不下單）；名單在 config/smile_watch.json，檔案不存在就不排
     scheduler_smile_watch_enabled: bool = True
+    # 微笑情緒分數每日紀錄（只記錄，不影響交易；情緒賣出本身仍由 SMILE_MOOD_SELL_ENABLED 控制）。
+    # 平日兩個時段：開盤後新聞與 0050 漲跌已有樣本，以及收盤前（13:25 前報價仍是盤中）。
+    scheduler_smile_mood_log_enabled: bool = True
+    scheduler_smile_mood_log_time: datetime.time = datetime.time(9, 30)
+    scheduler_smile_mood_log_end_time: datetime.time = datetime.time(10, 0)
+    scheduler_smile_mood_log_update_time: datetime.time = datetime.time(13, 0)
+    scheduler_smile_mood_log_update_end_time: datetime.time = datetime.time(13, 25)
 
     # --- 本地股票資料庫 (SQLite) ---
     # 留空 = 預設 data/stock.db；可指向同步資料夾，例如:

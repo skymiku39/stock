@@ -54,6 +54,7 @@
 - 市場悲觀的判定：新聞悲觀＝視窗內（`SMILE_NEWS_WINDOW_HOURS`，預設 24）含悲觀詞的標題至少 `SMILE_MOOD_NEWS_MIN_NEGATIVE`（10）則，且 (悲觀−樂觀)/(悲觀+樂觀) >= `SMILE_MOOD_NEWS_SCORE`（0.3）；新聞存檔超過 `SMILE_NEWS_MAX_AGE_MINUTES`（90）分鐘沒更新或沒有，視為無法判斷。股價悲觀＝市場即時漲跌幅 <= −`SMILE_MOOD_MARKET_DROP_PCT`（1.5）%，市場漲跌幅用 0050 的（最新價/前收 − 1），監控清單沒有 0050 時取各代號的中位數。`SMILE_MOOD_REQUIRE`：`both`（預設，兩者都須成立，無法判斷視為不悲觀）、`any`、`news`、`price`。
 - 新聞來源只有本機 `data/news/rss_<date>.json`（今天與昨天），只比對標題關鍵字，官媒立場的項目排除；不連網、不呼叫 LLM。關鍵字清單在 `src/bot/smile_sentiment.py`。新聞最多每 60 秒重讀一次，股價每個 tick 重算。
 - 決策紀錄：每次情緒賣出送單、以及每檔每天第一次被壞消息擋買，寫一行 JSON 到 `smile_mood_log.jsonl`（模擬模式在 `data/simulation/data/`），內容含時間、代號、動作、價格、情緒或壞消息與佐證標題，同時記一行 warning log。
+- 情緒分數每日紀錄（與是否啟用情緒賣出無關，只記錄不交易）：排程在平日 09:30、13:00 各算一次，追加到 `data/smile_mood/daily.jsonl`（同日同時段覆蓋），含新聞負面則數、分數、0050 漲跌幅、各門檻是否達到、both／news／price 下是否悲觀。累積幾週後執行 `python -m bot.smile_mood_log --root . --summary`，看各指標分位數與現行門檻會觸發幾天，再決定門檻。`SCHEDULER_SMILE_MOOD_LOG_ENABLED=false` 可停用。
 
 ## 模擬買賣驗證
 

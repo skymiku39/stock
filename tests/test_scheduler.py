@@ -27,7 +27,8 @@ def test_scheduler_builds_both_jobs_by_default(tmp_path) -> None:
     names = {j.name for j in sch.jobs}
     assert names == {"macro", "fundamentals", "research", "company", "history_fetch",
                      "overnight_brief", "overnight_brief_update",
-                     "finmind_crosscheck", "fmp_fundamentals"}
+                     "finmind_crosscheck", "fmp_fundamentals",
+                     "smile_mood_log", "smile_mood_log_update"}
 
 
 def test_scheduler_skips_disabled_jobs() -> None:
@@ -44,6 +45,7 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_overnight_brief_enabled=False,
             scheduler_finmind_crosscheck_enabled=False,
             scheduler_fmp_enabled=False,
+            scheduler_smile_mood_log_enabled=False,
         ),
         dry_run=True,
     )

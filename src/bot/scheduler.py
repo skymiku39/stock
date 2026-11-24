@@ -501,6 +501,25 @@ class Scheduler:
                 window_start=dt.time(9, 0),
                 window_end=dt.time(13, 30),
             ))
+        if getattr(s, "scheduler_smile_mood_log_enabled", True):
+            # 微笑情緒分數每日紀錄（只記錄、不下單）：09:30 與 13:00 各一個時段視窗。
+            for name, start, end in (
+                ("smile_mood_log", s.scheduler_smile_mood_log_time,
+                 s.scheduler_smile_mood_log_end_time),
+                ("smile_mood_log_update", s.scheduler_smile_mood_log_update_time,
+                 s.scheduler_smile_mood_log_update_end_time),
+            ):
+                jobs.append(Job(
+                    name=name,
+                    console_script="",
+                    module="bot.smile_mood_log",
+                    interval_min=1440,
+                    market_hours_only=False,
+                    extra_args=["--root", str(self.project_root)],
+                    run_once_per_day=True,
+                    window_start=start,
+                    window_end=end,
+                ))
         return jobs
 
     # ------------------------------------------------------------------
