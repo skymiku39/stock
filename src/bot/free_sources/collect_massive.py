@@ -14,7 +14,7 @@ from bot.free_sources.quota import TAIPEI, QuotaExceeded
 
 NY = ZoneInfo("America/New_York")
 MAX_PAGES = 3
-PAGE_LIMIT = 100
+PAGE_LIMIT = 1000  # 實測（2026-11-24）免費方案上限 1000，1001 回 400；週末窗口一頁 100 不夠
 
 
 def news_path(root: Path, date: str) -> Path:
@@ -114,10 +114,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--max-pages", type=int, default=MAX_PAGES)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--scheduled", action="store_true",
+                        help="排程呼叫：額度用完或被限流時回傳 0，避免排程器自動重試而多花額度")
     args = parser.parse_args(argv)
     summary = collect_massive(args.root.resolve(), max_pages=args.max_pages, dry_run=args.dry_run)
     print(json.dumps(summary, ensure_ascii=False))
-    return 0 if summary["status"] in ("ok", "skipped", "dry_run") else 2
+    status = summary["status"]
+    if status == "quota" and args.scheduled:
+        return 0
+    return 0 if status in ("ok", "skipped", "dry_run") else 2
 
 
 if __name__ == "__main__":

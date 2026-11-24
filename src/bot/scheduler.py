@@ -395,6 +395,25 @@ class Scheduler:
                     window_start=start,
                     window_end=end,
                 ))
+        if (getattr(s, "scheduler_massive_enabled", False)
+                and str(getattr(s, "massive_api_key", "") or "").strip()):
+            # 美股新聞，08:00 與 08:50 隔夜重點之前各跑一次；額度或限流時不重試（--scheduled 回 0）。
+            for name, start, end in (
+                ("massive_news", s.scheduler_massive_time, s.scheduler_massive_end_time),
+                ("massive_news_update",
+                 s.scheduler_massive_update_time, s.scheduler_massive_update_end_time),
+            ):
+                jobs.append(Job(
+                    name=name,
+                    console_script="",
+                    module="bot.free_sources.collect_massive",
+                    interval_min=1440,
+                    market_hours_only=False,
+                    extra_args=["--root", str(self.project_root), "--scheduled"],
+                    run_once_per_day=True,
+                    window_start=start,
+                    window_end=end,
+                ))
         if getattr(s, "scheduler_company_interval_min", 0) > 0:
             jobs.append(Job(
                 name="company",
