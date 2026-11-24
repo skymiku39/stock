@@ -45,6 +45,27 @@ class HoldingStatus:
     ts: str
     stale: bool  # 不是今天的報價
     cost_note: str = ""  # 成本不是券商帳面均價時的說明
+    price_source: str = "primary"  # 盯盤報價來源；舊狀態檔沒有這欄視為主來源
+    price_note: str = ""  # 備援報價的說明，例如「鎖漲停、最後成交價 X、時間 T」
+
+    @property
+    def source_tag(self) -> str:
+        """選單列用的短標示；主來源回傳空字串。"""
+        if self.price_source == "primary":
+            return ""
+        tag = "富果備援" if self.price_source == "fugle" else f"{self.price_source}備援"
+        for lock in ("鎖漲停", "鎖跌停"):
+            if self.price_note.startswith(lock):
+                tag += f"・{lock}"
+        return tag
+
+    @property
+    def source_note(self) -> str:
+        """主視窗用的完整來源說明；主來源回傳空字串。"""
+        tag = self.source_tag
+        if not tag:
+            return ""
+        return f"報價來源：{tag.split('・')[0]}" + (f"｜{self.price_note}" if self.price_note else "")
 
     @property
     def stop_gap_pct(self) -> Optional[float]:
@@ -59,6 +80,8 @@ class HoldingStatus:
         gap = self.stop_gap_pct
         if gap is not None:
             text += f"　距停損 {gap:.1f}%"
+        if self.source_tag:
+            text += f"　{self.source_tag}"
         if self.stale:
             text += f"　（{self.ts[:10]} 的報價）"
         return text
@@ -191,7 +214,9 @@ def read_holdings(root: Path, now: dt.datetime) -> List[HoldingStatus]:
                 signals=list(data.get("signals") or []), ts=str(data.get("ts", "")),
                 stale=str(data.get("ts", ""))[:10] != now.date().isoformat(),
                 cost_note=read_cost_note(root, str(data["symbol"]), int(data["lots"]),
-                                         float(data["avg_price"]))))
+                                         float(data["avg_price"])),
+                price_source=str(data.get("price_source") or "primary"),
+                price_note=str(data.get("price_note") or "")))
         except (KeyError, TypeError, ValueError):
             continue
     return out

@@ -80,6 +80,27 @@ def test_holdings_stop_gap_and_stale_quote(tmp_path):
     assert second.stop_gap_pct is None and second.stale and "2026-11-19 的報價" in second.line()
 
 
+def test_holdings_show_fallback_price_source(tmp_path):
+    base = {"symbol": "1514", "price": 76.4, "lots": 4, "avg_price": 85.65, "pnl_twd": -38175.0,
+            "pnl_pct": -11.1, "breakeven_price": 85.98, "stop_price": 64.48, "signals": [],
+            "ts": "2026-11-20T11:35:44+08:00"}
+    write(tmp_path, "data/smile_watch/status-1514.json", {
+        **base, "price_source": "fugle", "price_note": "鎖漲停、最後成交價 76.4、時間 11:01:16"})
+    write(tmp_path, "data/smile_watch/status-2330.json", {
+        **base, "symbol": "2330", "price_source": "fugle", "price_note": "最後成交價 1000、時間 11:30:00"})
+    write(tmp_path, "data/smile_watch/status-2603.json", {**base, "symbol": "2603",
+                                                           "price_source": "primary", "price_note": ""})
+    write(tmp_path, "data/smile_watch/status-2881.json", {**base, "symbol": "2881"})  # 舊狀態檔
+    locked, plain, primary, legacy = tray_status.read_holdings(tmp_path, NOW)
+    assert locked.source_tag == "富果備援・鎖漲停" and locked.line().endswith("富果備援・鎖漲停")
+    assert locked.source_note == "報價來源：富果備援｜鎖漲停、最後成交價 76.4、時間 11:01:16"
+    assert len(locked.line()) <= 80
+    assert plain.source_tag == "富果備援" and plain.source_note.endswith("最後成交價 1000、時間 11:30:00")
+    for h in (primary, legacy):
+        assert h.price_source == "primary" and h.source_tag == "" and h.source_note == ""
+        assert "備援" not in h.line()
+
+
 def test_notifications_newest_first_and_skip_bad_lines(tmp_path):
     rows = [json.dumps({"title": f"第{i}則", "ts": f"2026-11-20T09:0{i}:00+08:00"}, ensure_ascii=False)
             for i in range(7)]

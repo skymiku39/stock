@@ -199,6 +199,8 @@ class StatusWindow:
             self._row(card, detail, color=CLR_TEXT_SECONDARY, size=12)
             if h.cost_note:
                 self._row(card, h.cost_note, color=CLR_TEXT_MUTED, size=12)
+            if h.source_note:
+                self._row(card, h.source_note, color=CLR_TEXT_MUTED, size=12)
             if h.signals:
                 self._row(card, "訊號：" + "、".join(h.signals), color=CLR_LOSS, bold=True)
             if h.stale:
