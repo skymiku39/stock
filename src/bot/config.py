@@ -448,6 +448,13 @@ class Settings(BaseSettings):
     scheduler_finmind_crosscheck_enabled: bool = True
     scheduler_finmind_crosscheck_time: datetime.time = datetime.time(21, 0)
     scheduler_finmind_crosscheck_end_time: datetime.time = datetime.time(23, 30)
+    # Massive 美股新聞：在 08:00 與 08:50 隔夜重點之前各收集一次（沒有 MASSIVE_API_KEY 就不排）。
+    # 時間用 pydantic 內建解析（"07:50" 可）；每次最多 3 次請求，免費方案每分鐘 5 次。
+    scheduler_massive_enabled: bool = True
+    scheduler_massive_time: datetime.time = datetime.time(7, 50)
+    scheduler_massive_end_time: datetime.time = datetime.time(7, 59)
+    scheduler_massive_update_time: datetime.time = datetime.time(8, 40)
+    scheduler_massive_update_end_time: datetime.time = datetime.time(8, 49)
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
     scheduler_market_hours_only: bool = True
     scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪
