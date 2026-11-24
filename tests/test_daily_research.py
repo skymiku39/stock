@@ -66,7 +66,7 @@ def test_collection_failure_remains_partial_even_if_analysis_succeeds(tmp_path, 
         return 0
     monkeypatch.setattr(verified_research_batch, "main", verified)
     assert daily.run_daily(tmp_path) == 3
-    status = json.loads(next((tmp_path/"data/daily_research").glob("*/status.json")).read_text())
+    status = json.loads(next((tmp_path/"data/daily_research").glob("*/status.json")).read_text(encoding="utf-8"))
     assert not status["complete"] and status["excluded"] == ["UNKNOWN HK"]
 
 
@@ -205,3 +205,61 @@ def test_model_retry_deadline_reaches_daily_status_and_clears_on_recovery(tmp_pa
     state = json.loads((out / 'status.json').read_text(encoding='utf-8'))
     assert not state['model_blocked'] and state['outcome'] == 'complete'
     assert state['next_retry_epoch'] == 0 and not state.get('error')
+
+
+def test_collect_only_runs_collection_without_model_and_scheduler_has_the_job(tmp_path, monkeypatch):
+    from bot import data_pipeline, verified_research_batch
+    from bot.scheduler import Scheduler
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "collect_daily_inputs", lambda *a, **k: {"complete": True})
+    monkeypatch.setattr(daily, "write_daily_summary", lambda *a: None)
+    runs = []
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", lambda cfg: runs.append(cfg) or SimpleNamespace(
+        run_id="r1", errors=[], warnings=[], focus_tickers=["2330"]))
+    official = [["mops down"], []]
+    monkeypatch.setattr(daily, "refresh_official", lambda root: official.pop(0))
+    monkeypatch.setattr(verified_research_batch, "main", lambda argv: pytest.fail("model must not be called"))
+    assert daily.run_daily(tmp_path, collect_only=True) == 3
+    assert daily.run_daily(tmp_path, collect_only=True) == 0
+    assert len(runs) == 1 and not runs[0].run_llm_analysis
+    assert daily.run_daily(tmp_path, collect_only=True) == 0 and not official
+    s = Scheduler(Settings(_env_file=None, scheduler_daily_all_enabled=True), project_root=tmp_path)
+    job = next(j for j in s.jobs if j.name == "collection")
+    assert job.module == "bot.daily_research" and job.extra_args[-1] == "--collect-only"
+
+
+def test_collect_only_completes_when_only_advisory_warnings_remain(tmp_path, monkeypatch):
+    from bot import data_pipeline
+    monkeypatch.setattr(daily, "Settings", lambda **kw: SimpleNamespace(llm_enabled=False))
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
+    advisory = "macro: source_date_status=mixed"
+    runs = []
+
+    def collect(config):
+        runs.append(config)
+        return SimpleNamespace(run_id="source", errors=[], warnings=[advisory],
+                               advisory_warnings=[advisory], focus_tickers=["2330"])
+
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", collect)
+    assert daily.run_daily(tmp_path, collect_only=True) == 0
+    status = json.loads(next((tmp_path / "data/daily_research").glob("*/status.json")).read_text(encoding="utf-8"))
+    assert status["collection_complete"] is True
+    assert status["collection_warnings"] == [advisory]
+    assert status["collection_advisory_warnings"] == [advisory]
+    # 當天已完成就不再重跑整條收集管線。
+    assert daily.run_daily(tmp_path, collect_only=True) == 0
+    assert len(runs) == 1
+
+
+def test_collect_only_stays_incomplete_on_blocking_warning(tmp_path, monkeypatch):
+    from bot import data_pipeline
+    monkeypatch.setattr(daily, "Settings", lambda **kw: SimpleNamespace(llm_enabled=False))
+    monkeypatch.setattr(daily, "tracked_tickers", lambda *a: ["2330"])
+    monkeypatch.setattr(daily, "refresh_official", lambda *a: [])
+    monkeypatch.setattr(data_pipeline, "run_full_pipeline", lambda *a: SimpleNamespace(
+        run_id="source", errors=[], warnings=["chips: 1 個焦點標的沒有可用交易日資料"],
+        advisory_warnings=[], focus_tickers=["2330"]))
+    assert daily.run_daily(tmp_path, collect_only=True) == 3
+    status = json.loads(next((tmp_path / "data/daily_research").glob("*/status.json")).read_text(encoding="utf-8"))
+    assert status["collection_complete"] is False

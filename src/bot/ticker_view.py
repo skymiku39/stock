@@ -150,6 +150,8 @@ class TickerSnapshot:
     macro_snapshot: Optional[Dict[str, Any]] = None  # market_macro.macro_to_dict()
     us_related: List[Dict[str, Any]] = field(default_factory=list)  # 對應美股客戶/夥伴
     adr_premium: Optional[Dict[str, Any]] = None     # 若本身有 ADR (例如 2330)
+    # FMP 美股財報趨勢（ADR + 供應鏈相關美股；只讀本地檔，研究背景用，不進交易規則）
+    us_fundamentals: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------
@@ -555,6 +557,14 @@ def build_snapshot(
     except Exception:
         log.exception("[%s] 美股/跨市場資料整合失敗", ticker)
 
+    # ---- 10.5 FMP 美股財報趨勢（只讀 data/us_fundamentals，不連網）----
+    try:
+        from bot.free_sources.collect_fmp import summaries_for_tw
+
+        snap.us_fundamentals = summaries_for_tw(project_root, ticker, snap.us_related)
+    except Exception:
+        log.debug("[%s] FMP 美股財報摘要讀取失敗", ticker, exc_info=True)
+
     return snap
 
 
@@ -648,6 +658,7 @@ def snapshot_to_dict(s: TickerSnapshot) -> Dict[str, Any]:
         "macro_snapshot": s.macro_snapshot,
         "us_related": s.us_related,
         "adr_premium": s.adr_premium,
+        "us_fundamentals": s.us_fundamentals,
         "quarterly_view": s.quarterly_view,
     }
 

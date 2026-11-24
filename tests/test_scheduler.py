@@ -20,12 +20,15 @@ def _settings(**overrides) -> Settings:
 # ---------------------------------------------------------------------------
 
 
-def test_scheduler_builds_both_jobs_by_default() -> None:
+def test_scheduler_builds_both_jobs_by_default(tmp_path) -> None:
     from bot.scheduler import Scheduler
 
-    sch = Scheduler(_settings(), dry_run=True)
+    sch = Scheduler(_settings(), project_root=tmp_path, dry_run=True)
     names = {j.name for j in sch.jobs}
-    assert names == {"macro", "fundamentals", "research", "company", "history_fetch"}
+    assert names == {"macro", "fundamentals", "research", "company", "history_fetch",
+                     "overnight_brief", "overnight_brief_update",
+                     "finmind_crosscheck", "fmp_fundamentals",
+                     "smile_mood_log", "smile_mood_log_update"}
 
 
 def test_scheduler_skips_disabled_jobs() -> None:
@@ -38,10 +41,35 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_research_interval_min=0,
             scheduler_company_interval_min=0,
             scheduler_history_fetch_interval_min=0,
+            scheduler_smile_watch_enabled=False,
+            scheduler_overnight_brief_enabled=False,
+            scheduler_finmind_crosscheck_enabled=False,
+            scheduler_fmp_enabled=False,
+            scheduler_smile_mood_log_enabled=False,
         ),
         dry_run=True,
     )
     assert sch.jobs == []
+
+
+def test_scheduler_smile_watch_job_needs_config_file(tmp_path) -> None:
+    import datetime as dt
+
+    from bot.scheduler import Scheduler
+
+    def job(**kw):
+        sch = Scheduler(_settings(**kw), project_root=tmp_path, dry_run=True)
+        return next((j for j in sch.jobs if j.name == "smile_watch"), None)
+
+    assert job() is None  # 沒有名單檔就不排
+    config = tmp_path / "config" / "smile_watch.json"
+    config.parent.mkdir()
+    config.write_text('{"targets": [{"symbol": "1514", "reference": 105}]}', encoding="utf-8")
+    assert job(scheduler_smile_watch_enabled=False) is None
+    found = job()
+    assert found.module == "bot.smile_watch" and not found.run_once_per_day
+    assert found.extra_args == ["--config", str(config), "--max-minutes", "50"]
+    assert (found.window_start, found.window_end) == (dt.time(9, 0), dt.time(13, 30))
 
 
 def test_scheduler_research_extra_args_parsed() -> None:
@@ -132,6 +160,7 @@ def test_scheduler_once_respects_daily_job_window(monkeypatch, tmp_path) -> None
             scheduler_research_interval_min=0,
             scheduler_company_interval_min=0,
             scheduler_history_fetch_interval_min=0,
+            scheduler_fmp_enabled=False,
             scheduler_intraday_enabled=True,
             scheduler_intraday_time=dt.time(9, 0),
             scheduler_intraday_end_time=dt.time(10, 0),
@@ -331,3 +360,25 @@ def test_partial_exit_without_retry_epoch_uses_normal_interval(tmp_path, monkeyp
     assert sch._job_eligible(job, now, once=False)
     status = json.loads(sch.status_path.read_text(encoding="utf-8"))
     assert status["jobs"]["research"]["state"] == "partial"
+
+
+def test_scheduler_finmind_crosscheck_job(tmp_path) -> None:
+    from bot.scheduler import Scheduler
+
+    def job(**kw):
+        sch = Scheduler(_settings(**kw), project_root=tmp_path, dry_run=True)
+        return next((j for j in sch.jobs if j.name == "finmind_crosscheck"), None)
+
+    found = job()
+    assert found.module == "bot.free_sources.finmind_crosscheck" and found.run_once_per_day
+    assert found.extra_args == ["--root", str(tmp_path)] and not found.market_hours_only
+    assert (found.window_start, found.window_end) == (dt.time(21, 0), dt.time(23, 30))
+    assert job(scheduler_finmind_crosscheck_enabled=False) is None
+    custom = job(scheduler_finmind_crosscheck_time="20:30", scheduler_finmind_crosscheck_end_time="22:00")
+    assert (custom.window_start, custom.window_end) == (dt.time(20, 30), dt.time(22, 0))
+    # 平日時段內才排；週末不排
+    sch = Scheduler(_settings(), project_root=tmp_path, dry_run=True)
+    tz = dt.timezone(dt.timedelta(hours=8))
+    assert sch._job_in_window(found, dt.datetime(2026, 11, 24, 21, 30, tzinfo=tz))
+    assert not sch._job_in_window(found, dt.datetime(2026, 11, 24, 20, 0, tzinfo=tz))
+    assert not sch._job_in_window(found, dt.datetime(2026, 11, 28, 21, 30, tzinfo=tz))

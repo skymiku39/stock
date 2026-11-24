@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-LABELS = {"smile": "微笑方案（改造後）", "swing": "波段原型"}
+LABELS = {"smile": "微笑方案（改造後）", "swing": "波段原型", "c2": "選股策略 C2", "crash": "大跌分批加碼",
+          "crash_aggr": "大跌分批加碼（積極版）"}
 AXIS_LABELS = {"smile_take_profit_pct": "停利 %", "smile_symbol_stop_loss_pct": "單檔停損 %",
-               "breakout_days": "突破天數", "trail_atr": "移動停利 ATR 倍數"}
+               "breakout_days": "突破天數", "trail_atr": "移動停利 ATR 倍數",
+               "max_hold_days": "持有期限（天）", "first_drop_pct": "首次加碼跌幅 %",
+               "weighting": "每批分配"}
+VALUE_LABELS = {"equal": "平均", "front": "前重（1/2、1/4、1/4）", "all_in": "一次全押"}
 REASONS = {"take_profit": "停利", "stop_loss": "停損", "trailing_stop": "移動停利",
            "expiry": "到期", "data_end": "資料中斷"}
 
@@ -18,7 +22,8 @@ def _num(value, digits: int = 2, suffix: str = "") -> str:
 
 
 def _params(params: dict) -> str:
-    return "、".join(f"{AXIS_LABELS.get(k, k)} {v:g}" for k, v in params.items())
+    return "、".join(f"{AXIS_LABELS.get(k, k)} {VALUE_LABELS.get(v, v) if isinstance(v, str) else format(v, 'g')}"
+                    for k, v in params.items())
 
 
 def _table(header: list, rows: list) -> list:
@@ -77,6 +82,8 @@ def _strategy_section(key: str, s: dict, validated: bool) -> list:
         value = item["value"]
         if isinstance(value, dict) and "random_p95" in value:
             shown = f"策略 {_num(value['strategy'], 2, '%')}，隨機第 95 百分位 {_num(value['random_p95'], 2, '%')}"
+        elif isinstance(value, dict) and "index" in value:
+            shown = f"策略 {_num(value['strategy'], 1, '%')}，同期等權指數 {_num(value['index'], 1, '%')}"
         elif isinstance(value, dict):
             shown = _years(value)
         else:
@@ -134,6 +141,27 @@ def _conclusion(result: dict) -> list:
     return lines
 
 
+CRITERION_NOTE = (
+    "> **通過標準變更（2026-11-18，使用者決定）**：回撤條件由「最大回撤 ≤ 20%」改為「最大回撤不超過同期 60 檔"
+    "等權指數」，20% 改列參考值。原因：指數本身在參數決定段與驗證段的最大回撤就有 34～37%，只做多的股票策略"
+    "幾乎不可能 ≤ 20%。這個變更是在看過驗證段結果之後才做的，所以用新標準重新判定的驗證段結果只供參考，"
+    "能當證據的是之後的前瞻追蹤。")
+
+
+# #19 報告的歷次說明（報告重新產生時保留）。
+HISTORY_NOTES = ('> **2026-11-17 修正成交模型後重算**\n> - 這次重看驗證段是修正引擎錯誤，不是調參數。參數格點、選定規則與通過標準都沒變，兩個策略的選定組合也與修正前相同。\n> - 修正前，兩個引擎的買進都受成交量上限截斷，賣出卻要求整個部位當天賣完；流動性差的標的停損、到期會被延後到成交量放大（微笑方案最長持有曾到 156 天，期限 90 天）。現在停損、到期與移動停利都受同一個上限，賣不完的部分隔天開盤續賣，分多天賣完的出場仍算一輪。微笑方案的停利（收盤訊號）維持 11-10 的「整組成交或整組取消」。\n> - 波段原型的年化報酬、資金使用率改以交易期（2024-01 起）計，不含暖機期。\n> - 結果：微笑方案驗證段從淨虧 −19,994 元變成淨賺 118,289 元，最大回撤從 47.1% 降到 37.9%，以金額計獲利因子 1.24。波段原型變化不大。\n> - **結論不變：兩者都沒有證據。**微笑方案仍有三項核心條件未通過（重抽樣第 5 百分位 −0.60%、2024 年虧損、回撤 37.9% > 20%）；波段原型仍未通過「高於隨機進場第 95 百分位」、逐年獲利與回撤三項。\n> - 「每輪期望值」是各輪報酬率的等權平均，不是以金額計。\n> - 修正前的報告與 JSON 保存在 `work/strategy-comparison/before-sell-fix/`。',)
+
+
+def notes_block(result: dict, history: tuple = ()) -> list:
+    """報告開頭的固定說明：通過標準變更，以及該報告的歷次說明。"""
+    lines = []
+    if (result.get("benchmark") or {}).get("index_max_drawdown_pct") is not None:
+        lines += [CRITERION_NOTE, ""]
+    for note in history:
+        lines += [note, ""]
+    return lines
+
+
 def render(result: dict) -> str:
     validated = result["validated"]
     strategies = result["strategies"]
@@ -147,7 +175,7 @@ def render(result: dict) -> str:
     else:
         lines += ["## 結論", ""] + _conclusion(result) + [
             "", "核心條件未通過就是沒有證據，不調參數重跑。驗證段只跑了這一次；"
-            "之後若改參數再看這段資料，這段就不能再當驗證用。", ""]
+            "之後若改參數再看這段資料，這段就不能再當驗證用。", ""] + notes_block(result, HISTORY_NOTES)
         lines += ["## 驗證段並列", ""]
         lines += _table(METRIC_HEADER, [
             _metric_row(LABELS[key], strategies[key]["validation"]["metrics"]) for key in ("smile", "swing")])
@@ -158,7 +186,10 @@ def render(result: dict) -> str:
                          _num(d["p5"], 2, "%") if d else "無", _num(d["p95"], 2, "%") if d else "無"])
         lines += ["", "隨機進場基準的每輪期望值（各自沿用該策略的出場規則）：", ""]
         lines += _table(["", "平均", "第 5 百分位", "第 95 百分位"], rows)
-        lines += ["", "現金基準的報酬為 0。不使用買進持有，也不使用 2330。", ""]
+        index_mdd = (result.get("benchmark") or {}).get("index_max_drawdown_pct")
+        lines += ["", "現金基準的報酬為 0。不使用買進持有，也不使用 2330。"
+                  + (f"同期 60 檔等權指數的最大回撤為 {_num(index_mdd, 1, '%')}，只當回撤的比較基準，不比報酬。"
+                     if index_mdd is not None else ""), ""]
     lines += ["## 做法", "",
               "- 標的：`config/backtest_universe.json`，以 2020 年全年日均成交金額排名取 60 檔，排除 2330 與非普通股，選定後不換。",
               "- 成交假設：收盤產生訊號，次日開盤成交；每邊滑價 10 bps；單筆不超過前一日成交量的 0.1%；"

@@ -510,3 +510,32 @@ class TestBulkOps:
         ])
         rows = db.fetch_all_rows("stock_info")
         assert {r["symbol"] for r in rows} == {"2330", "0050"}
+
+
+def test_schema_pass_is_skipped_until_the_schema_changes(tmp_path, monkeypatch):
+    import sqlite3
+    from bot import stock_db
+    from bot.stock_db import StockDB
+
+    path = tmp_path / "data" / "stock.db"
+    runs = []
+    original = StockDB._run_schema_init
+    monkeypatch.setattr(StockDB, "_run_schema_init", lambda self: runs.append(1) or original(self))
+    StockDB.open(path=path).close()
+    StockDB.open(path=path).close()
+    assert len(runs) == 1                                   # 同一個行程、結構沒變：不重跑
+    # 別的連線改了結構（例如另一個行程的遷移）：下一次開啟要重跑，並把缺的東西補回來。
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TRIGGER research_chunks_ai")
+    raw.commit()
+    raw.close()
+    db = StockDB.open(path=path)
+    assert len(runs) == 2
+    assert db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='research_chunks_ai'").fetchone()
+    db.close()
+    # 檔案被刪掉重建也要重跑。
+    for suffix in ("", "-wal", "-shm"):
+        (path.parent / (path.name + suffix)).unlink(missing_ok=True)
+    StockDB.open(path=path).close()
+    assert len(runs) == 3
+    stock_db._SCHEMA_VERIFIED.clear()

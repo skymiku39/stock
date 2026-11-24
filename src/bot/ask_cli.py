@@ -15,6 +15,8 @@ from bot.utils import log_root
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    from bot.cli_encoding import configure_console
+    configure_console()  # 在 parse_args 之前，--help 導向檔案時才會是 UTF-8
     parser = argparse.ArgumentParser(description="QueryPlan + EvidencePack 本地問答")
     parser.add_argument("query", nargs="?", help="要詢問的問題")
     parser.add_argument("--root", type=Path, default=Path.cwd())

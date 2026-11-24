@@ -75,6 +75,10 @@ class QueueState:
     last_item: str = ""
     last_message: str = ""
     updated_at: str = ""
+    # 抓過但沒有資料的月份（上市前、下市後）："代號:YYYY-MM" → 檢查日；一段時間內不重抓。
+    empty_months: Dict[str, str] = field(default_factory=dict)
+    # 上次把追蹤名單併入佇列的日期；一天最多併一次。
+    universe_date: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -101,6 +105,8 @@ class QueueState:
             last_item=str(data.get("last_item", "")),
             last_message=str(data.get("last_message", "")),
             updated_at=str(data.get("updated_at", "")),
+            empty_months=dict(data.get("empty_months") or {}),
+            universe_date=str(data.get("universe_date", "")),
         )
 
 
@@ -180,7 +186,7 @@ def _month_covered(
         return n >= 150
     start = f"{year:04d}-{month:02d}-01"
     if month == 12:
-        end = f"{year:12}-31"
+        end = f"{year:04d}-12-31"
     else:
         end = (dt.date(year, month + 1, 1) - dt.timedelta(days=1)).isoformat()
     bars = db.get_price_history(symbol, start=start, end=end)
@@ -211,33 +217,74 @@ def _set_cooldown(
     state.cooldown_until[symbol] = until.isoformat(timespec="seconds")
 
 
+EMPTY_MONTH_RETRY_DAYS = 30
+
+
+def _known_empty(state: QueueState, symbol: str, year: int, month: int, now: Optional[dt.datetime] = None) -> bool:
+    raw = state.empty_months.get(f"{symbol}:{year:04d}-{month:02d}")
+    if not raw:
+        return False
+    try:
+        checked = dt.date.fromisoformat(raw)
+    except ValueError:
+        return False
+    return ((now or now_tw()).date() - checked).days < EMPTY_MONTH_RETRY_DAYS
+
+
 def next_work_item(
     state: QueueState,
     db: StockDB,
     *,
     now: Optional[dt.datetime] = None,
 ) -> Optional[WorkItem]:
+    """依「月份由近到遠、同一個月內逐檔」取下一筆待補項目。
+
+    為什麼以月份為主：名單有兩百多檔時，逐檔補完七年才換下一檔，後面的標的要等很久
+    才有任何歷史；先讓每一檔都有近期資料，再一起往過去延伸。
+    """
     if not state.symbols or not state.months:
         return None
     n_sym = len(state.symbols)
     n_mon = len(state.months)
-    for _ in range(n_sym * n_mon):
-        if state.symbol_index >= n_sym:
-            return None
-        sym = state.symbols[state.symbol_index]
-        if _in_cooldown(state, sym, now):
+    while state.month_index < n_mon:
+        y, m = state.months[state.month_index]
+        while state.symbol_index < n_sym:
+            sym = state.symbols[state.symbol_index]
             state.symbol_index += 1
-            state.month_index = 0
-            continue
-        while state.month_index < n_mon:
-            y, m = state.months[state.month_index]
-            state.month_index += 1
+            if _in_cooldown(state, sym, now) or _known_empty(state, sym, y, m, now):
+                continue
             if _month_covered(db, sym, y, m, kind=state.kind):
                 continue
             return WorkItem(symbol=sym, year=y, month=m, kind=state.kind)
-        state.symbol_index += 1
-        state.month_index = 0
+        state.month_index += 1
+        state.symbol_index = 0
     return None
+
+
+def refresh_universe(state: QueueState, root: Path, *, lookback_days: int = 5) -> Optional[QueueState]:
+    """佇列跑完後，把目前追蹤的標的併入並把終點延到今天；沒有變化回 None。一天最多做一次。"""
+    today = now_tw().date().isoformat()
+    if state.universe_date == today:
+        return None
+    try:
+        from bot.daily_collection import extended_price_symbols
+        tracked = extended_price_symbols(root)
+    except Exception:
+        tracked = []
+    merged = list(state.symbols) + [s for s in tracked if s not in set(state.symbols)]
+    grew = len(merged) > len(state.symbols)
+    rolled = (state.end_date or "")[:7] < today[:7]
+    state.universe_date = today
+    if not grew and not rolled:
+        save_state(state, root)
+        return None
+    fresh = init_state(root=root, start_date=state.start_date, end_date=today, symbols=merged,
+                       kind=state.kind, lookback_days=lookback_days)
+    fresh.empty_months, fresh.cooldown_until = state.empty_months, state.cooldown_until
+    fresh.stats_ok, fresh.stats_fail, fresh.stats_rows = state.stats_ok, state.stats_fail, state.stats_rows
+    fresh.universe_date = today
+    save_state(fresh, root)
+    return fresh
 
 
 def twse_is_available(session=None, *, force_check: bool = False) -> bool:
@@ -430,6 +477,13 @@ def _process_batch_open_db(
                 )
                 item = next_work_item(state, db)
             if item is None:
+                # 追蹤名單會變（ETF 換股）、月份會往前走；不併入的話佇列跑完一次就永遠沒事做。
+                refreshed = refresh_universe(state, root, lookback_days=lookback_days)
+                if refreshed is not None:
+                    state = refreshed
+                    log.info("併入追蹤名單：%d 檔 × %d 月", len(state.symbols), len(state.months))
+                    item = next_work_item(state, db)
+            if item is None:
                 log.info("目前無待補項目（可能已全部齊備）")
                 break
 
@@ -453,6 +507,12 @@ def _process_batch_open_db(
             state.stats_rows += result.rows
         else:
             state.stats_fail += 1
+            # 來源有回應但沒有資料。當月（或未來月份）可能只是還沒有交易日／資料還沒發布，
+            # 標成空月份會 30 天不重抓，所以只標已結束的月份。
+            today = now_tw().date()
+            if (not result.rate_limited and result.http_status == 200
+                    and (item.year, item.month) < (today.year, today.month)):
+                state.empty_months[f"{item.symbol}:{item.year:04d}-{item.month:02d}"] = today.isoformat()
             if result.rate_limited:
                 _set_cooldown(state, item.symbol, cooldown_minutes)
                 log.warning(

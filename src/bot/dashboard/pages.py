@@ -7316,6 +7316,127 @@ def page_hot_stock_futures() -> None:
 
 
 # ======================================================================
+# 頁面: 美股隔夜重點
+# ======================================================================
+
+
+def _brief_hhmm(text: Any, with_date: bool = False) -> str:
+    try:
+        then = dt.datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return "-"
+    return then.strftime("%m-%d %H:%M" if with_date else "%H:%M")
+
+
+def page_overnight_brief() -> None:
+    st.title("美股隔夜重點")
+    folder = PROJECT_ROOT / "data" / "overnight_brief"
+    files = sorted((p for p in folder.glob("????-??-??.json")), reverse=True) if folder.is_dir() else []
+    if not files:
+        st.info("還沒有產生。平日 08:00 與 08:50 各產生一次。")
+        return
+    choice = st.selectbox("日期", [p.stem for p in files], key="overnight_brief_date")
+    try:
+        data = json.loads((folder / f"{choice}.json").read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("內容不是物件")
+    except (OSError, ValueError) as exc:
+        st.error(f"讀不到 {choice} 的隔夜重點檔案：{exc}")
+        return
+
+    def as_dict(value: Any) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value: Any) -> list:
+        return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+    window = as_dict(data.get("window"))
+    st.caption(
+        "平日 08:00 產生、08:50 更新。涵蓋的新聞時間："
+        f"{_brief_hhmm(window.get('start'), True)} ～ {_brief_hhmm(window.get('end'), True)}"
+    )
+    for warning in data.get("warnings") or []:
+        st.warning(str(warning))
+
+    market = as_dict(data.get("market"))
+    st.markdown("### 行情")
+    if market.get("status") != "ok":
+        st.error(f"行情暫時取不到：{market.get('error') or '未知原因'}")
+    else:
+        indices = as_list(market.get("indices"))
+        if indices:
+            cols = st.columns(len(indices))
+            for col, q in zip(cols, indices):
+                try:
+                    col.metric(str(q.get("name") or q.get("symbol", "")), f"{float(q['price']):,.2f}",
+                               f"{float(q['pct_change']):+.2f}%")
+                except (KeyError, TypeError, ValueError):
+                    col.metric(str(q.get("name") or q.get("symbol", "")), "-")
+        stocks = as_list(market.get("stocks"))
+        if stocks:
+            st.dataframe(pd.DataFrame([{
+                "代號": s.get("symbol", ""), "名稱": s.get("name", ""), "收盤": s.get("price"),
+                "漲跌 %": s.get("pct_change"), "資料日期": s.get("source_date", ""),
+                "對應台股": s.get("parent_tw_ticker", ""),
+            } for s in stocks]), hide_index=True, use_container_width=True)
+        premiums = as_list(market.get("adr_premiums"))
+        if premiums:
+            st.markdown("**ADR 溢價**")
+            st.dataframe(pd.DataFrame([{
+                "ADR": p.get("adr_symbol", ""), "台股": p.get("tw_ticker", ""),
+                "溢價 %": p.get("premium_pct"), "時間對齊狀態": p.get("temporal_status", ""),
+            } for p in premiums]), hide_index=True, use_container_width=True)
+        st.caption(f"行情抓取時間：{_brief_hhmm(market.get('fetched_at'), True)}。"
+                   "台股收盤、匯率與 ADR 的日期可能不同，溢價僅供參考。")
+
+    us_sentiment = as_dict(data.get("us_sentiment"))
+    sentiment_rows = as_list(us_sentiment.get("rows"))
+    if sentiment_rows:
+        st.markdown("### 個股隔夜情緒（參考）")
+        st.dataframe(pd.DataFrame([{
+            "代號": r.get("symbol", ""), "情緒": r.get("display") or "無資料",
+            "則數": r.get("count", 0),
+        } for r in sentiment_rows]), hide_index=True, use_container_width=True)
+        st.caption(str(us_sentiment.get("note") or "") + "；涵蓋 "
+                   f"{_brief_hhmm(us_sentiment.get('published_after'), True)} 之後的新聞（UTC）")
+
+    summary = as_dict(data.get("summary"))
+    st.markdown("### 重點")
+    points = as_list(summary.get("points"))
+    if summary.get("status") == "ok" and points:
+        for point in points:
+            links = "　".join(f"[來源 {i}]({u})" for i, u in enumerate(point.get("urls") or [], 1))
+            st.markdown(f"- {point.get('text', '')}" + (f"　{links}" if links else ""))
+    else:
+        st.info(str(summary.get("note") or "模型摘要尚未可用"))
+
+    news = as_dict(data.get("news"))
+    candidates = as_list(news.get("candidates"))
+    st.markdown("### 候選新聞")
+    st.caption("這是交給模型之前的規則篩選結果：同一件事越多家報導排越前面，並非重要性判斷。")
+    st.caption(f"視窗內 {news.get('items_in_window', '-')} 則、{news.get('feeds_in_window', '-')} 個來源；"
+               f"存檔最後更新 {_brief_hhmm(news.get('archive_collected_at'), True)}")
+    with st.expander(f"候選新聞（{len(candidates)} 則）", expanded=summary.get("status") != "ok"):
+        for c in candidates:
+            title = str(c.get("title", "")).replace("[", "\\[").replace("]", "\\]")
+            url = str(c.get("url", ""))
+            head = f"[{title}]({url})" if url else title
+            feeds = "、".join(str(f) for f in c.get("feeds") or [c.get("feed", "")] if f)
+            tail = [f"{_brief_hhmm(c.get('published_at'), True)}", f"{c.get('source_count', 1)} 家（{feeds}）"]
+            if c.get("topics"):
+                tail.append("主題：" + "、".join(map(str, c["topics"])))
+            if c.get("related_tickers"):
+                tail.append("相關台股：" + "、".join(map(str, c["related_tickers"])))
+            st.markdown(f"{head}  \n{' ｜ '.join(tail)}")
+
+    slot_names = {"morning": "08:00 版", "preopen": "開盤前更新"}
+    runs = [f"{_brief_hhmm(r.get('at'), True)} {slot_names.get(r.get('slot'), r.get('slot', ''))}"
+            for r in as_list(data.get("runs"))]
+    if runs:
+        st.caption("產生紀錄：" + "；".join(runs))
+
+
+# ======================================================================
 # 頁面: 美股 / 跨市場
 # ======================================================================
 

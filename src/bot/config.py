@@ -71,6 +71,12 @@ class Settings(BaseSettings):
         "scheduler_nextday_draft_end_time",
         "scheduler_nextday_update_time",
         "scheduler_nextday_update_end_time",
+        "scheduler_overnight_brief_time",
+        "scheduler_overnight_brief_end_time",
+        "scheduler_overnight_brief_update_time",
+        "scheduler_overnight_brief_update_end_time",
+        "scheduler_finmind_crosscheck_time",
+        "scheduler_finmind_crosscheck_end_time",
         mode="before",
     )
     @classmethod
@@ -239,6 +245,8 @@ class Settings(BaseSettings):
     # --- Telegram 通知 (留空則不啟用) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # --- 本機通知（Windows 桌面通知，不經外部服務；見 bot/local_notify.py）---
+    local_notify_enabled: bool = True
 
     # --- 微笑曲線策略 (stock-smile-backtest / 規劃中 live) ---
     smile_buy_tiers: str = "1:1,3:2,5:3,8:4"
@@ -267,11 +275,25 @@ class Settings(BaseSettings):
     smile_initial_fund: int = 0  # 複利的起始資金；權益＝起始資金＋累計已實現損益，資金上限取 min(MAX_FUND, 權益)；0 停用
     smile_unit_equity_pct: float = 0.0  # 每階金額＝權益 × 此 % × 該階倍數；0＝沿用 SMILE_BASE_LOT（需搭配 SMILE_INITIAL_FUND）
 
+    # 時事＋即時股價（只在盤中生效；門檻暫定，未經驗證）
+    smile_mood_sell_enabled: bool = False  # 持倉淨利為正且市場悲觀時，整個部位提早獲利了結；絕不因此認賠
+    smile_mood_min_profit_pct: float = 0.0  # 情緒賣出時整個部位淨利須 >= 持倉成本此 %；0＝淨利 > 0 即可
+    smile_news_block_enabled: bool = False  # 個股近期有公司層級壞消息時不買進（只擋買，不觸發賣出）
+    smile_news_window_hours: int = 24  # 只看這麼多小時內的新聞
+    smile_news_max_age_minutes: int = 90  # 新聞存檔超過這麼多分鐘沒更新就視為無法判斷
+    smile_mood_news_min_negative: int = 10  # 新聞悲觀：含悲觀詞的標題至少幾則
+    smile_mood_news_score: float = 0.3  # 新聞悲觀：(悲觀−樂觀)/(悲觀+樂觀) 至少多少
+    smile_mood_market_drop_pct: float = 1.5  # 股價悲觀：市場即時跌幅達此 %
+    smile_mood_require: Literal["both", "any", "news", "price"] = "both"  # 新聞與股價的判定組合
+
     @field_validator("smile_max_unrealized_loss_pct", "smile_max_bottom_dca_days",
                      "smile_symbol_stop_loss_pct", "smile_max_symbol_fund_pct",
                      "smile_take_profit_pct", "smile_max_hold_days",
                      "smile_reentry_cooldown_days", "smile_min_first_tier_pct",
-                     "smile_initial_fund", "smile_unit_equity_pct")
+                     "smile_initial_fund", "smile_unit_equity_pct",
+                     "smile_mood_min_profit_pct", "smile_news_window_hours",
+                     "smile_news_max_age_minutes", "smile_mood_news_min_negative",
+                     "smile_mood_news_score", "smile_mood_market_drop_pct")
     @classmethod
     def _validate_smile_guards(cls, v):
         if v < 0:
@@ -359,6 +381,18 @@ class Settings(BaseSettings):
     # Dashboard 未設定 token 時維持唯讀；實際管理操作仍需明確驗證。
     memory_admin_token: str = ""
 
+    # --- 免費資料來源金鑰（空字串 = 該來源略過；見 docs/free-data-sources-plan.md）---
+    finnhub_api_key: str = ""
+    fugle_api_key: str = ""
+    finmind_token: str = ""
+    fmp_api_key: str = ""
+    massive_api_key: str = ""
+    marketaux_api_token: str = ""
+    alphavantage_api_key: str = ""
+    # FinMind 交叉核對每次最多送幾次請求（每檔 2 次；免費 600／小時）、每檔多久重查一次
+    finmind_crosscheck_max_requests: int = 300
+    finmind_crosscheck_recheck_days: int = 7
+
     # Dashboard 單次背景任務期限，逾時終止工作程序，不自動重試。
     dashboard_task_timeout_seconds: int = Field(default=3600, ge=1)
 
@@ -403,6 +437,29 @@ class Settings(BaseSettings):
     scheduler_nextday_update_enabled: bool = False
     scheduler_nextday_update_time: datetime.time = datetime.time(2, 0)
     scheduler_nextday_update_end_time: datetime.time = datetime.time(6, 0)
+    # 美股隔夜重點：08:00 第一次、08:50 更新（不呼叫模型，只整理行情與新聞候選）
+    scheduler_overnight_brief_enabled: bool = True
+    scheduler_overnight_brief_time: datetime.time = datetime.time(8, 0)
+    scheduler_overnight_brief_end_time: datetime.time = datetime.time(8, 49)
+    scheduler_overnight_brief_update_time: datetime.time = datetime.time(8, 50)
+    scheduler_overnight_brief_update_end_time: datetime.time = datetime.time(10, 0)
+    # FinMind 交叉核對（月營收、損益表 vs. 資料庫）：平日晚上一次，等官方與 FinMind 都更新完；
+    # 沒有 FINMIND_TOKEN 時程式自己略過。分批上限見 finmind_crosscheck_max_requests。
+    scheduler_finmind_crosscheck_enabled: bool = True
+    scheduler_finmind_crosscheck_time: datetime.time = datetime.time(21, 0)
+    scheduler_finmind_crosscheck_end_time: datetime.time = datetime.time(23, 30)
+    # Massive 美股新聞：在 08:00 與 08:50 隔夜重點之前各收集一次（沒有 MASSIVE_API_KEY 就不排）。
+    # 時間用 pydantic 內建解析（"07:50" 可）；每次最多 3 次請求，免費方案每分鐘 5 次。
+    scheduler_massive_enabled: bool = True
+    scheduler_massive_time: datetime.time = datetime.time(7, 50)
+    scheduler_massive_end_time: datetime.time = datetime.time(7, 59)
+    scheduler_massive_update_time: datetime.time = datetime.time(8, 40)
+    scheduler_massive_update_end_time: datetime.time = datetime.time(8, 49)
+    # Marketaux 個股隔夜情緒：在 08:00 隔夜重點之前收集（沒有 MARKETAUX_API_TOKEN 就不排）。
+    # 時間用 pydantic 內建解析（"07:40" 可）；每天最多 8 次請求（4 檔 × 2 頁），額度上限 100。
+    scheduler_marketaux_enabled: bool = True
+    scheduler_marketaux_time: datetime.time = datetime.time(7, 40)
+    scheduler_marketaux_end_time: datetime.time = datetime.time(7, 59)
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
     scheduler_market_hours_only: bool = True
     scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪
@@ -411,6 +468,15 @@ class Settings(BaseSettings):
     scheduler_monitor_mode: Literal["watch", "report", "trade"] = "watch"
     # 只看不買：約 10 元熱度 + 熱門個股期貨快照 (分鐘)；<=0 停用
     scheduler_watch_snapshot_interval_min: int = 0
+    # 實際持股的微笑盯盤（只提醒、不下單）；名單在 config/smile_watch.json，檔案不存在就不排
+    scheduler_smile_watch_enabled: bool = True
+    # 微笑情緒分數每日紀錄（只記錄，不影響交易；情緒賣出本身仍由 SMILE_MOOD_SELL_ENABLED 控制）。
+    # 平日兩個時段：開盤後新聞與 0050 漲跌已有樣本，以及收盤前（13:25 前報價仍是盤中）。
+    scheduler_smile_mood_log_enabled: bool = True
+    scheduler_smile_mood_log_time: datetime.time = datetime.time(9, 30)
+    scheduler_smile_mood_log_end_time: datetime.time = datetime.time(10, 0)
+    scheduler_smile_mood_log_update_time: datetime.time = datetime.time(13, 0)
+    scheduler_smile_mood_log_update_end_time: datetime.time = datetime.time(13, 25)
 
     # --- 本地股票資料庫 (SQLite) ---
     # 留空 = 預設 data/stock.db；可指向同步資料夾，例如:
@@ -430,10 +496,17 @@ class Settings(BaseSettings):
     scheduler_cloud_sync_interval_min: int = 0
     # 慢速補齊歷史日 K (TWSE/yfinance 月別)；<=0 停用；由 stock-scheduler 呼叫 stock-history-fetch
     scheduler_history_fetch_interval_min: int = 60
-    scheduler_history_fetch_args: str = "--once --batch-size 5 --delay 5"
+    # 每批 60 項、間隔 5 秒（約 6 分鐘）。為什麼：2026-11-17 擴充名單併入後佇列有 261 檔 × 83 月，
+    # 原本每批 5 項、每天 10 批要一年以上；60 項約 36 天補完，請求速率不變（仍是每 5 秒一次）。
+    scheduler_history_fetch_args: str = "--once --batch-size 60 --delay 5"
     # 僅在收盤後時段執行（台股 13:30 收盤，預設 14:00~23:00 每小時一批）
     scheduler_history_fetch_time: datetime.time = datetime.time(14, 0)
     scheduler_history_fetch_end_time: datetime.time = datetime.time(23, 0)
+
+    # FMP 美股財報（docs/free-sources/fmp.md）：排程每隔幾分鐘檢查一次，收集程式自己依
+    # fetched_at 判斷本週是否已抓過，已抓過就零請求結束，所以一週實際只抓一輪（14 檔 84 次）。
+    scheduler_fmp_enabled: bool = True
+    scheduler_fmp_interval_min: int = Field(default=360, ge=30)
 
     # --- 事件鏈 (Pub/Sub 下游自動觸發) ---
     # true：QuantDataFetchCompleted 後自動跑微笑曲線選股

@@ -46,7 +46,8 @@ _SOURCE_DOMAIN_PREFIXES = {
     "monthly_revenue": ("monthly_revenue_",),
     "valuation_daily": ("valuation_",),
     "dividend_history": ("dividend_",),
-    "quarterly_report": ("quarterly_financials_",),
+    # issuer_quarterly_pdf：發行商季報 PDF 的歷史比較匯入（financial_history、issuer_financials）。
+    "quarterly_report": ("quarterly_financials_", "issuer_quarterly_pdf"),
 }
 
 
@@ -75,7 +76,7 @@ def _key(table: str, row: Mapping[str, Any]) -> str:
         "stock_info": ("symbol",),
         "etf_meta": ("symbol",),
         "price_history": ("symbol", "date"),
-        "intraday_bars": ("symbol", "ts", "interval"),
+        "intraday_bars": ("symbol", "ts", "interval", "sequence"),
         "monthly_revenue": ("symbol", "year_month"),
         "valuation_daily": ("symbol", "as_of"),
         "dividend_history": ("symbol", "year"),
@@ -201,10 +202,14 @@ def _base_audit(table: str, rows: List[Dict[str, Any]]) -> DatasetAudit:
             },
         )
     if table == "intraday_bars":
+        # 同一毫秒可能有多筆成交 tick，資料表主鍵含 sequence；只比 symbol/ts/interval 會把
+        # 正常的連續成交誤判為主鍵重複（2026-11-05 有 126 組）。沒有 sequence 的列視為 0。
+        rows = [{**row, "sequence": row.get("sequence") if row.get("sequence") is not None else 0}
+                for row in rows]
         return audit_rows(
             rows, source=table,
             required_fields=("symbol", "ts", "interval", "open", "high", "low", "close", "volume"),
-            key_fields=("symbol", "ts", "interval"), date_fields=("ts",),
+            key_fields=("symbol", "ts", "interval", "sequence"), date_fields=("ts",),
             numeric_fields=("open", "high", "low", "close", "volume", "amount"),
             numeric_ranges={
                 "open": (0.0, None), "high": (0.0, None), "low": (0.0, None),

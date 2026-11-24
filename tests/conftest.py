@@ -54,6 +54,15 @@ def _unit_tests_are_offline(request, monkeypatch):
         pytest.fail("Unit test attempted real network, including in a background worker", pytrace=False)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _logs_stay_out_of_the_project(tmp_path_factory):
+    """測試的日誌寫到暫存目錄；否則測試字串會混進正式的 log/（例如 news 的 slice boom）。"""
+    from bot import utils
+    token = utils._LOG_DIR_CONTEXT.set(tmp_path_factory.mktemp("log"))
+    yield
+    utils._LOG_DIR_CONTEXT.reset(token)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_risk_guard_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """避免測試讀寫專案 data/ 內真實 risk_state。"""

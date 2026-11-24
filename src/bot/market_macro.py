@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -229,15 +230,29 @@ def _import_yf():
         return None
 
 
+def _finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def _safe_quote(yf_module: Any, symbol: str, logger: logging.Logger) -> Optional[Dict[str, Any]]:
     try:
         t = yf_module.Ticker(symbol)
         hist = t.history(period="5d", auto_adjust=False)
         if hist is None or hist.empty:
             return None
+        # 盤中 yfinance 可能給出當天收盤價為 NaN 的一列（實際看過 ^TWII）；
+        # 直接取最後一列會讓 NaN 進入快照，pipeline 紀錄也會因 JSON 不接受 NaN 而存檔失敗。
+        hist = hist[hist["Close"].map(_finite_number)]
+        if hist.empty:
+            return None
         close = float(hist["Close"].iloc[-1])
         prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else close
         volume = float(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else 0.0
+        if not _finite_number(volume):
+            volume = 0.0
         source_date = ""
         try:
             last_index = hist.index[-1]

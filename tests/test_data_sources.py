@@ -561,6 +561,41 @@ class TestMacroFreshness:
         assert quote["source_date"] == "2026-09-16"
         assert quote["pct_change"] == pytest.approx(1.5)
 
+    def test_yfinance_quote_skips_intraday_nan_close(self) -> None:
+        from bot import market_macro as mm
+
+        class _Ticker:
+            def history(self, **_kwargs):
+                return pd.DataFrame(
+                    {"Close": [100.0, 101.5, float("nan")], "Volume": [10, 20, float("nan")]},
+                    index=pd.to_datetime(["2026-09-15", "2026-09-16", "2026-09-17"]),
+                )
+
+        class _YF:
+            def Ticker(self, _symbol):
+                return _Ticker()
+
+        quote = mm._safe_quote(_YF(), "^TWII", mm.get_logger("test-macro"))
+
+        assert quote is not None
+        assert quote["price"] == pytest.approx(101.5)
+        assert quote["source_date"] == "2026-09-16"
+        assert quote["volume"] == pytest.approx(20)
+
+    def test_yfinance_quote_without_finite_close_is_missing(self) -> None:
+        from bot import market_macro as mm
+
+        class _Ticker:
+            def history(self, **_kwargs):
+                return pd.DataFrame({"Close": [float("nan")], "Volume": [0]},
+                                    index=pd.to_datetime(["2026-09-17"]))
+
+        class _YF:
+            def Ticker(self, _symbol):
+                return _Ticker()
+
+        assert mm._safe_quote(_YF(), "^TWII", mm.get_logger("test-macro")) is None
+
     def test_empty_twse_close_response_is_retryable(self, monkeypatch) -> None:
         from bot import market_macro as mm
 

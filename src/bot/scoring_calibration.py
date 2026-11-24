@@ -327,6 +327,8 @@ def calibrate_database(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    from bot.cli_encoding import configure_console
+    configure_console()  # 在 parse_args 之前，--help 導向檔案時才會是 UTF-8
     parser = argparse.ArgumentParser(description="評分訊號歷史校準 (只讀)")
     parser.add_argument("--db", default="", help="SQLite 路徑 (預設使用專案 stock.db)")
     parser.add_argument(

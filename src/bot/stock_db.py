@@ -56,6 +56,8 @@ from bot.utils import get_logger, now_tw
 # the same transaction boundary in one thread.
 _DB_PATH_LOCKS: Dict[str, threading.RLock] = {}
 _DB_PATH_LOCKS_GUARD = threading.Lock()
+# 資料庫路徑 → 本行程上次完整跑完結構初始化後的結構指紋（schema_version 與遷移紀錄）。
+_SCHEMA_VERIFIED: Dict[str, tuple] = {}
 
 
 def _db_path_lock(path: Path) -> threading.RLock:
@@ -1672,6 +1674,41 @@ class StockDB:
     # ----- Schema -----
 
     def _init_schema(self) -> None:
+        """Run the compatibility DDL once per process and schema state.
+
+        The full pass takes the cross-process schema lock, reserves the writer
+        and rebuilds triggers; on the production database that is one to three
+        seconds per ``StockDB.open()``, and a single collection step opens the
+        database several times.  ``PRAGMA schema_version`` changes whenever any
+        connection alters the schema, so if it and the migration receipts still
+        equal what this process recorded right after its own full pass, nothing
+        the pass would act on has changed and it can be skipped.  A deleted or
+        replaced file, DDL from another process, or an edited receipt changes
+        the fingerprint and forces a full pass.
+        """
+        key = str(self.path.resolve()).casefold()
+        known = _SCHEMA_VERIFIED.get(key)
+        if known is not None and self.path.exists():
+            try:
+                if self._schema_fingerprint() == known:
+                    return
+            except sqlite3.Error:
+                pass
+        self._run_schema_init()
+        try:
+            _SCHEMA_VERIFIED[key] = self._schema_fingerprint()
+        except sqlite3.Error:
+            _SCHEMA_VERIFIED.pop(key, None)
+
+    def _schema_fingerprint(self) -> tuple:
+        # The migration receipts are data, not schema: an altered checksum must
+        # still reach the full pass, which refuses to continue on a mismatch.
+        version = int(self.conn.execute("PRAGMA schema_version").fetchone()[0])
+        receipts = tuple(tuple(row) for row in self.conn.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"))
+        return version, receipts
+
+    def _run_schema_init(self) -> None:
         # SQLite's busy timeout handles ordinary writer contention; this
         # sidecar lock handles the special case where several independent CLI
         # processes all try to run compatibility DDL during startup.
@@ -1822,26 +1859,30 @@ class StockDB:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS research_chunks_fts "
                 "USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, text)"
             )
-            conn.execute("DROP TRIGGER IF EXISTS research_chunks_ai")
-            conn.execute("DROP TRIGGER IF EXISTS research_chunks_ad")
-            conn.execute("DROP TRIGGER IF EXISTS research_chunks_au")
-            conn.execute(
-                "CREATE TRIGGER research_chunks_ai AFTER INSERT ON research_chunks "
-                "BEGIN INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
-                "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); END"
-            )
-            conn.execute(
-                "CREATE TRIGGER research_chunks_ad AFTER DELETE ON research_chunks "
-                "BEGIN DELETE FROM research_chunks_fts WHERE rowid = old.rowid; END"
-            )
-            conn.execute(
-                "CREATE TRIGGER research_chunks_au AFTER UPDATE ON research_chunks "
-                "BEGIN "
-                "DELETE FROM research_chunks_fts WHERE rowid = old.rowid; "
-                "INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
-                "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); "
-                "END"
-            )
+            # 觸發器內容沒變就不重建。為什麼：DROP／CREATE 每次都會讓 PRAGMA schema_version
+            # 加一，使其他行程的結構指紋失效而重跑完整初始化（每 5 分鐘就有新的排程行程）。
+            for name, sql in (
+                ("research_chunks_ai",
+                 "CREATE TRIGGER research_chunks_ai AFTER INSERT ON research_chunks "
+                 "BEGIN INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
+                 "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); END"),
+                ("research_chunks_ad",
+                 "CREATE TRIGGER research_chunks_ad AFTER DELETE ON research_chunks "
+                 "BEGIN DELETE FROM research_chunks_fts WHERE rowid = old.rowid; END"),
+                ("research_chunks_au",
+                 "CREATE TRIGGER research_chunks_au AFTER UPDATE ON research_chunks "
+                 "BEGIN "
+                 "DELETE FROM research_chunks_fts WHERE rowid = old.rowid; "
+                 "INSERT INTO research_chunks_fts(rowid, chunk_id, document_id, text) "
+                 "VALUES (new.rowid, new.chunk_id, new.document_id, new.text); "
+                 "END"),
+            ):
+                current = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+                ).fetchone()
+                if current is None or current[0] != sql:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(sql)
             actual = int(conn.execute("SELECT COUNT(*) FROM research_chunks").fetchone()[0])
             indexed = int(conn.execute("SELECT COUNT(*) FROM research_chunks_fts").fetchone()[0])
             if actual != indexed:

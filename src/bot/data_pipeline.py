@@ -16,7 +16,9 @@ import dataclasses
 import datetime as dt
 import json
 import logging
+import math
 import os
+import re
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -54,6 +56,45 @@ from bot.cloud_file_cache import mirror_file_to_cloud, restore_file_from_cloud
 from bot.events.pipeline_helpers import PipelineProgress, publish_pipeline_completed
 from bot.utils import get_logger, mk_folder, now_tw
 from bot.pipeline_brief import prepare_brief_metadata
+
+# 台股（TWSE／TPEx）代號；ETF 持股中的海外標的（如 "NVDA US"）不符合。
+_TW_CHIP_SYMBOL = re.compile(r"^\d{4,6}[A-Z]?$")
+
+
+def _is_date_alignment_note(note: str) -> bool:
+    """macro 備註中只說明各來源觀測日不同（資料本身有取得）的項目。"""
+    return (
+        (note.startswith("ADR ") and "來源日期未對齊" in note)
+        or note.startswith("macro 來源日期混合")
+    )
+
+
+def _trading_days(root: Path, dates: List[str]) -> Optional[List[str]]:
+    """dates 中資料庫有任何日 K 的日子（交易日）。沒有資料庫或查詢失敗回 None。"""
+    if not dates:
+        return []
+    import sqlite3
+    from bot.stock_db import default_db_path
+    path = default_db_path(Path(root))
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+        try:
+            marks = ",".join("?" * len(dates))
+            found = {r[0] for r in conn.execute(
+                f"SELECT DISTINCT date FROM price_history WHERE date IN ({marks})", dates)}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return [d for d in dates if d in found]
+
+
+def blocking_warnings(run: "PipelineRun") -> List[str]:
+    """代表收集沒有完成的 warnings（扣除只需註明限制的項目）。"""
+    advisory = set(getattr(run, "advisory_warnings", None) or [])
+    return [w for w in run.warnings if w not in advisory]
 
 
 # ----------------------------------------------------------------------
@@ -114,6 +155,7 @@ class PipelineRun:
     add_signals: List[Dict[str, Any]] = field(default_factory=list)
     focus_tickers: List[str] = field(default_factory=list)
     chip_summaries: List[Dict[str, Any]] = field(default_factory=list)
+    chip_skipped_foreign: int = 0
     presentation_analyses: List[Dict[str, Any]] = field(default_factory=list)
     logic_checks: List[Dict[str, Any]] = field(default_factory=list)
     daily_brief_md: str = ""
@@ -127,6 +169,9 @@ class PipelineRun:
     macro_summary: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    # warnings 中屬於「資料已取得、只是需要註明限制」的項目（例如各來源觀測日
+    # 不同、個股停牌少了幾天籌碼）。仍會列在 warnings，但不代表收集失敗。
+    advisory_warnings: List[str] = field(default_factory=list)
     output_dir: str = ""
 
 
@@ -476,9 +521,16 @@ def run_full_pipeline(
     chip_map: Dict[str, ChipSummary] = {}
     chip_no_data: List[str] = []
     chip_partial: List[str] = []
-    if config.fetch_chips and focus_list:
-        log.info("[4/6] 自動抓籌碼面 (近 %d 日) …", config.chip_lookback_days)
-        for t in focus_list:
+    # 籌碼只有 TWSE／TPEx 的資料；海外持股（如 "NVDA US"）一定查不到，
+    # 不該每天被當成缺資料而讓收集永遠不完整。
+    chip_tickers = [t for t in focus_list if _TW_CHIP_SYMBOL.match(str(t))]
+    run.chip_skipped_foreign = len(focus_list) - len(chip_tickers)
+    if config.fetch_chips and chip_tickers:
+        log.info(
+            "[4/6] 自動抓籌碼面 (近 %d 日，%d 檔；略過非台股代號 %d 檔) …",
+            config.chip_lookback_days, len(chip_tickers), run.chip_skipped_foreign,
+        )
+        for t in chip_tickers:
             try:
                 summary = build_chip_summary(
                     t, end_date=today,
@@ -489,9 +541,16 @@ def run_full_pipeline(
                 chip_map[t] = summary
                 run.chip_summaries.append(summary_to_dict(summary))
                 observed_rows = len(summary.rows)
+                # 預期天數以全市場實際有資料的日數為準：當天盤後才公布、
+                # 或國定假日的平日，全市場都沒有資料，不算個股缺漏。
+                expected_rows = (
+                    summary.market_days if summary.market_days >= 0
+                    else int(summary.days or config.chip_lookback_days)
+                )
                 if observed_rows == 0:
-                    chip_no_data.append(t)
-                elif observed_rows < max(1, int(summary.days or config.chip_lookback_days)):
+                    if expected_rows > 0:
+                        chip_no_data.append(t)
+                elif observed_rows < expected_rows:
                     chip_partial.append(t)
             except Exception as e:
                 log.exception("[%s] 籌碼面抓取失敗", t)
@@ -505,17 +564,33 @@ def run_full_pipeline(
             f"chips: {len(chip_no_data)} 個焦點標的沒有可用交易日資料"
             f"（{sample}{suffix}）；不等於籌碼為 0"
         )
+    # 全市場都沒有籌碼的日子若是「已經過去的交易日」，代表來源中斷（403、逾時），
+    # 不是假日也不是盤後尚未公布；這時個股不會被列為缺資料，必須另外擋下。
+    market_missing = sorted({
+        d for summary in chip_map.values() for d in summary.market_missing_dates
+        if d < today.isoformat()
+    })
+    outage_days = _trading_days(config.project_root, market_missing)
+    if outage_days is None:
+        outage_days = market_missing          # 沒有日 K 可對照時保守處理
+    if outage_days:
+        run.warnings.append(
+            f"chips: 全市場籌碼在 {len(outage_days)} 個交易日沒有資料"
+            f"（{', '.join(outage_days[:5])}）；來源可能中斷，下一輪重試"
+        )
     if chip_partial:
         sample = ", ".join(chip_partial[:12])
         suffix = "…" if len(chip_partial) > 12 else ""
-        run.warnings.append(
+        message = (
             f"chips: {len(chip_partial)} 個焦點標的只有部分回顧日資料"
             f"（{sample}{suffix}）；分析需保留期間限制"
         )
+        run.warnings.append(message)
+        run.advisory_warnings.append(message)
     progress.complete(
         "chips",
         success=not any(e.startswith("chips_") for e in run.errors),
-        message="" if (config.fetch_chips and focus_list) else "skipped",
+        message="" if (config.fetch_chips and chip_tickers) else "skipped",
     )
 
     # ---- 5. 法說會 LLM 分析 + 言行反查 ----
@@ -657,10 +732,13 @@ def run_full_pipeline(
                 if str(note).strip()
             ]
             macro_warnings: List[str] = []
+            macro_advisory: List[str] = []
             for note in macro_notes:
                 message = f"macro: {note}"
                 if message not in macro_warnings:
                     macro_warnings.append(message)
+                    if _is_date_alignment_note(note):
+                        macro_advisory.append(message)
 
             source_date_status = str(
                 macro_snap.source_date_status or "unknown"
@@ -669,6 +747,10 @@ def run_full_pipeline(
                 message = f"macro: source_date_status={source_date_status}"
                 if message not in macro_warnings:
                     macro_warnings.append(message)
+                    # 台股白天時美股與 ADR 只到前一個交易日、匯率已是當天，
+                    # 日期混合是常態；未知（unknown）才代表缺日期。
+                    if source_date_status == "mixed":
+                        macro_advisory.append(message)
 
             futures = macro_snap.futures_basis
             futures_summary: Optional[Dict[str, Any]] = None
@@ -707,6 +789,7 @@ def run_full_pipeline(
                 "status": "partial" if macro_warnings else "ok",
             }
             run.warnings.extend(macro_warnings)
+            run.advisory_warnings.extend(macro_advisory)
         except Exception as e:
             log.exception("macro 抓取失敗")
             run.errors.append(f"macro: {e}")
@@ -844,11 +927,30 @@ def run_full_pipeline(
 # ----------------------------------------------------------------------
 
 
+def _replace_non_finite(value: Any, path: str, found: List[str]) -> Any:
+    """把 NaN／Infinity 換成 None 並記下位置；JSON 不接受這兩種值。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        found.append(path)
+        return None
+    if isinstance(value, dict):
+        return {k: _replace_non_finite(v, f"{path}.{k}", found) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_non_finite(v, f"{path}[{i}]", found) for i, v in enumerate(value)]
+    return value
+
+
 def _persist_run(run: PipelineRun, out_dir: Path, log: logging.Logger) -> None:
     try:
         run_path = out_dir / "run.json"
         from bot.runtime_state import atomic_json, atomic_text
-        atomic_json(run_path, asdict(run))
+        found: List[str] = []
+        payload = _replace_non_finite(asdict(run), "run", found)
+        if found:
+            # 一個欄位的 NaN 不該讓整份執行紀錄存不下來（2026-11-10～17 發生過 5 次）。
+            message = f"run.json: {len(found)} 個非有限數值已存成 null（{', '.join(found[:5])}）"
+            log.warning(message)
+            payload["warnings"] = list(payload.get("warnings") or []) + [message]
+        atomic_json(run_path, payload)
         mirror_file_to_cloud(run_path)
         if run.daily_brief_md:
             p = out_dir / "daily_brief.md"

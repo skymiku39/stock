@@ -134,3 +134,52 @@ def test_whole_position_sell_fills_every_lot_and_resets_cycle():
     assert result.results[0].open_lots==0
     assert len(result.all_round_trips)==2
     assert result.results[0].cycle_count>=2
+
+
+# Forced exits (stop-loss, expiry) respect the same volume cap as buys and carry the rest
+# over to later opens until the position is flat. Volume 1000 lots -> 1 lot of capacity.
+STOP = dict(smile_base_lot=3, smile_symbol_stop_loss_pct=5)
+# Day 3 buys 3 lots at 99; close 93 breaches the 5% stop.
+STOP_PRICES = [(100,100),(100,98),(99,93)]
+
+
+def test_stop_loss_sells_partially_across_days_within_volume_cap():
+    bars=history(STOP_PRICES+[(93,93),(93,93),(93,93),(93,93)],[100000,100000,1000,1000,1000,100000,100000])
+    result=run(bars,**STOP)
+    sells=[o for o in result.orders if o["side"]=="sell" and o["status"]=="filled"]
+    assert [o["filled_quantity"] for o in sells] == [1,1,1]
+    assert [o["execution_date"] for o in sells] == ["2026-01-04","2026-01-05","2026-01-06"]
+    assert result.results[0].open_lots == 0
+    assert result.results[0].stopped_date == "2026-01-06"
+    assert sum(t.quantity for t in result.all_round_trips) == 3
+    rnd,=result.rounds
+    assert rnd.exit_date == "2026-01-06" and rnd.entry_date == "2026-01-03"
+    assert not [o for o in result.orders if o["side"]=="buy" and o["execution_date"]>"2026-01-03"]
+
+
+def test_stop_loss_keeps_selling_after_price_recovers():
+    # Day 4 close 99 no longer breaches the stop, but the exit already started.
+    bars=history(STOP_PRICES+[(93,99),(99,99),(99,99)],[100000,100000,1000,100000,100000,100000])
+    result=run(bars,**STOP)
+    sells=[o for o in result.orders if o["side"]=="sell" and o["status"]=="filled"]
+    assert [o["filled_quantity"] for o in sells] == [1,2]
+    assert result.results[0].open_lots == 0
+    assert result.results[0].stopped_date == "2026-01-05"
+    assert len(result.rounds) == 1
+
+
+def test_zero_capacity_day_cancels_forced_sell_and_carries_over():
+    bars=history(STOP_PRICES+[(93,93),(93,93),(93,93)],[100000,100000,1000,0,100000,100000])
+    result=run(bars,**STOP)
+    day5=[o for o in result.orders if o["execution_date"]=="2026-01-05"]
+    assert day5 and all(o["reason"]=="volume_limit_partial_exit" for o in day5)
+    assert result.results[0].open_lots == 0
+
+
+def test_expiry_exit_sells_partially_and_finishes_cycle():
+    bars=history([(100,100),(100,98),(99,97)]+[(97,97)]*5,[100000,100000]+[1000]*6)
+    result=run(bars,smile_base_lot=3,smile_max_hold_days=2,smile_reentry_cooldown_days=30)
+    sells=[o for o in result.orders if o["side"]=="sell" and o["status"]=="filled"]
+    assert sum(o["filled_quantity"] for o in sells) == 3 and len(sells) == 3
+    assert result.results[0].stopped_date is None
+    assert len(result.rounds) == 1

@@ -6,6 +6,16 @@ import pytest
 
 from bot import daily_collection as collection
 
+REAL_COLLECT_EX_RIGHTS = collection.collect_ex_rights
+
+
+@pytest.fixture(autouse=True)
+def network_side_collections_are_stubbed(monkeypatch):
+    monkeypatch.setattr(collection, "collect_rss_archive", lambda root, tracked=(): {
+        "status": "ok", "collected_at": collection.now_tw().isoformat(), "feeds_total": 1, "feeds_seen": 1})
+    monkeypatch.setattr(collection, "collect_ex_rights", lambda root: {"status": "ok"})
+    monkeypatch.setattr(collection, "crosscheck_prices", lambda root, date, expected=(): {"status": "ok", "date": date})
+
 
 def test_retry_only_failed_steps_refresh_after_close_and_roll_over(tmp_path, monkeypatch):
     from bot import watchlist
@@ -177,3 +187,162 @@ def test_price_readback_checks_every_ohlcv_value(tmp_path, monkeypatch, field, v
         SimpleNamespace(url="https://example.test", document_id="source"))
     with pytest.raises(ValueError, match="disagree"):
         collection.collect_price(tmp_path, "2330")
+
+
+def test_extended_symbols_cover_etfs_taiwan_holdings_and_backtest_universe(tmp_path, monkeypatch):
+    from bot import active_etf
+    monkeypatch.setattr(active_etf, "load_active_etfs", lambda root: [SimpleNamespace(symbol="00981A")])
+    monkeypatch.setattr(active_etf, "list_holdings_dates", lambda *a: [dt.date(2026, 11, 11)])
+    monkeypatch.setattr(active_etf, "load_holdings", lambda *a: SimpleNamespace(
+        holdings=[SimpleNamespace(ticker="2454"), SimpleNamespace(ticker="NVDA US"), SimpleNamespace(ticker="8306 JT")]))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/backtest_universe.json").write_text('{"symbols": [{"symbol": "2303"}]}', encoding="utf-8")
+    assert collection.extended_price_symbols(tmp_path) == ["00981A", "2303", "2454"]
+
+
+def test_extended_prices_skip_current_resume_on_budget_and_do_not_refetch(tmp_path, monkeypatch):
+    monkeypatch.setattr(collection, "now_tw", lambda: dt.datetime(2026, 11, 17, 15, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(collection, "latest_price_dates",
+                        lambda root: {"A1": "2026-11-16", "B1": "2026-10-15", "GONE": "2020-12-23"})
+    calls = []
+    def price(root, ticker, months=1):
+        calls.append((ticker, months))
+        if ticker == "D1":
+            raise ValueError("boom")
+        return {"source_date": "2026-11-10" if ticker == "C1" else "2026-11-16"}
+    monkeypatch.setattr(collection, "collect_price", price)
+    symbols = ["A1", "B1", "C1", "D1", "GONE"]
+    # 預算 0：已到目標日的不連線，其餘留待下次；下市多年的不抓也不算失敗。
+    first = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", {}, budget=0, delay=0)
+    assert first["current"] == 1 and first["pending"] == ["B1", "C1", "D1"] and not calls and not first["complete"]
+    assert first["retired"] == {"GONE": "2020-12-23"} and not first["failed"]
+    second = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", first, budget=60, delay=0)
+    assert calls == [("B1", 2), ("C1", 1), ("D1", 1)]          # 落後一個月的補兩個月
+    assert second["current"] == 2 and second["behind"] == {"C1": "2026-11-10"}
+    assert second["failed"] == {"D1": "boom"} and second["pending"] == ["D1"]
+    # 停牌的 C1 同一個目標日不重抓；失敗的 D1 最多三次。
+    state = second
+    for _ in range(4):
+        state = collection.collect_extended_prices(tmp_path, symbols, "2026-11-16", state, budget=60, delay=0)
+    assert [c[0] for c in calls].count("C1") == 1 and [c[0] for c in calls].count("D1") == 3
+    assert state["pending"] == [] and state["failed"] == {"D1": "boom"} and not state["complete"]
+    # 換目標日就重新開始。
+    assert collection.collect_extended_prices(tmp_path, ["C1"], "2026-11-17", state, budget=60, delay=0)["fetched"] == ["C1"]
+    assert collection.collect_extended_prices(tmp_path, symbols, "", {}, budget=60, delay=0)["pending"] == symbols
+
+
+def test_extended_behind_symbol_is_refetched_after_retry_interval_within_attempt_limit(tmp_path, monkeypatch):
+    tz = dt.timezone(dt.timedelta(hours=8))
+    clock = {"now": dt.datetime(2026, 11, 17, 15, tzinfo=tz)}
+    monkeypatch.setattr(collection, "now_tw", lambda: clock["now"])
+    monkeypatch.setattr(collection, "latest_price_dates", lambda root: {"S1": "2026-11-13"})
+    source = {"date": "2026-11-13"}
+    calls = []
+    def price(root, ticker, months=1):
+        calls.append(ticker)
+        return {"source_date": source["date"]}
+    monkeypatch.setattr(collection, "collect_price", price)
+    run = lambda state: collection.collect_extended_prices(tmp_path, ["S1"], "2026-11-16", state, budget=60, delay=0)
+    first = run({})
+    assert first["behind"] == {"S1": "2026-11-13"} and calls == ["S1"] and first["complete"]
+    # 未超過重試間隔：不重抓。
+    clock["now"] += dt.timedelta(seconds=collection.EXTENDED_BEHIND_RETRY_SECONDS - 1)
+    assert run(first)["behind"] == {"S1": "2026-11-13"} and calls == ["S1"]
+    # 超過間隔且來源已更新：再抓並變 current，從 behind 移除。
+    clock["now"] += dt.timedelta(seconds=2)
+    source["date"] = "2026-11-16"
+    second = run(first)
+    assert calls == ["S1", "S1"] and second["behind"] == {} and second["current"] == 1
+    # 舊狀態沒有 checked_at：視為可重抓。
+    legacy = {"target_date": "2026-11-16", "checked": {"S1": "2026-11-13"}, "attempts": {"S1": 1}}
+    source["date"] = "2026-11-13"
+    assert run(legacy)["fetched"] == ["S1"]
+    # attempts 用完：即使超過間隔也維持 behind、不再抓。
+    calls.clear()
+    spent = {"target_date": "2026-11-16", "checked": {"S1": "2026-11-13"},
+             "checked_at": {"S1": (clock["now"] - dt.timedelta(hours=5)).isoformat()},
+             "attempts": {"S1": collection.EXTENDED_MAX_ATTEMPTS}}
+    out = run(spent)
+    assert not calls and out["behind"] == {"S1": "2026-11-13"}
+
+
+def test_extended_symbols_survive_one_etf_holdings_failure(tmp_path, monkeypatch):
+    from bot import active_etf
+    monkeypatch.setattr(active_etf, "load_active_etfs", lambda root: [
+        SimpleNamespace(symbol="00981A"), SimpleNamespace(symbol="00982A"), SimpleNamespace(symbol="00983A")])
+    monkeypatch.setattr(active_etf, "list_holdings_dates", lambda *a: [dt.date(2026, 11, 11)])
+    def holdings(symbol, *a):
+        if symbol == "00982A":
+            raise ValueError("broken holdings")
+        return SimpleNamespace(holdings=[SimpleNamespace(ticker="2454" if symbol == "00981A" else "2317")])
+    monkeypatch.setattr(active_etf, "load_holdings", holdings)
+    assert collection.extended_price_symbols(tmp_path) == ["00981A", "00982A", "00983A", "2317", "2454"]
+
+
+def test_ex_rights_refresh_keeps_universe_symbols_and_runs_once_per_day(tmp_path, monkeypatch):
+    from bot import ex_rights
+    from bot.stock_db import StockDB
+    monkeypatch.setattr(collection, "now_tw", lambda: dt.datetime(2026, 11, 17, 15, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/backtest_universe.json").write_text('{"symbols": [{"symbol": "2303"}]}', encoding="utf-8")
+    def row(symbol):
+        return dict(symbol=symbol, ex_date="2026-11-10", kind="息", prev_close=50.0, reference_price=49.0,
+                    value_total=1.0, cash_dividend=1.0, stock_per_1000=None, market="twse",
+                    source_url="https://example.test", retrieved_at="2026-11-17T15:00:00")
+    years = []
+    monkeypatch.setattr(ex_rights, "fetch_year", lambda year: years.append(year) or [row("2303"), row("9999")])
+    result = REAL_COLLECT_EX_RIGHTS(tmp_path)      # autouse fixture 換掉的是模組屬性，這裡測真的實作
+    assert result["status"] == "ok" and result["saved"] == 1 and result["latest_ex_date"] == "2026-11-10" and years == [2026]
+    db = StockDB.open(root=tmp_path)
+    try:
+        assert [r[0] for r in db.conn.execute("SELECT symbol FROM ex_rights_events")] == ["2303"]
+    finally:
+        db.close()
+
+
+
+def test_daily_inputs_refresh_ex_rights_once_per_day_and_retry_failures(tmp_path, monkeypatch):
+    from bot import watchlist
+    clock = [dt.datetime(2026, 11, 17, 10, tzinfo=dt.timezone(dt.timedelta(hours=8)))]
+    monkeypatch.setattr(collection, "now_tw", lambda: clock[0])
+    monkeypatch.setattr(watchlist, "load", lambda root: SimpleNamespace(items=[]))
+    monkeypatch.setattr(collection, "collect_news", lambda *a: {"status": "ok"})
+    monkeypatch.setattr(collection, "collect_price", lambda *a: {"status": "ok"})
+    outcomes = [ValueError("twse down"), {"status": "ok"}]
+    calls = []
+    def ex(root):
+        calls.append(1)
+        value = outcomes.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(collection, "collect_ex_rights", ex)
+    settings = SimpleNamespace(symbols=["2330"])
+    first = collection.collect_daily_inputs(tmp_path, settings)
+    assert first["ex_rights"]["status"] == "failed" and first["complete"]      # 不影響 complete
+    assert collection.collect_daily_inputs(tmp_path, settings)["ex_rights"]["status"] == "ok"
+    collection.collect_daily_inputs(tmp_path, settings)
+    assert len(calls) == 2
+
+
+def test_collection_fallback_only_runs_when_nothing_else_collected_recently(tmp_path):
+    import json
+    tz = dt.timezone(dt.timedelta(hours=8))
+    now = dt.datetime(2026, 11, 17, 15, tzinfo=tz)
+    day = tmp_path / "data/daily_research/2026-11-17"
+    day.mkdir(parents=True)
+    def status(**values):
+        (day / "status.json").write_text(json.dumps(values), encoding="utf-8")
+    def scheduler(**jobs):
+        (tmp_path / "data/scheduler_status.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    assert collection.collection_fallback_due(tmp_path, now) == (True, "due")           # 今天還沒收過
+    status(attempted_at="2026-11-17T14:00:00+08:00")
+    assert collection.collection_fallback_due(tmp_path, now) == (False, "recent")       # 一小時前才試過
+    status(attempted_at="2026-11-17T12:00:00+08:00")
+    assert collection.collection_fallback_due(tmp_path, now) == (True, "due")
+    scheduler(collection={"started_at": "2026-11-17T14:30:00+08:00"})
+    assert collection.collection_fallback_due(tmp_path, now) == (False, "scheduled")    # 專屬工作在跑
+    scheduler(research={"started_at": "2026-11-17T14:30:00+08:00"})
+    status(attempted_at="2026-11-17T12:00:00+08:00", collection_complete=True, official_complete=True)
+    assert collection.collection_fallback_due(tmp_path, now) == (False, "complete")
+

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import asdict
 import hashlib
 import json
@@ -80,6 +81,10 @@ def commit_registration(db: StockDB, receipt_id: str, row: SourceDocumentRow,
 def recover_registrations(root: Path, *, apply: bool = False) -> dict:
     """Preview uses SQLite mode=ro and never initializes schema or cloud cache."""
     root = Path(root).resolve()
+    # 先列 raw 再讀資料庫：收集程序先寫 raw、再登錄 manifest。預覽要跑十幾分鐘，
+    # 最後才列 raw 的話，期間新寫入且已登錄的檔案會被誤列為 unresolved（2026-11-17 有 15 個）。
+    raw_listing = sorted(str(p.relative_to(root)).replace("\\", "/")
+                         for p in (root / "data" / "raw").rglob("*") if p.is_file())
     path = default_db_path(root)
     conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) if path.exists() else None
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} if conn else set()
@@ -90,6 +95,17 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
     provable_paths: set[str] = set()
     candidates = []
     absent_documents = set()
+    from bot.source_registry import _safe_part, is_source_document_replayable
+    # 同一份 raw 常被多份收據引用；以 (路徑, hash) 快取重算 SHA-256 的結果。
+    # 為什麼：8 萬份收據逐份重算，正式資料上預覽要跑好幾分鐘還沒結束。
+    replayable_cache: dict[tuple[str, str], bool] = {}
+
+    def replayable(row: SourceDocumentRow) -> bool:
+        key = (str(row.content_path), str(row.content_hash))
+        if key not in replayable_cache:
+            replayable_cache[key] = is_source_document_replayable(root, row)
+        return replayable_cache[key]
+
     try:
         for receipt in sorted((root / "data" / "source_registration_receipts").glob("*.json")):
             item = {"receipt_id": receipt.stem, "state": "unresolved"}
@@ -101,12 +117,11 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
                 if data.get("version") != 1:
                     raise ValueError("unsupported receipt version")
                 row = SourceDocumentRow(**data["document"])
-                from bot.source_registry import _safe_part, is_source_document_replayable
                 if row.document_id != f"source-doc:{_safe_part(row.source)}:{row.content_hash}":
                     raise ValueError("document identity mismatch")
                 raw_path = (root / row.content_path).resolve()
                 raw_path.relative_to((root / "data" / "raw").resolve())
-                if not row.retrieved_at or not is_source_document_replayable(root, row):
+                if not row.retrieved_at or not replayable(row):
                     raise ValueError("raw missing, hash mismatch, or retrieval date absent")
                 if row.ingestion_run_id:
                     ingestion = conn.execute("SELECT source, source_run_id FROM ingestion_runs WHERE run_id=?",
@@ -136,8 +151,8 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
             conn.close()
     # Multiple original attempts for an absent manifest cannot be ordered by
     # filename/hash. Keep all receipts and require an explicit resolution.
-    ambiguous = {doc_id for doc_id in absent_documents
-                 if sum(row.document_id == doc_id for _, row in candidates) > 1}
+    candidate_counts = Counter(row.document_id for _, row in candidates)
+    ambiguous = {doc_id for doc_id in absent_documents if candidate_counts[doc_id] > 1}
     for item, row in candidates:
         if row.document_id in ambiguous:
             item.update(state="unresolved", reason="multiple original registrations for absent manifest")
@@ -148,7 +163,7 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
         try:
             for item, row in candidates:
                 try:
-                    from bot.source_registry import is_source_document_replayable
+                    # apply 前重新確認，不用預覽階段的快取。
                     if not is_source_document_replayable(root, row):
                         raise ValueError("raw changed after preview")
                     commit_registration(db, item["receipt_id"], row, replay=True)
@@ -159,10 +174,8 @@ def recover_registrations(root: Path, *, apply: bool = False) -> dict:
                     item.update(state="unresolved", reason=str(exc))
         finally:
             db.close()
-    report["unresolved_raw"] = sorted(str(p.relative_to(root)).replace("\\", "/")
-                                      for p in (root / "data" / "raw").rglob("*")
-                                      if p.is_file() and str(p.relative_to(root)).replace("\\", "/")
-                                      not in registered | provable_paths)
+    known = registered | provable_paths
+    report["unresolved_raw"] = [p for p in raw_listing if p not in known]
     return report
 
 
@@ -170,10 +183,26 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Preview exact raw registration recovery; no source inference")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--summary", action="store_true",
+                        help="只輸出各狀態筆數與未解決的前 20 筆（正式資料有 8 萬多份收據）")
     args = parser.parse_args(argv)
     report = recover_registrations(args.root, apply=args.apply)
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(json.dumps(summarize(report) if args.summary else report, ensure_ascii=False, indent=2))
     return 2 if report["unresolved_raw"] or any(r["state"] == "unresolved" for r in report["receipts"]) else 0
+
+
+def summarize(report: dict, *, sample: int = 20) -> dict:
+    unresolved = [r for r in report["receipts"] if r["state"] == "unresolved"]
+    return {
+        "dry_run": report["dry_run"],
+        "policy": report["policy"],
+        "applied": report["applied"],
+        "receipt_states": dict(Counter(r["state"] for r in report["receipts"])),
+        "unresolved_reasons": dict(Counter(r.get("reason", "") for r in unresolved)),
+        "unresolved_receipts_sample": unresolved[:sample],
+        "unresolved_raw_count": len(report["unresolved_raw"]),
+        "unresolved_raw_sample": report["unresolved_raw"][:sample],
+    }
 
 
 if __name__ == "__main__":

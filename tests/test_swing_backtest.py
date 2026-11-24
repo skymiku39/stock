@@ -22,11 +22,11 @@ def bars(symbol, closes, *, spread=1.0, volume=100000):
             for i, (o, c) in enumerate(zip(opens, closes))]
 
 
-def run(histories, *, initial_cash=1000000, execution=None, **params):
+def run(histories, *, initial_cash=1000000, execution=None, revenue=None, **params):
     backtester = SwingBacktester(Settings(**SETTINGS), SwingParams(**{**SMALL, **params}),
                                  execution=execution or SmileExecution.ideal(),
                                  initial_cash=initial_cash)
-    return backtester.run_histories(histories)
+    return backtester.run_histories(histories, revenue=revenue)
 
 
 def fills(result, side):
@@ -146,3 +146,116 @@ def test_params_validation():
         SwingParams(risk_pct=0)
     with pytest.raises(ValueError):
         SwingBacktester(Settings(**SETTINGS), initial_cash=0)
+
+
+def test_stop_exit_sells_within_volume_cap_across_days():
+    # 買進後成交量萎縮到每天 500 張 → 0.1% 參與率每天只能賣 500 股；停損分多天賣完，算成同一輪。
+    h = bars("A", FLAT + [104, 104, 95, 95, 95, 95, 95])
+    for bar in h[6:]:
+        bar.volume = 500
+    model = SmileExecution(slippage_bps=0, participation=.001, limit_guard=False, tick_rounding=False)
+    r = run({"A": h}, execution=model)
+    (_, _, bought), = fills(r, "buy")
+    sells = fills(r, "sell")
+    assert [q for _, _, q in sells] == [500] * (bought // 500) + [bought % 500]
+    assert sells[0][0] == "2026-01-09"
+    rnd, = r.rounds
+    assert rnd.exit_reason == "stop_loss" and rnd.exit_date == sells[-1][0]
+    assert rnd.pnl_twd == pytest.approx((95 - 104) * bought - 95 * bought * 0.003)
+    assert r.open_positions == []
+
+
+# 規則二（entry="rs_revenue"）：相對強度排名 + 已公告的月營收年增率。
+RS = dict(entry="rs_revenue", rs_min=0.6, yoy_min=0.0)
+RISING = [100 + 2 * i for i in range(12)]
+FLAT12 = [100] * 12
+FALLING = [100 - 2 * i for i in range(12)]
+
+
+def rs_histories():
+    return {"A": bars("A", RISING), "B": bars("B", FLAT12), "C": bars("C", FALLING)}
+
+
+def test_rs_revenue_buys_only_strong_symbols_with_growing_revenue():
+    revenue = {"A": [("2025-12-11", 15.0)], "B": [("2025-12-11", 30.0)], "C": [("2025-12-11", 50.0)]}
+    r = run(rs_histories(), revenue=revenue, **RS)
+    assert {o["symbol"] for o in r.orders if o["side"] == "buy"} == {"A"}  # B、C 排名不夠
+    first = next(o for o in r.orders if o["side"] == "buy")
+    assert first["rs"] == 1.0
+
+
+def test_rs_revenue_needs_published_positive_yoy():
+    shrinking = {"A": [("2025-12-11", -5.0)]}
+    assert run(rs_histories(), revenue=shrinking, **RS).orders == []
+    # 營收要到 2026-01-09 才公告：之前的訊號不算。
+    late = {"A": [("2026-01-09", 15.0)]}
+    buys = [o for o in run(rs_histories(), revenue=late, **RS).orders if o["side"] == "buy"]
+    assert buys and min(o["signal_date"] for o in buys) >= "2026-01-09"
+
+
+def test_rs_revenue_requires_revenue_data_and_valid_params():
+    with pytest.raises(ValueError):
+        run(rs_histories(), **RS)
+    with pytest.raises(ValueError):
+        SwingParams(entry="other")
+    with pytest.raises(ValueError):
+        SwingParams(entry="rs_revenue", rs_min=1.0)
+
+
+def test_load_revenue_shifts_availability_to_next_month():
+    import sqlite3
+    from types import SimpleNamespace
+    from bot.swing_backtest import load_revenue
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE monthly_revenue (symbol TEXT, year_month TEXT, yoy_pct REAL)")
+    conn.executemany("INSERT INTO monthly_revenue VALUES (?,?,?)",
+                     [("A", "2025-11", 12.0), ("A", "2025-12", -3.0), ("A", "2026-01", None),
+                      ("B", "2025-12", float("nan"))])
+    out = load_revenue(SimpleNamespace(conn=conn), ["A", "B"])
+    assert out == {"A": [("2025-12-11", 12.0), ("2026-01-11", -3.0)], "B": []}
+
+
+def test_market_filter_blocks_new_entries_when_index_below_its_average():
+    # A 上漲，B、C 大跌 → 等權指數下跌，低於 3 日均線；關掉濾網時 A 會進場。
+    h = {"A": bars("A", RISING), "B": bars("B", [100 - 4 * i for i in range(12)]),
+         "C": bars("C", [100 - 4 * i for i in range(12)])}
+    revenue = {s: [("2025-12-11", 15.0)] for s in h}
+    assert [o for o in run(h, revenue=revenue, **RS).orders if o["side"] == "buy"]
+    assert run(h, revenue=revenue, market_ma=3, **RS).orders == []
+
+
+def test_max_new_per_day_caps_same_day_buys():
+    h = {"A": bars("A", RISING), "B": bars("B", [100 + 1.5 * i for i in range(12)]),
+         "C": bars("C", FALLING), "D": bars("D", FLAT12)}
+    revenue = {s: [("2025-12-11", 15.0)] for s in h}
+    params = dict(entry="rs_revenue", rs_min=0.5, yoy_min=0.0)
+    first_day = lambda r: [o for o in r.orders if o["side"] == "buy"
+                           and o["signal_date"] == min(x["signal_date"] for x in r.orders)]
+    assert len(first_day(run(h, revenue=revenue, **params))) == 2
+    capped = first_day(run(h, revenue=revenue, max_new_per_day=1, **params))
+    assert [o["symbol"] for o in capped] == ["A"]  # 漲幅較大者優先
+
+
+def test_drawdown_control_params_validation():
+    with pytest.raises(ValueError):
+        SwingParams(market_ma=-1)
+    with pytest.raises(ValueError):
+        SwingParams(max_new_per_day=1.5)
+
+
+def test_vol_scale_shrinks_new_positions_when_market_turns_volatile():
+    n = 60
+    calm = [100 + (0.2 if i % 2 else 0) for i in range(30)]
+    wild = [100 + (8 if i % 2 else -8) for i in range(n - 30)]
+    h = {"A": bars("A", [100 * 1.01 ** i for i in range(n)], spread=0.5),
+         "B": bars("B", calm + wild, spread=0.5)}
+    revenue = {s: [("2025-12-11", 15.0)] for s in h}
+    params = dict(entry="rs_revenue", rs_min=0.5, max_hold_days=2, trail_atr=50, initial_stop_atr=10)
+    plain = [o for o in run(h, revenue=revenue, **params).orders if o["side"] == "buy" and o["symbol"] == "A"]
+    scaled = [o for o in run(h, revenue=revenue, vol_scale_days=10, **params).orders
+              if o["side"] == "buy" and o["symbol"] == "A"]
+    late = lambda orders: [o["filled_quantity"] for o in orders if o["signal_date"] >= "2026-02-15"]
+    early = lambda orders: [o["filled_quantity"] for o in orders if o["signal_date"] < "2026-01-25"]
+    assert early(plain) == early(scaled)           # 波動未升高前不調整
+    assert late(scaled) and sum(late(scaled)) < sum(late(plain))
+    assert all(o.get("scale", 1.0) <= 1.0 for o in scaled)

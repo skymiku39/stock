@@ -168,9 +168,13 @@ def entry_rate(summary, histories: dict) -> dict:
 
 def swing_random_baseline(backtester, histories: dict, *, ex_rights: Optional[dict] = None,
                           trade_start: str = "", runs: int = DEFAULT_RUNS,
-                          seed: int = DEFAULT_SEED) -> dict:
-    """波段原型：不看突破與均線，改以機率觸發；停損、移動停利、期限與部位大小不變。"""
+                          seed: int = DEFAULT_SEED, revenue: Optional[dict] = None) -> dict:
+    """波段原型與選股策略 C2：不看進場條件，改以機率觸發；停損、移動停利、期限與部位大小不變。
+
+    revenue：C2 跑策略本身（用來校準進場次數）時需要的月營收。
+    """
     return strategy_random_baseline(
         lambda entry: backtester.run_histories(histories, trade_start=trade_start,
-                                               ex_rights=ex_rights, random_entry=entry),
+                                               ex_rights=ex_rights, random_entry=entry,
+                                               revenue=revenue),
         lambda summary: entry_rate(summary, histories), runs=runs, seed=seed)

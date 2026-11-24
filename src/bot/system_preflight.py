@@ -587,6 +587,7 @@ def run_system_preflight(
     *,
     settings: Optional[Any] = None,
     check_imports: bool = False,
+    check_audit: bool = True,
 ) -> SystemPreflightReport:
     """執行整合檢查；預設不碰網路、不呼叫 LLM、不寫入 DB。"""
     project_root = Path(root).resolve()
@@ -596,15 +597,22 @@ def run_system_preflight(
         fetched_at=now_tw().isoformat(timespec="seconds"),
         root=str(project_root),
     )
-    try:
-        audit = audit_project(project_root)
-        result.checks.extend(_audit_checks(project_root, audit))
-    except Exception as exc:  # noqa: BLE001 - the check must explain its boundary
+    if not check_audit:
         result.checks.append(SystemCheck(
-            "本地資料稽核", "fail",
-            f"唯讀稽核失敗：{type(exc).__name__}: {exc}",
-            "保留 DB 與 raw 原狀，先單獨執行 stock-data-audit 取得完整 traceback",
+            "本地資料稽核", "info",
+            "本次略過（--skip-audit）；完整稽核要逐檔核對 raw hash，正式資料約 5 分鐘",
+            "需要時另跑 stock-data-audit",
         ))
+    else:
+        try:
+            audit = audit_project(project_root)
+            result.checks.extend(_audit_checks(project_root, audit))
+        except Exception as exc:  # noqa: BLE001 - the check must explain its boundary
+            result.checks.append(SystemCheck(
+                "本地資料稽核", "fail",
+                f"唯讀稽核失敗：{type(exc).__name__}: {exc}",
+                "保留 DB 與 raw 原狀，先單獨執行 stock-data-audit 取得完整 traceback",
+            ))
     result.checks.extend(_memory_checks(project_root))
     result.checks.extend(_service_checks(settings, project_root))
     if check_imports:

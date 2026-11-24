@@ -311,6 +311,10 @@ class Scheduler:
             jobs.append(Job(name='daily_inputs', console_script='stock-daily-collect',
                             module='bot.daily_collection', interval_min=5, market_hours_only=False,
                             extra_args=['--root', str(self.project_root)]))
+            # 研究被模型額度擋住時不會啟動；ETF 持股、籌碼與官方財務另外照常收集。
+            jobs.append(Job(name='collection', console_script='stock-daily-research',
+                            module='bot.daily_research', interval_min=60, market_hours_only=False,
+                            extra_args=['--root', str(self.project_root), '--collect-only']))
         elif s.scheduler_research_interval_min > 0:
             extra = [a for a in str(s.scheduler_research_args).split() if a]
             if not any(
@@ -373,6 +377,70 @@ class Scheduler:
                 report_mode="update",
                 target_date_mode="today",
             ))
+        if getattr(s, "scheduler_overnight_brief_enabled", False):
+            for name, slot, start, end in (
+                ("overnight_brief", "morning",
+                 s.scheduler_overnight_brief_time, s.scheduler_overnight_brief_end_time),
+                ("overnight_brief_update", "preopen",
+                 s.scheduler_overnight_brief_update_time, s.scheduler_overnight_brief_update_end_time),
+            ):
+                jobs.append(Job(
+                    name=name,
+                    console_script="",
+                    module="bot.overnight_brief",
+                    interval_min=1440,
+                    market_hours_only=False,
+                    extra_args=["--root", str(self.project_root), "--slot", slot],
+                    run_once_per_day=True,
+                    window_start=start,
+                    window_end=end,
+                ))
+        if getattr(s, "scheduler_finmind_crosscheck_enabled", False):
+            # FinMind 交叉核對：沒有 FINMIND_TOKEN 時程式回 skipped（結束碼 0），不會重試。
+            jobs.append(Job(
+                name="finmind_crosscheck",
+                console_script="",
+                module="bot.free_sources.finmind_crosscheck",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--root", str(self.project_root)],
+                run_once_per_day=True,
+                window_start=s.scheduler_finmind_crosscheck_time,
+                window_end=s.scheduler_finmind_crosscheck_end_time,
+            ))
+        if (getattr(s, "scheduler_massive_enabled", False)
+                and str(getattr(s, "massive_api_key", "") or "").strip()):
+            # 美股新聞，08:00 與 08:50 隔夜重點之前各跑一次；額度或限流時不重試（--scheduled 回 0）。
+            for name, start, end in (
+                ("massive_news", s.scheduler_massive_time, s.scheduler_massive_end_time),
+                ("massive_news_update",
+                 s.scheduler_massive_update_time, s.scheduler_massive_update_end_time),
+            ):
+                jobs.append(Job(
+                    name=name,
+                    console_script="",
+                    module="bot.free_sources.collect_massive",
+                    interval_min=1440,
+                    market_hours_only=False,
+                    extra_args=["--root", str(self.project_root), "--scheduled"],
+                    run_once_per_day=True,
+                    window_start=start,
+                    window_end=end,
+                ))
+        if (getattr(s, "scheduler_marketaux_enabled", False)
+                and str(getattr(s, "marketaux_api_token", "") or "").strip()):
+            # 個股隔夜情緒，排在 08:00 隔夜重點之前；額度或限流時不重試（--scheduled 回 0）。
+            jobs.append(Job(
+                name="marketaux_sentiment",
+                console_script="",
+                module="bot.free_sources.collect_marketaux",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--root", str(self.project_root), "--scheduled"],
+                run_once_per_day=True,
+                window_start=s.scheduler_marketaux_time,
+                window_end=s.scheduler_marketaux_end_time,
+            ))
         if getattr(s, "scheduler_company_interval_min", 0) > 0:
             jobs.append(Job(
                 name="company",
@@ -401,6 +469,16 @@ class Scheduler:
                 window_start=getattr(s, "scheduler_history_fetch_time", None),
                 window_end=getattr(s, "scheduler_history_fetch_end_time", None),
             ))
+        if getattr(s, "scheduler_fmp_enabled", False):
+            # FMP 美股財報：一週一輪靠 collect_fmp 的 fetched_this_week；沒金鑰時零請求結束。
+            jobs.append(Job(
+                name="fmp_fundamentals",
+                console_script="",
+                module="bot.free_sources.collect_fmp",
+                interval_min=s.scheduler_fmp_interval_min,
+                market_hours_only=False,
+                extra_args=["--root", str(self.project_root)],
+            ))
         if getattr(s, "scheduler_watch_snapshot_interval_min", 0) > 0:
             jobs.append(Job(
                 name="watch_snapshot",
@@ -409,6 +487,39 @@ class Scheduler:
                 interval_min=s.scheduler_watch_snapshot_interval_min,
                 market_hours_only=True,
             ))
+        smile_watch_config = Path(self.project_root) / "config" / "smile_watch.json"
+        if getattr(s, "scheduler_smile_watch_enabled", True) and smile_watch_config.exists():
+            # 實際持股的微笑盯盤（只提醒、不下單）。每輪最多 50 分鐘就正常結束、下一分鐘再啟動，
+            # 才不會碰到 scheduler_job_timeout_seconds；名單是空的時程式會直接結束。
+            jobs.append(Job(
+                name="smile_watch",
+                console_script="",
+                module="bot.smile_watch",
+                interval_min=1,
+                market_hours_only=False,
+                extra_args=["--config", str(smile_watch_config), "--max-minutes", "50"],
+                window_start=dt.time(9, 0),
+                window_end=dt.time(13, 30),
+            ))
+        if getattr(s, "scheduler_smile_mood_log_enabled", True):
+            # 微笑情緒分數每日紀錄（只記錄、不下單）：09:30 與 13:00 各一個時段視窗。
+            for name, start, end in (
+                ("smile_mood_log", s.scheduler_smile_mood_log_time,
+                 s.scheduler_smile_mood_log_end_time),
+                ("smile_mood_log_update", s.scheduler_smile_mood_log_update_time,
+                 s.scheduler_smile_mood_log_update_end_time),
+            ):
+                jobs.append(Job(
+                    name=name,
+                    console_script="",
+                    module="bot.smile_mood_log",
+                    interval_min=1440,
+                    market_hours_only=False,
+                    extra_args=["--root", str(self.project_root)],
+                    run_once_per_day=True,
+                    window_start=start,
+                    window_end=end,
+                ))
         return jobs
 
     # ------------------------------------------------------------------
@@ -557,9 +668,11 @@ class Scheduler:
             level = self.logger.info if rc == 0 else self.logger.warning
             level("■ 任務 %s 結束 (exit=%s)", job.name, rc)
             job_state = "succeeded" if rc == 0 else "failed"
-            if job.name in {'research', 'daily_inputs'} and rc == 4:
+            if job.name in {'research', 'daily_inputs', 'collection'} and rc == 4:
                 job_state, retryable = 'busy', False
                 next_retry = time.time() + 60
+            elif job.name == 'collection' and rc == 3:
+                job_state, retryable = 'partial', False
             elif job.name == 'research' and rc == 3:
                 state = read_json(self.project_root / 'data/daily_research' / now_tw().date().isoformat() / 'status.json')
                 job_state = 'blocked' if state.get('outcome') == 'blocked' else 'partial'

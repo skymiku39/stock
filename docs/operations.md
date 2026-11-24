@@ -109,6 +109,220 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
 正式歷史資料不會因程式升級而自動重寫。需要回填時先備份，在資料副本驗證
 結果；沒有原始輸入證明的內容維持未驗證，不能靠猜測補造證據 ID。
 
+## 〇・三、每日資料收集與新鮮度檢查
+
+排程啟用 `SCHEDULER_DAILY_ALL_ENABLED` 時有三個相關工作：
+
+| 工作 | 間隔 | 需要模型 | 內容 |
+|---|---|---|---|
+| `daily_inputs` | 5 分鐘 | 否 | 鉅亨新聞（日快取累積）、RSS 存檔、主要追蹤與擴充名單的日 K、新鮮度檢查 |
+| `collection` | 60 分鐘 | 否 | ETF 持股、籌碼、官方財務（月營收、本益比、季報、股利）；當天收集完成後直接結束 |
+| `research` | 依設定 | 是 | 個股研究；模型額度被擋時排程不會啟動它 |
+
+**擴充名單**是追蹤的 ETF 本身、各 ETF 最新一期的台股持股，加上 `config/backtest_universe.json`。
+`daily_inputs` 以主要追蹤標的（`.env` 的 `SYMBOLS` 與觀察清單）最新的來源日為目標日，
+已到目標日的不連線；落後的逐檔抓，每輪最多 240 秒，沒抓完下一輪接續。
+結果在 `data/daily_research/<日期>/daily-inputs.json` 的 `extended`：
+
+- `pending`：還沒輪到，下一輪會抓。
+- `behind`：抓過但來源日仍較舊（停牌、下市），同一個目標日不重抓。
+- `failed`：同一個目標日已失敗的標的與原因；每檔最多試三次。
+
+海外持股（例如 `NVDA US`）沒有 TWSE／TPEx 來源，不在擴充名單內，籌碼也不抓。
+
+**收集完成的判斷**在 `data/daily_research/<日期>/status.json`：`collection_complete` 與
+`official_complete` 都是 true，當天就不再重跑收集管線（約 20 分鐘）。管線的 warnings 分兩種：
+
+- 代表沒收到資料的（例如台股代號在全市場有資料的日子查不到籌碼、台指期只拿到快取），
+  會讓 `collection_complete` 維持 false，下一輪重試。
+- 資料已取得、只需註明限制的，另外列在 `collection_advisory_warnings`，不影響完成：
+  各來源觀測日不同（台股白天時美股與 ADR 只到前一個交易日、匯率已是當天），以及
+  個股在回顧期間少了幾天籌碼（例如停牌）。籌碼的預期天數以全市場實際有資料的日數為準，
+  當天盤後才公布的籌碼不算缺漏。
+
+新鮮度檢查的「每日收集」一項會列出今天尚未完成的原因。
+新納入的標的先只有近一個月日 K；較早的歷史由 `history_fetch` 佇列補：佇列跑完後每天會把
+擴充名單併入一次，並依「月份由近到遠、同一個月內逐檔」的順序回補。
+
+**RSS 存檔**寫在 `data/news/rss_<日期>.json`，依網址去重、累積當天看過的項目；
+每個來源的狀態在同一個檔案的 `feeds`。手動執行：
+
+```powershell
+.venv\Scripts\python.exe -m bot.rss_archive --root C:\skymiku\stock
+```
+
+**新鮮度檢查**直接看資料本身的最新日期，不看工作有沒有回報成功：
+
+```powershell
+.venv\Scripts\python.exe -m bot.data_freshness --root C:\skymiku\stock
+```
+
+結束碼 0 全部正常、1 有警告、2 有落後。每輪 `daily_inputs` 也會把結果寫到
+`data/freshness_status.json`，並附在當天的 `summary.txt`。假日無法從資料判斷，
+所以落後一個工作日只算警告。
+
+**日 K 交叉核對**用交易所的全市場單日行情（另一個端點）核對資料庫同一天的日 K，
+開高低收必須完全相同；每輪 `daily_inputs` 會對目標日自動執行，也可以手動指定日期：
+
+```powershell
+.venv\Scripts\python.exe -m bot.price_crosscheck --root C:\skymiku\stock --date 2026-11-16
+```
+
+結束碼 0 全部一致、1 名單內有標的尚未入庫或全市場日報沒有該代號、2 有價格不符。
+結果在 `data/price_crosscheck/<日期>.json`。
+
+**前瞻追蹤**把 #19 選定的兩組參數凍結，只用 2026-11-01 之後的行情記帳（詳見
+`src/bot/forward_tracker.py` 開頭的說明）。資料日前進時自動重算，結果在
+`data/forward_tracking/latest.md`；手動重算：
+
+```powershell
+.venv\Scripts\python.exe -m bot.forward_tracker --root C:\skymiku\stock --force
+```
+
+只想補資料、不想動用模型時：
+
+```powershell
+.venv\Scripts\python.exe -m bot.daily_research --root C:\skymiku\stock --collect-only
+```
+
+注意：排程器是常駐程序，`collection` 這類**新增的工作**要重啟排程器後才會出現；
+既有工作的程式改動則在下一次執行時就生效，因為每次都是另開程序。
+重啟之前，`daily_inputs` 會在當天的收集還沒完成、且 90 分鐘內沒有任何收集嘗試時代跑一次
+`--collect-only`，所以不重啟也不會停更，只是那一輪 `daily_inputs` 會多花十幾分鐘。
+
+`extended` 另外有 `retired`：最新日 K 比目標日舊 90 天以上的標的（下市、長期停牌），
+不會每天重抓，也不算失敗；恢復交易時由 `history_fetch` 補回。
+
+---
+
+## 〇・四、實際持股的微笑盯盤（只提醒、不下單）
+
+微笑策略只認模擬帳戶的部位。要用微笑規則盯券商帳戶裡的實際持股，用：
+
+```powershell
+.venv\Scripts\python.exe -m bot.smile_watch --symbol 1514 --reference 105
+```
+
+- **排程**：`config/smile_watch.json` 存在時，排程器會有 `smile_watch` 工作（平日 09:00～13:30，
+  執行 `--config config/smile_watch.json --max-minutes 50`；每輪 50 分鐘正常結束、下一分鐘再啟動，
+  避開 `scheduler_job_timeout_seconds`）。`SCHEDULER_SMILE_WATCH_ENABLED=false` 可停用。
+  改名單不用重啟排程器（下一輪就會讀到）；第一次新增名單檔才要重啟。盤中這個工作幾乎一直是
+  running，重啟排程器前「沒有工作在執行」的檢查可以不算它（中斷只會少盯幾十秒）。
+- 名單格式：`{"targets": [{"symbol": "1514", "reference": 105}]}`；每筆可加 `stop_loss_pct`
+  （覆寫 `SMILE_SYMBOL_STOP_LOSS_PCT`）與 `holding`（`"4@85.65"`，手動給張數與均價、不讀券商）。
+- 啟動時與之後每 30 分鐘唯讀查詢一次券商實際庫存（只登入與列出持股），整個部位視為一批、
+  成本用券商的均價。名單內的標的沒有庫存時不盯，之後買進會在下一次查詢時開始盯。
+- 每 20 秒輪詢公開資訊觀測站的報價（成交價優先，這一輪沒有成交價時用委買委賣中間價）；
+  手動執行時 13:30 自動結束。假日沒有當日報價，不會有任何判斷。
+- 訊號：`take_profit`（回到標準價且整個部位有淨利，或達 `SMILE_TAKE_PROFIT_PCT`）、
+  `breakeven`（部位轉為淨利）、`stop_loss`（達 `SMILE_SYMBOL_STOP_LOSS_PCT`，可用
+  `--stop-loss-pct` 覆寫）、`stop_near`（距停損價 3% 以內）、`add_buy`（跌幅已達階梯且張數低於
+  `MAX_LOT_PER_SYMBOL`）。同一個訊號每個交易日只提醒一次。
+- 輸出在 `data/smile_watch/`：`status-<代號>.json`（最新狀態）、`alerts.jsonl`（每次提醒）、
+  `state.json`（當天已提醒的訊號）。提醒會跳本機通知（見下方）；有設定 Telegram 另外推播。
+  兩個通道各自送，任何一邊出錯都不影響另一邊。
+- **持股開盤跳空**（`open_gap`）：當天第一筆成交（MIS 開盤價 `o`；沒有 `o` 時用當天第一次拿到的
+  成交價 `z`，不用委買委賣中間價）相對昨收的漲跌幅，絕對值達門檻就提醒一次，每檔每天最多一次，
+  之後盤中的漲跌不再判斷。門檻是名單檔的選配欄位 `"open_gap_alert_pct": 3`（缺欄位用 3，`0` 停用）。
+  涵蓋名單內有庫存的標的，以及 `data/smile_watch/holdings.json` 裡名單外的持股（同一次 MIS 請求，
+  只讀不寫這個檔）。通知範例：`持股開盤跳空 1514：開高 +3.2%｜第一筆成交 108.36｜昨收 105.00（開盤價）`。
+- **本機通知**（`bot/local_notify.py`，`LOCAL_NOTIFY_ENABLED=false` 可停用）：在這台電腦跳 Windows
+  桌面通知，不經外部服務、不用額外套件。做法和 Hello Streamer 用的 winotify 相同，通知上的程式名稱是
+  「股票研究 Stock Lab」（要關閉或調整，在 Windows 設定 → 系統 → 通知裡找這個名稱）。排程器的程序在工作階段 0（S4U），從那裡發的通知不會出現在
+  桌面，所以背景程序只把通知寫進 `data/notifications/pending/`，再觸發排程工作
+  「SkyMiku Stock Local Notify」（以互動方式登入）到桌面上顯示。這個工作要先註冊一次：
+  `powershell -ExecutionPolicy Bypass -File scripts\install_local_notify_task.ps1`（加 `-Remove` 移除；
+  不需要系統管理員）。沒註冊時通知留在佇列、log 會有一則警告；排隊超過 12 小時的不再跳出。
+  沒有登入桌面時不會顯示，下次登入時補跳。檢查：`python -m bot.local_notify --status`；
+  測試：`--test "標題\n內文"`（直接顯示）、`--queue-test "標題\n內文"`（走排隊與排程工作）。
+  紀錄在 `data/notifications/history.jsonl`。Windows 的「請勿打擾」開啟時通知只會進通知中心。
+- 程式不建立也不送出任何委託，買賣由使用者自己操作。沒有逐批成交紀錄，所以不知道已經買過
+  哪幾階；也沒有「時事＋即時股價」的情緒賣出判斷。
+
+---
+
+## 〇・五、ETF 關注名單（主動式＋大型被動式）
+
+從 ETF 持股收斂出比較需要關注的股票。每輪 `daily_inputs` 會自動重算，也可以手動執行：
+
+```powershell
+.venv\Scripts\python.exe -m bot.etf_focus --print
+```
+
+- 輸出在 `data/etf_focus/`：`latest.md`（報告）、`latest.json`、`<持股日期>.json`（每天留一份，
+  之後才有歷史可以檢驗這份名單有沒有用）。
+- **被動式 ETF 名單**在 `config/passive_etfs.json`（目前 0050、0056、00878、00919、00940、00713）。
+  加一筆 `{"symbol": "代號", "name": "名稱"}` 即可，持股來源預設用 etfinfo.tw；改名單不用重啟排程器。
+  名單內的 ETF 會一起抓持股、它們和持股的日 K 也併入每日收集的擴充名單。006208 和 0050 追蹤同一個
+  指數，列入會重複計數；00929 的持股頁解析不到完整持股。
+- 主動式與被動式**分開計數**：被動式照指數規則選股，只當背景資訊。跟單策略、共識訊號、研究焦點
+  （`load_active_etfs`）仍只看主動式；持股收集、每日日 K、新鮮度檢查、關注名單用 `load_tracked_etfs`。
+- 只納入台股權重合計 ≥ 50% 的 ETF。加減碼用股數比較（約 28 天前的那一期），並扣掉整檔 ETF 的
+  規模變化（兩期共同持股的股數比值中位數），扣掉後變動超過 ±5% 才算。
+- 標籤：共識核心（一半以上的主動式持有）、主動加碼／主動減碼（淨加碼家數達主動式的 20%、至少 3 家）、
+  被動納入／被動剔除（比較期間指數調整）。門檻是暫定值，寫在 `bot/etf_focus.py` 開頭。
+- 這是關注名單，不是買賣訊號：持股快照從 2026-09 才開始累積，沒有足夠歷史可以驗證。
+
+### 自己的持股也併入每日收集
+
+每日收集的擴充名單除了 ETF 與 ETF 持股，還包含使用者實際持有或曾經持有的股票（`bot/held_symbols.py`），
+兩個來源取聯集、只增不減：
+
+- `config/held_symbols.json`：手動維護，`{"symbols": ["1514"]}`。想固定追蹤的股票加在這裡。
+- **成本認定 `sell_latest_first_since`**（名單內每檔可選，例：`"2026-11-23"`）：券商賣出時一律扣最舊的
+  一筆買進，帳面均價會往近期買價靠攏。設了這個日期後，這天起的賣出改認定為賣掉「賣出當天以前、最近
+  買進」的那筆，均價、損益兩平與停損價都照這個認定算（`bot/lot_view.py`）。兩種認定的已實現加未實現
+  總和相同，只是分法不同。資料來自券商的逐筆庫存與已實現損益明細（唯讀查詢）；對不起來或查詢失敗時
+  沿用券商帳面均價並寫警告。明細在 `data/smile_watch/lots-<代號>.json`，系統匣會標出兩種均價。
+  限制：只有日期沒有時間，同一天先賣後買會被當成賣掉當天買的；只處理整張。
+- `data/held_symbols_seen.json`：微笑盯盤每次讀券商庫存時，把查到的所有持股（含不在盯盤名單的、零股）
+  自動記下。賣掉後仍留著；要移除就手動刪掉那一筆。盯盤沒在跑（沒有 `config/smile_watch.json`）時
+  不會自動記錄，新買的股票要手動加。
+
+---
+
+## 〇・六、系統匣（前台顯示與管理）
+
+```powershell
+.venv\Scripts\pythonw.exe -m bot.tray          # 不帶主控台視窗；加 --show 啟動後直接開主視窗
+```
+
+- 要在登入的桌面執行，同一個桌面只會有一份。它是前台：只讀背景工作寫好的狀態檔，不登入券商、
+  不下單；排程器照舊在背景執行，關掉系統匣不影響資料收集。
+- **圖示**：深藍圓角方塊加白色 S（造型同 Hello Streamer），外框顏色代表狀態：綠＝正常、黃＝有警告、紅＝有問題（排程器超過 3 分鐘沒有心跳、或新鮮度檢查有失敗）、
+  灰＝讀不到狀態。每 15 秒更新。Windows 預設把新圖示收在工作列的「^」裡，拖到工作列上才會常駐顯示。
+- **左鍵**：主視窗（持股損益與距停損、要注意的檢查項目、最近通知、ETF 關注名單摘要）。外觀對齊
+  Hello Streamer（customtkinter 深色主題、同一組配色）。它是一般視窗，工作列看得到、可以最小化。
+- **持股**：列出券商回報的全部庫存（含零股與不在盯盤名單的）。盯盤中的顯示即時損益、損益兩平與停損；
+  其餘的只有券商那次查詢當下的價格與損益，查詢時間寫在卡片最下面。來源是
+  `data/smile_watch/holdings.json`，由微笑盯盤每次讀券商庫存時重寫（盤中約每 30 分鐘；盤外不更新，
+  要立刻更新可執行 `python -m bot.smile_watch --config config/smile_watch.json --once`）。
+- **按視窗的 X**：預設收進系統匣，程式繼續執行，從圖示再點開。視窗右上的「關閉時最小化到系統匣」
+  開關關掉後，按 X 會結束系統匣程式（背景排程不受影響）。設定存在 `data/tray/settings.json`。
+- **右鍵**：開啟儀表板、ETF 關注名單、前瞻追蹤、今日摘要、通知與盯盤提醒紀錄、log 資料夾。
+- **儀表板**：沒在執行時由系統匣啟動（127.0.0.1:8501，紀錄在 `log/tray_dashboard.log`），再用 Edge 的
+  應用程式模式開獨立視窗；選單另有連結可用預設瀏覽器開。由系統匣啟動的儀表板會在系統匣結束時一起關。
+- 尚未實作：管理動作（立即收集、排程器啟停、盯盤與通知暫停、Kill Switch）與登入時自動啟動。
+- 相依：`pystray`、`customtkinter`（2026-11-20 新增）。狀態來源見 `bot/tray/status.py` 開頭。
+
+---
+
+## 〇・七、美股隔夜重點
+
+每個平日 08:00 產生一次、08:50 再更新一次，內容是美股行情加上隔夜美國新聞的候選清單。目前不呼叫模型，`summary.status` 會是 `pending_model`；模型摘要要等額度恢復後另外接上。
+
+```powershell
+uv run --offline --no-sync python -m bot.overnight_brief --root . --slot morning
+```
+
+- `--slot morning` 是 08:00 版，當天第一次會跳一則本機通知；`--slot preopen` 是開盤前更新，不通知。加 `--no-notify` 可以完全不通知。
+- 輸出在 `data/overnight_brief/<日期>.json` 與 `latest.json`。同一天重跑會覆寫內容，`runs` 保留每次產生的時間。
+- 看的地方：系統匣視窗的「美股隔夜」卡片（行情與提醒），儀表板「美股隔夜重點」頁（完整行情、候選新聞與連結）。
+- 新聞範圍：前一個平日 21:00 到產生當下，只取美國來源、排除官媒。來源是每日 RSS 存檔，所以**前提是電腦整晚開著**；連續兩小時以上沒有收到任何新項目時，檔案的 `warnings` 會寫出是哪一段。
+- 行情每次都重新抓（不沿用當天的快取）。為什麼：當天的行情快取可能是美股盤中抓的，不是收盤。重抓也會更新 `data/macro/` 當天的快取。
+- 候選新聞是規則篩選（同一件事越多家報導排越前面），只是之後交給模型的前置步驟，不是重要性判斷。同一件事可能被拆成好幾則。
+- 排程設定：`SCHEDULER_OVERNIGHT_BRIEF_ENABLED`（預設 true）與 `SCHEDULER_OVERNIGHT_BRIEF_TIME`、`_END_TIME`、`_UPDATE_TIME`、`_UPDATE_END_TIME`。台股休市日不會另外判斷，平日都會產生。
+
 ## 一、每日操作流程
 
 ### 盤前（08:00 ~ 09:00）
@@ -289,6 +503,11 @@ Select-String -Path "log\strategy_*.log" -Pattern "2330"
 1. 確認 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 正確
 2. 確認 Bot 沒有被停用
 3. Telegram 通知失敗不影響交易，可忽略
+4. 用測試指令確認：`uv run python -m bot.notifier --test "測試訊息"`（不會印 token）
+5. 美股隔夜重點（早上那次，`--slot morning`，沒加 `--no-notify`）會同時發本機通知與 Telegram；
+   兩個通道互不影響，只要任一個送出就會寫入 `notified_at`。preopen 那次不發。
+6. 還沒有 Bot：在 Telegram 找 `@BotFather` 發 `/newbot` 取得 token，對 Bot 發訊息後開
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` 找 `chat.id`，填入 `.env`（細節見 `docs/setup.md` Step 4）
 
 ### 4.5 程式當掉（未正常出場）
 

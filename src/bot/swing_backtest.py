@@ -9,6 +9,17 @@
   單檔不超過權益的 max_position_pct%，同時最多 max_positions 檔。權益 = 起始資金 + 已實現損益。
 - 訊號多於空位時：依 momentum_days 日漲幅由高到低，再以代號排序。
 
+進場規則二（entry="rs_revenue"，選股策略 C2，見 docs/reports/entry-timing.md）：不看突破與均線，
+收盤時 momentum_days 日漲幅在當天有資料的名單內排名百分位 >= rs_min，且最近一期已公告的月營收
+年增率 > yoy_min 就進場（月營收在次月 11 日才視為已知）。出場、部位與成交假設與規則一相同。
+
+回撤控制（預設關閉，兩種進場規則與隨機進場基準都適用）：
+- market_ma > 0：名單等權指數（收盤對收盤日報酬取平均，除權息日以還原後前收計算）低於自己的
+  market_ma 日均線時，不產生新的買單；指數根數不足時不限制。已持有的部位照原規則出場。
+- max_new_per_day > 0：每天最多送出這麼多筆新買單（依漲幅排序取前幾筆）。
+- vol_scale_days > 0：依大盤波動度縮小新部位。等權指數近 20 日日報酬標準差高於自己過去
+  vol_scale_days 日的中位數時，新買單股數 × (中位數 ÷ 目前波動度)；不放大。根數不足時不調整。
+
 成交假設沿用 SmileExecution（次日開盤、滑價、前一日成交量上限、漲跌停），以零股計。
 除權息：指標用的歷史價格在除權息日向前還原；持倉收到配發現金，成本與停損價同步下修。
 資料中斷的標的以最後收盤價強制平倉（與微笑回測相同，#34）。
@@ -16,6 +27,7 @@
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import math
 from collections import deque
@@ -45,13 +57,31 @@ class SwingParams:
     max_position_pct: float = 20.0
     max_positions: int = 6
     momentum_days: int = 60
+    entry: str = "breakout"          # "breakout"（規則一）或 "rs_revenue"（規則二）
+    rs_min: float = 0.6              # 規則二：相對強度百分位下限（0～1）
+    yoy_min: float = 0.0             # 規則二：月營收年增率下限（%）
+    market_ma: int = 0               # 回撤控制：大盤濾網均線天數（0＝關閉）
+    max_new_per_day: int = 0         # 回撤控制：每天新買單上限（0＝不限）
+    vol_scale_days: int = 0          # 回撤控制：波動度縮放的中位數回看天數（0＝關閉）
 
     def __post_init__(self):
+        for name in ("market_ma", "max_new_per_day", "vol_scale_days"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         for name, value in asdict(self).items():
+            if name in ("entry", "rs_min", "yoy_min", "market_ma", "max_new_per_day", "vol_scale_days"):
+                continue
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.fast_ma >= self.slow_ma:
             raise ValueError("fast_ma must be shorter than slow_ma")
+        if self.entry not in ("breakout", "rs_revenue"):
+            raise ValueError("entry must be 'breakout' or 'rs_revenue'")
+        if not (math.isfinite(self.rs_min) and 0 <= self.rs_min < 1):
+            raise ValueError("rs_min must be in [0, 1)")
+        if not math.isfinite(self.yoy_min):
+            raise ValueError("yoy_min must be finite")
 
     @property
     def warmup(self) -> int:
@@ -70,6 +100,17 @@ class SwingPosition:
     initial_stop: float
     highest_close: float
     distribution_twd: float = 0.0
+    # 出場受成交量上限、分多日賣完時：已賣部分的實收現金，以及進場股數（估算剩餘曝險用）。
+    received_twd: float = 0.0
+    entry_shares: int = 0
+
+    def __post_init__(self):
+        if self.entry_shares <= 0:
+            self.entry_shares = self.shares
+
+    @property
+    def open_cost_twd(self) -> float:
+        return self.paid_twd * self.shares / self.entry_shares if self.entry_shares else self.paid_twd
 
 
 @dataclass
@@ -174,15 +215,26 @@ class SwingBacktester:
             raise ValueError("initial_cash must be finite and positive")
 
     def run_histories(self, histories: dict, *, trade_start: str = "",
-                      ex_rights: Optional[dict] = None, random_entry=None) -> SwingSummary:
+                      ex_rights: Optional[dict] = None, random_entry=None,
+                      revenue: Optional[dict] = None) -> SwingSummary:
         """Signals at close, fills at the next session's open. One cash account.
 
         trade_start: 這個日期之前的日 K 只用來暖機指標，不產生訊號。
         Buy orders live for one session and use only the cash available before that morning's
         sales. A sell that cannot fill (price band, volume) is retried on later sessions.
         random_entry: 隨機進場基準；給定時不看突破與均線，改用 "entry" 的機率決定。
+        revenue: 規則二用的月營收 {代號: [(可用日期, 年增率%), ...]}（見 load_revenue）。
         """
         p = self.params
+        if p.entry == "rs_revenue" and revenue is None and random_entry is None:
+            raise ValueError("entry='rs_revenue' needs revenue data")
+        revenue = revenue or {}
+        revenue_dates = {s: [d for d, _ in rows] for s, rows in revenue.items()}
+
+        def latest_yoy(sym: str, date: str) -> Optional[float]:
+            i = bisect.bisect_right(revenue_dates.get(sym, []), date) - 1
+            return revenue[sym][i][1] if i >= 0 else None
+
         calendar: dict = {}
         for sym, bars in histories.items():
             for bar in bars:
@@ -213,6 +265,8 @@ class SwingBacktester:
         pending_sells: dict[str, str] = {}  # 代號 → 出場原因
         marks: dict[str, float] = {}
         volumes: dict[str, float] = {}
+        index_levels: list[float] = []  # 名單等權指數（回撤控制用）
+        index_vols: list[float] = []    # 等權指數近 20 日日報酬標準差
 
         def valid(value) -> bool:
             return value is not None and math.isfinite(float(value)) and float(value) > 0
@@ -224,7 +278,7 @@ class SwingBacktester:
             received = sell_cash_received(px, pos.shares, UNIT, settings=self.settings,
                                           sell_tax_rate=SELL_TAX)
             out.cash += received
-            pnl = received + pos.distribution_twd - pos.paid_twd
+            pnl = received + pos.received_twd + pos.distribution_twd - pos.paid_twd
             out.rounds.append(Round(symbol=pos.symbol, entry_date=pos.entry_date, exit_date=date,
                                     lot_count=1, cost_twd=pos.paid_twd, pnl_twd=pnl,
                                     return_pct=100.0 * pnl / pos.paid_twd if pos.paid_twd else 0.0,
@@ -276,10 +330,23 @@ class SwingBacktester:
                     log["blocked"] = "invalid_open"
                     continue
                 px, blocked = self.execution.quote(float(bar.open), "sell", marks.get(sym), sym)
-                if not blocked and pos.shares > self.execution.capacity(volumes.get(sym)):
-                    blocked = "volume_limit_whole_position_sell"
+                qty = pos.shares
+                if not blocked:
+                    # 賣出與買進受同一個成交量上限；賣不完的部分留在佇列隔天續賣。
+                    capacity = self.execution.capacity(volumes.get(sym))
+                    if not math.isinf(capacity):
+                        qty = min(qty, int(capacity))
+                    if qty <= 0:
+                        blocked = "volume_limit_partial_exit"
                 if blocked:
                     log["blocked"] = blocked  # 留在佇列，下一個交易日再試
+                    continue
+                if qty < pos.shares:
+                    got = sell_cash_received(px, qty, UNIT, settings=self.settings, sell_tax_rate=SELL_TAX)
+                    out.cash += got
+                    pos.received_twd += got
+                    pos.shares -= qty
+                    log.update(status="filled", filled_quantity=qty, execution_price=px, partial=True)
                     continue
                 log.update(status="filled", filled_quantity=pos.shares, execution_price=px)
                 close_position(pos, px, date, pending_sells[sym])
@@ -300,8 +367,9 @@ class SwingBacktester:
                 if blocked:
                     log["blocked"] = blocked
                     continue
-                want = min(order["quantity"],
-                           int(equity_base() * p.max_position_pct / 100.0 // px))
+                want = int(min(order["quantity"],
+                               int(equity_base() * p.max_position_pct / 100.0 // px))
+                           * order.get("scale", 1.0))
                 capacity = self.execution.capacity(volumes.get(sym))
                 if not math.isinf(capacity):
                     want = min(want, int(capacity))
@@ -319,16 +387,26 @@ class SwingBacktester:
                 log.update(status="filled", filled_quantity=qty, execution_price=px, stop=stop)
             # 4. 收盤：更新指標，決定明天的賣單與買單。
             candidates = []
+            momenta: list[float] = []     # 規則二：當天所有算得出漲幅的代號，用來排名
+            rs_pending: list[tuple] = []  # 規則二：等排名完才決定的候選
+            daily_returns: list[float] = []
             for sym in sorted(today):
                 bar = today[sym]
                 volumes[sym] = float(bar.volume) if bar.volume is not None else 0.0
                 if not (valid(bar.close) and valid(bar.high) and valid(bar.low)):
                     continue
                 close = float(bar.close)
+                prior = marks.get(sym)  # 除權息日已在步驟 1 還原
+                if prior and prior > 0 and abs(close / prior - 1.0) < 0.3:
+                    daily_returns.append(close / prior - 1.0)
                 marks[sym] = close
                 s = series[sym]
                 s.add(float(bar.high), float(bar.low), close)
                 atr = s.atr(p.atr_days)
+                if p.entry == "rs_revenue" and len(s.closes) >= p.warmup:
+                    m = s.momentum(p.momentum_days)
+                    if m is not None:
+                        momenta.append(m)
                 pos = positions.get(sym)
                 if pos:
                     pos.highest_close = max(pos.highest_close, close)
@@ -350,6 +428,11 @@ class SwingBacktester:
                     continue
                 if random_entry is not None:
                     signal = random_entry.fires("entry")
+                elif p.entry == "rs_revenue":
+                    yoy = latest_yoy(sym, date)
+                    if yoy is not None and yoy > p.yoy_min:
+                        rs_pending.append((sym, momentum, atr))
+                    continue
                 else:
                     fast, slow = s.sma(p.fast_ma), s.sma(p.slow_ma)
                     signal = s.breakout(p.breakout_days) and fast is not None and fast > slow
@@ -359,14 +442,51 @@ class SwingBacktester:
                         candidates.append((-momentum, sym, dict(symbol=sym, signal_date=date,
                                                                 quantity=quantity, atr=atr,
                                                                 momentum=momentum)))
+            if rs_pending:
+                ranked = sorted(momenta)
+                n = len(ranked)
+                for sym, momentum, atr in rs_pending:
+                    rank = bisect.bisect_left(ranked, momentum) / (n - 1) if n > 1 else 0.5
+                    if rank >= p.rs_min:
+                        quantity = int(equity_base() * p.risk_pct / 100.0 // (p.initial_stop_atr * atr))
+                        if quantity > 0:
+                            candidates.append((-momentum, sym, dict(symbol=sym, signal_date=date,
+                                                                    quantity=quantity, atr=atr,
+                                                                    momentum=momentum, rs=rank)))
+            if daily_returns or index_levels:
+                last = index_levels[-1] if index_levels else 1.0
+                index_levels.append(last * (1.0 + (sum(daily_returns) / len(daily_returns)
+                                                   if daily_returns else 0.0)))
+            if (p.market_ma and len(index_levels) >= p.market_ma
+                    and index_levels[-1] < sum(index_levels[-p.market_ma:]) / p.market_ma):
+                candidates = []  # 大盤濾網：指數在均線下，不開新倉
+            if len(index_levels) >= 21:
+                rets = [index_levels[k] / index_levels[k - 1] - 1.0
+                        for k in range(len(index_levels) - 20, len(index_levels))]
+                mean = sum(rets) / 20
+                index_vols.append(math.sqrt(sum((r - mean) ** 2 for r in rets) / 20))
+            scale = 1.0
+            if p.vol_scale_days and len(index_vols) >= p.vol_scale_days and index_vols[-1] > 0:
+                recent = sorted(index_vols[-p.vol_scale_days:])
+                median = recent[len(recent) // 2]
+                scale = min(1.0, median / index_vols[-1])
+            if scale < 1.0:
+                for c in candidates:
+                    c[2]["scale"] = scale
             slots = p.max_positions - len(positions)
+            if p.max_new_per_day:
+                slots = min(slots, p.max_new_per_day)
             pending_buys = [c[2] for c in sorted(candidates, key=lambda c: c[:2])[:max(0, slots)]]
             # 5. 估值：持倉以收盤價扣出清滑價與費稅。
             liquidation = sum(
                 sell_cash_received(self.execution.slipped(marks[s], "sell", s), pos.shares, UNIT,
                                    settings=self.settings, sell_tax_rate=SELL_TAX)
                 for s, pos in positions.items())
-            exposure = sum(pos.paid_twd for pos in positions.values())
+            exposure = sum(pos.open_cost_twd for pos in positions.values())
+            if trade_start and date < trade_start:
+                # 暖機期只用來累積指標，不算帳戶期間；算進去會稀釋年化報酬、資金使用率與週轉率
+                # （#19 驗證段的年化 20.9% 是用 2023-07 起算，交易期 2024-01 起算約 25%）。
+                continue
             out.equity_curve.append(dict(
                 date=date, cash=out.cash, equity=out.cash + liquidation,
                 realized_pnl_twd=out.realized_pnl_twd, cost_exposure=exposure,
@@ -374,6 +494,28 @@ class SwingBacktester:
         out.open_positions = [dict(asdict(pos), mark=marks.get(pos.symbol))
                               for pos in positions.values()]
         return out
+
+
+def load_revenue(db, symbols: Sequence[str]) -> dict:
+    """{代號: [(可用日期, 年增率%), ...]}。月營收法規在次月 10 日前公告，保守視為次月 11 日起才知道。"""
+    wanted = sorted(set(symbols))
+    out: dict = {s: [] for s in wanted}
+    if not wanted:
+        return out
+    marks = ",".join("?" * len(wanted))
+    rows = db.conn.execute(
+        f"SELECT symbol, year_month, yoy_pct FROM monthly_revenue WHERE symbol IN ({marks}) "
+        "AND yoy_pct IS NOT NULL ORDER BY symbol, year_month", wanted).fetchall()
+    for sym, ym, yoy in rows:
+        try:
+            year, month, value = int(str(ym)[:4]), int(str(ym)[5:7]), float(yoy)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+        out[sym].append((f"{year:04d}-{month:02d}-11", value))
+    return out
 
 
 def load_histories(db, symbols: Sequence[str], *, start: str = "", end: str = "",

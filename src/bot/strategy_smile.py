@@ -11,9 +11,11 @@ from dataclasses import asdict
 from bot.models import MarketTick, qty_multiplier
 from bot.smile_curve import SmileAccount, SmileCurveEngine, SmileLot, smile_fund_cap
 from bot.smile_execution import round_tick
+from bot.smile_sentiment import (evaluate_mood, load_recent_items, market_news_mood,
+                                 symbol_bad_news)
 from bot.strategy import BaseStrategy
 from bot.trade_cost import max_affordable_qty, net_pnl_twd
-from bot.utils import now_tw_time
+from bot.utils import now_tw, now_tw_time
 
 
 class SmileCurveStrategy(BaseStrategy):
@@ -33,6 +35,8 @@ class SmileCurveStrategy(BaseStrategy):
         # 代號的在途賣單屬於持有到期：[送單當天日期, 已成交部分的累計淨損益]
         self._smile_expiry_selling: dict[str, list] = {}
         self._reference_saved_at = float("-inf")
+        self._news_cache = None  # (monotonic 時間, 項目, 市場新聞情緒, collected_at)
+        self._news_block_logged: set[tuple[str, str]] = set()  # 每檔每天只記一次壞消息擋買
         self._smile_lock = self._submission_lock
         self._smile_state_path = self._state_root / "data" / "smile_state.json"
         for symbol in settings.symbols:
@@ -227,6 +231,9 @@ class SmileCurveStrategy(BaseStrategy):
                 self._place_stop_sell(symbol, pos.quantity, "smile",
                                       limit_price=round_tick(price, True, symbol))
                 return
+            if holding and self.settings.smile_mood_sell_enabled:
+                if self._try_mood_sell(symbol, pos, e, price):
+                    return
             if price >= e.state.reference:
                 if holding and e.hold_expired(day):
                     self._place_expiry_sell(symbol, pos, price, day)
@@ -257,6 +264,11 @@ class SmileCurveStrategy(BaseStrategy):
             if (not candidates and drop + 1e-9 >= e.tiers[-1].drop_pct
                     and day not in e.state.bottom_dca_done_dates and e.bottom_dca_allowed()):
                 candidates = [(None, 1)]
+            if candidates and self.settings.smile_news_block_enabled:
+                bad = symbol_bad_news(self._news_snapshot()[0], symbol)
+                if bad:
+                    self._log_news_block(symbol, day, price, bad)
+                    return
             if candidates:
                 tier, multiplier = candidates[0]
                 price = round_tick(price, False, symbol)
@@ -265,6 +277,96 @@ class SmileCurveStrategy(BaseStrategy):
                     self._smile_intent[symbol] = (tier, day)
                     if not self._place_buy(symbol, price, qty, "smile", unit=unit):
                         self._smile_intent.pop(symbol, None)
+
+    # --- 時事＋即時股價（只在盤中生效；歷史新聞不存在，日 K 引擎與回測沒有這套規則）---
+
+    def _news_snapshot(self):
+        """回傳 (視窗內項目, 市場新聞情緒 dict, 新聞存檔距今分鐘數)。最多每 60 秒重讀一次檔案。"""
+        now_m = time.monotonic()
+        cache = self._news_cache
+        if cache is None or now_m - cache[0] >= 60:
+            now = now_tw()
+            try:
+                items, collected = load_recent_items(
+                    self._project_root, now, self.settings.smile_news_window_hours)
+            except Exception as exc:  # 新聞只是輔助判斷，讀取失敗不可影響交易迴圈
+                self.logger.warning("讀取新聞存檔失敗：%s: %s", type(exc).__name__, exc)
+                items, collected = [], None
+            cache = self._news_cache = (now_m, items, market_news_mood(items), collected)
+        _, items, mood, collected = cache
+        age = None
+        if collected:
+            try:
+                ts = dt.datetime.fromisoformat(collected)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=now_tw().tzinfo)
+                age = max(0.0, (now_tw() - ts).total_seconds() / 60)
+            except ValueError:
+                age = None
+        return items, mood, age
+
+    def _market_change_pct(self):
+        """有 0050 用 0050 的即時漲跌幅；否則取監控代號漲跌幅的中位數；都沒有回 None。"""
+        def change(sym):
+            prev, last = self._prev_close.get(sym, 0.0), self._last_price.get(sym, 0.0)
+            if prev and prev > 0 and last and last > 0:
+                return (last / prev - 1) * 100
+            return None
+        if "0050" in self.settings.symbols:
+            value = change("0050")
+            if value is not None:
+                return value
+        values = sorted(v for v in (change(s) for s in self.settings.symbols) if v is not None)
+        if not values:
+            return None
+        mid = len(values) // 2
+        return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+    def _current_mood(self):
+        _, news, age = self._news_snapshot() if (
+            self.settings.smile_mood_require != "price") else (None, None, None)
+        return evaluate_mood(news=news, news_age_minutes=age,
+                             market_change_pct=self._market_change_pct(), settings=self.settings)
+
+    def _try_mood_sell(self, symbol, pos, e, price) -> bool:
+        """持倉有淨利且市場悲觀：整個部位提早賣出。絕不因時事認賠；送單回 True。"""
+        limit = round_tick(price, False, symbol)
+        lots = e.open_lots
+        pnl = e.unrealized_pnl(limit, lots)
+        min_pct = self.settings.smile_mood_min_profit_pct
+        if pnl <= 0 or pnl < min_pct / 100.0 * e._lot_cost(lots):
+            return False
+        mood = self._current_mood()
+        if not mood.pessimistic:
+            return False
+        self._smile_stop_selling.discard(symbol)
+        self._smile_expiry_selling.pop(symbol, None)
+        if not self._place_stop_sell(symbol, pos.quantity, "smile_mood", limit_price=limit):
+            return False
+        self._write_mood_log(
+            "mood_sell", symbol, limit, mood=asdict(mood), net_pnl_twd=round(pnl, 2))
+        self.logger.warning("%s 市場悲觀且持倉淨利 %.0f 元，情緒賣出 @ %.2f（%s）",
+                            symbol, pnl, limit, "；".join(mood.reasons))
+        return True
+
+    def _log_news_block(self, symbol, day, price, bad):
+        if (symbol, day) in self._news_block_logged:
+            return
+        self._news_block_logged.add((symbol, day))
+        self._write_mood_log("news_block", symbol, price, bad_news=bad)
+        self.logger.warning("%s 近期有公司層級壞消息，今日不買進：%s", symbol,
+                            "；".join(b.get("title", "") for b in bad))
+
+    def _write_mood_log(self, action, symbol, price, **detail):
+        try:
+            path = self._state_root / "data" / "smile_mood_log.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            row = {"ts": now_tw().isoformat(timespec="seconds"), "symbol": symbol,
+                   "action": action, "price": price, **detail}
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+        except Exception as exc:
+            self.logger.warning("寫入 smile_mood_log.jsonl 失敗：%s: %s", type(exc).__name__, exc)
 
     def _place_expiry_sell(self, symbol, pos, price, day):
         """持有到期：整個部位以現價限價賣出，不論賺賠；出清後重設標準價，不停用。"""

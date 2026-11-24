@@ -132,6 +132,15 @@ TELEGRAM_CHAT_ID=
 3. 找到 `"chat":{"id":12345678}` 中的數字
 4. 將 Token 和 Chat ID 填入 `.env`
 
+### 4.3 測試
+
+```powershell
+uv run python -m bot.notifier --test "測試訊息"
+```
+
+會印出「已送出」、「未設定」或「送出失敗」，不會印出 token。收不到時，先對 Bot 按 Start 或發一則訊息再試。
+美股隔夜重點（早上那次）也會用同一組設定推播，沒設定就只發本機通知。
+
 ## Step 5: 驗證安裝
 
 ```powershell

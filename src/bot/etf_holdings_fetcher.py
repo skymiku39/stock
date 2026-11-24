@@ -27,7 +27,7 @@ from bot.active_etf import (
     ActiveEtf,
     Holding,
     HoldingsSnapshot,
-    load_active_etfs,
+    load_tracked_etfs,
     save_holdings,
 )
 from bot.cloud_file_cache import mirror_file_to_cloud
@@ -717,7 +717,8 @@ def fetch_all_active_etfs(
     """跑一輪：抓所有有 holdings_url 的主動式 ETF。"""
     log = logger or get_logger("etf-fetcher")
     sess = _new_session()
-    etfs = load_active_etfs(root)
+    # 含 config/passive_etfs.json 的被動式 ETF；跟單與共識訊號仍只看主動式。
+    etfs = load_tracked_etfs(root)
     if only_symbols:
         wanted = set(only_symbols)
         etfs = [e for e in etfs if e.symbol in wanted]

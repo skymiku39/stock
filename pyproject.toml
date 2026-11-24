@@ -23,6 +23,8 @@ dependencies = [
     "pyyaml>=6.0",
     "yfinance>=0.2.40",
     "matplotlib>=3.10.9",
+    "pystray>=0.19",
+    "customtkinter>=5.2",
 ]
 
 [project.optional-dependencies]
@@ -74,6 +76,7 @@ stock-memory = "bot.memory_cli:main"
 stock-ask = "bot.ask_cli:main"
 stock-sync-conflicts = "bot.sync_conflict_cli:main"
 stock-test = "bot.test_cli:main"
+stock-tray = "bot.tray.app:main"
 
 [build-system]
 requires = ["hatchling"]

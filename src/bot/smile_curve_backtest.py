@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import asdict, dataclass, field
 import math
 from pathlib import Path
@@ -310,6 +311,8 @@ class SmileCurveBacktester:
         pending: dict[str, list[dict]] = {s: [] for s in engines}
         marks: dict[str, float] = {}
         previous_volumes: dict[str, float] = {}
+        # 進行中的強制出場（停損、到期）：代號 → stop 旗標、出場起始日、起始已實現損益。
+        exiting: dict[str, dict] = {}
         peak = base
 
         def valid(value):
@@ -333,6 +336,7 @@ class SmileCurveBacktester:
                 if date <= record["last_date"] or e.state.disabled and not e.open_lots:
                     continue
                 pending[sym] = []
+                exiting.pop(sym, None)
                 if e.open_lots:
                     px = self.execution.slipped(marks[sym], "sell", sym)
                     before = e.realized_pnl_twd
@@ -394,16 +398,17 @@ class SmileCurveBacktester:
                         continue
                     log["execution_price"] = px
                     if order["side"] == "sell":
-                        # Whole-position all-or-nothing: judge the whole sell group once.
+                        # 停利（收盤訊號）整組成交或整組取消（11-10 規則）；停損與到期是強制出場，
+                        # 受同樣的成交量上限，賣不完的部分隔天開盤續賣，直到出清。
+                        forced = bool(order.get("stop") or order.get("expiry"))
                         if sell_group_reason == "unset":
                             group = [o["lot"] for o in orders if o["side"] == "sell"]
                             group_shares = sum(l.quantity * qty_multiplier(l.unit) for l in group)
-                            # 停損與到期是強制出場，不要求開盤價仍有淨利。
-                            forced = any(o.get("stop") or o.get("expiry")
-                                         for o in orders if o["side"] == "sell")
-                            if group_shares > available_shares:
+                            if forced:
+                                sell_group_reason = None
+                            elif group_shares > available_shares:
                                 sell_group_reason = "volume_limit_whole_position_sell"
-                            elif not forced and not e._position_profitable(px, group):
+                            elif not e._position_profitable(px, group):
                                 sell_group_reason = "unprofitable_open"
                             else:
                                 sell_group_reason = None
@@ -411,20 +416,37 @@ class SmileCurveBacktester:
                             log["reason"] = sell_group_reason
                             continue
                         lot = order["lot"]
-                        e._record_sell(lot, px, date, "stop_loss_next_open" if order.get("stop")
+                        mult = qty_multiplier(lot.unit)
+                        qty = lot.quantity
+                        if not math.isinf(available_shares):
+                            qty = min(qty, int(available_shares // mult))
+                        if qty <= 0:
+                            log["reason"] = "volume_limit_partial_exit"
+                            continue
+                        sold = lot if qty == lot.quantity else dataclasses.replace(lot, quantity=qty)
+                        e._record_sell(sold, px, date, "stop_loss_next_open" if order.get("stop")
                                        else "expiry_next_open" if order.get("expiry")
                                        else "close_signal_next_open")
-                        e.state.lots.remove(lot)
-                        out.cash += sell_cash_received(px, lot.quantity, lot.unit,
+                        if forced:
+                            exit_state = exiting.setdefault(
+                                sym, dict(stop=bool(order.get("stop")), start=date,
+                                          realized_start=realized_before))
+                            e.round_trips[-1].round_id = exit_state["start"]
+                        if sold is lot:
+                            e.state.lots.remove(lot)
+                        else:
+                            lot.quantity -= qty
+                        out.cash += sell_cash_received(px, qty, lot.unit,
                                                       settings=self.settings, sell_tax_rate=e.sell_tax)
-                        log.update(status="filled", filled_quantity=lot.quantity)
-                        available_shares -= lot.quantity * qty_multiplier(lot.unit)
+                        log.update(status="filled", filled_quantity=qty)
+                        available_shares -= qty * mult
                         if not e.open_lots:
+                            exit_state = exiting.pop(sym, None)
                             if order.get("stop"):
                                 e.state.disabled = True
                                 results[sym].stopped_date = date
                             elif order.get("expiry"):
-                                e.finish_expiry(px, date, e.realized_pnl_twd - realized_before)
+                                e.finish_expiry(px, date, e.realized_pnl_twd - exit_state["realized_start"])
                             else:
                                 e._reset_cycle(px, date)
                     else:
@@ -485,6 +507,12 @@ class SmileCurveBacktester:
                     e._init_reference(close, date)
                     continue
                 may_buy = False
+                if sym in exiting and e.open_lots:
+                    # 強制出場尚未賣完：不論今天收盤如何，剩餘部位隔天開盤續賣，不買進。
+                    flag = "stop" if exiting[sym]["stop"] else "expiry"
+                    pending[sym] = [dict(side="sell", signal_date=date, lot=l, quantity=l.quantity,
+                                         **{flag: True}) for l in e.open_lots]
+                    continue
                 if sym in paused:
                     pending[sym] = []
                 elif e.state.disabled:

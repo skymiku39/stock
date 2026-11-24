@@ -267,7 +267,7 @@ COMPARISON_SCENARIOS: List[BacktestScenario] = [
         price_mode="next_open",
     ),
     BacktestScenario(
-        label="近期30萬配置OHLC",
+        label="近期6萬配置OHLC",  # 與上一個情境同配置，只差成交模式
         start="2023-01-01",
         end="2026-06-12",
         max_fund=60_000,

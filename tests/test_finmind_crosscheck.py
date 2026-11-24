@@ -1,0 +1,342 @@
+"""FinMind 交叉核對（離線：假 client、暫存 SQLite）。對應 docs/free-sources/finmind.md 驗收標準。"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import sqlite3
+from types import SimpleNamespace
+
+from bot.free_sources import finmind_crosscheck as fc
+from bot.free_sources.base import SourceError
+from bot.free_sources.quota import QuotaExceeded
+
+NOW = dt.datetime(2026, 11, 24, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+
+
+def make_db(path, revenue=(), quarters=()):
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE monthly_revenue (symbol TEXT, year_month TEXT, revenue REAL)")
+    con.execute("CREATE TABLE quarterly_report (symbol TEXT, period TEXT, eps REAL, revenue REAL, op_margin REAL)")
+    con.executemany("INSERT INTO monthly_revenue VALUES (?,?,?)", revenue)
+    con.executemany("INSERT INTO quarterly_report VALUES (?,?,?,?,?)", quarters)
+    con.commit()
+    con.close()
+    return path
+
+
+def rev_rows(sym="2330"):
+    # date 是營收月份的下個月 1 日；revenue 單位元
+    return [{"stock_id": sym, "date": f"2026-{m + 1:02d}-01", "revenue": v * 1000,
+             "revenue_year": 2026, "revenue_month": m}
+            for m, v in ((8, 500), (9, 600), (10, 700), (7, 400))]
+
+
+def stmt_rows(sym="2330"):
+    rows = []
+    # Q1、Q2 單季：營收 1000/2000 千元（元 = x1000）、EPS 1.0/2.0、營業利益 300/800 千元
+    for date, rev, eps, op in (("2026-03-31", 1000, 1.0, 300), ("2026-06-30", 2000, 2.0, 800)):
+        rows += [{"date": date, "stock_id": sym, "type": "Revenue", "value": rev * 1000, "origin_name": ""},
+                 {"date": date, "stock_id": sym, "type": "EPS", "value": eps, "origin_name": ""},
+                 {"date": date, "stock_id": sym, "type": "OperatingIncome", "value": op * 1000, "origin_name": ""}]
+    return rows
+
+
+class FakeClient:
+    def __init__(self, revenue=None, statements=None, exc=None):
+        self.calls = []
+        self.revenue = rev_rows() if revenue is None else revenue
+        self.statements = stmt_rows() if statements is None else statements
+        self.exc = exc
+
+    def data(self, dataset, data_id, start, end):
+        self.calls.append((dataset, data_id, start, end))
+        if self.exc is not None:
+            raise self.exc
+        return self.revenue if dataset == fc.REVENUE_DATASET else self.statements
+
+
+GOOD_REV = [("2330", "2026-08", 500.0), ("2330", "2026-09", 600.0), ("2330", "2026-10", 700.0)]
+# 累計：Q1 = 1000 / 1.0 / 30%；Q2 = 3000 / 3.0 / (1100/3000=36.667%)
+GOOD_Q = [("2330", "2026Q1", 1.0, 1000.0, 30.0), ("2330", "2026Q2", 3.0, 3000.0, 36.67)]
+
+
+def statuses(report, kind=None):
+    return {(i["period"], i["field"]): i["status"] for i in report["items"] if kind in (None, i["kind"])}
+
+
+def test_all_match_and_report_written(tmp_path):
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    client = FakeClient()
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=client, symbols=["2330"], db_path=db)
+    assert rep["status"] == "ok" and rep["source"] == "FinMind" and rep["requests"] == 2
+    assert rep["summary"]["mismatch"] == 0 and rep["summary"]["match"] == rep["summary"]["total"] == 9
+    assert statuses(rep)[("2026-10", "revenue")] == "match"          # 元 -> 千元
+    assert statuses(rep)[("2026Q2", "eps")] == "match"               # Q1+Q2 累計
+    assert [c[0] for c in client.calls] == [fc.REVENUE_DATASET, fc.STATEMENT_DATASET]
+    path = tmp_path / "data/reports/finmind_crosscheck_2026-11-24.json"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["source"] == "FinMind" and saved["date"] == "2026-11-24" and len(saved["items"]) == 9
+    assert not list(path.parent.glob("*.tmp"))
+    assert rep["inconsistent"] is False
+
+
+def test_mismatch_and_tolerance(tmp_path):
+    q = [("2330", "2026Q1", 1.04, 1000.5, 30.0),      # EPS 差 0.04、營收差 0.05% 都在容許內
+         ("2330", "2026Q2", 3.2, 3000.0, 38.0)]       # EPS 差 0.2 超出；營益率也不一致 → EPS 算 mismatch
+    rev = [("2330", "2026-08", 500.0), ("2330", "2026-09", 640.0), ("2330", "2026-10", 700.0)]
+    db = make_db(tmp_path / "s.db", rev, q)
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["2330"], db_path=db)
+    st = statuses(rep)
+    assert st[("2026Q1", "eps")] == "match" and st[("2026Q1", "revenue")] == "match"
+    assert st[("2026Q2", "eps")] == "mismatch" and st[("2026-09", "revenue")] == "mismatch"
+    assert st[("2026Q2", "op_margin")] == "mismatch"
+    assert rep["summary"]["mismatch"] == 3 and rep["inconsistent"] is True
+
+
+def test_db_missing_and_source_missing(tmp_path):
+    db = make_db(tmp_path / "s.db", GOOD_REV[:1], [("2330", "2026Q1", 0.0, 0.0, 0.0)])   # 缺月份、值為 0
+    # FinMind 只有 Q2 單季（缺 Q1）→ 累計無法驗證
+    only_q2 = [r for r in stmt_rows() if r["date"] == "2026-06-30"]
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(statements=only_q2), symbols=["2330"], db_path=db)
+    st = statuses(rep)
+    assert st[("2026-10", "revenue")] == "db_missing" and st[("2026-08", "revenue")] == "match"
+    assert st[("2026Q2", "eps")] == "source_missing" and st[("2026Q2", "revenue")] == "source_missing"
+    rep2 = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["2330"], db_path=db)
+    assert statuses(rep2)[("2026Q1", "eps")] == "db_missing"      # 0 視為缺
+    assert rep2["has_db_missing"] is True and rep2["inconsistent"] is False
+
+
+def _q(period, field="eps"):
+    return lambda items: next(i for i in items if i["period"] == period and i["field"] == field)
+
+
+def test_eps_share_count_change_not_comparable():
+    # 股數變動：累計 EPS 對不上，但同期營收、營益率都一致 → not_comparable（保留 diff 與 note）
+    db = {"2026Q1": {"eps": 1.0, "revenue": 1000.0, "op_margin": 30.0},
+          "2026Q2": {"eps": 3.5, "revenue": 3000.0, "op_margin": 36.67}}
+    items = fc.compare_statements("2327", stmt_rows(), db)
+    q2 = _q("2026Q2")(items)
+    assert q2["status"] == "not_comparable" and q2["diff"] == 0.5 and "股數變動" in q2["note"]
+    assert _q("2026Q2", "revenue")(items)["status"] == _q("2026Q2", "op_margin")(items)["status"] == "match"
+    s = fc.summarize(items)
+    assert s["not_comparable"] == 1 and s["mismatch"] == 0 and s["db_missing"] == 0
+    # 營收也不一致 → 無法佐證，維持 mismatch
+    db["2026Q2"]["revenue"] = 3100.0
+    items = fc.compare_statements("2327", stmt_rows(), db)
+    assert _q("2026Q2")(items)["status"] == "mismatch" and "note" not in _q("2026Q2")(items)
+    # 營業利益缺（FinMind 沒有 OperatingIncome）→ 也維持 mismatch
+    db["2026Q2"]["revenue"] = 3000.0
+    no_op = [r for r in stmt_rows() if r["type"] != "OperatingIncome"]
+    assert _q("2026Q2")(fc.compare_statements("2327", no_op, db))["status"] == "mismatch"
+
+
+def test_eps_q1_cumulative_equals_single_quarter():
+    # Q1 的累計就是單季：一致 → match；只有 EPS 差（營收、營益率一致）→ not_comparable
+    db = {"2026Q1": {"eps": 1.0, "revenue": 1000.0, "op_margin": 30.0}}
+    q1 = [r for r in stmt_rows() if r["date"] == "2026-03-31"]
+    assert _q("2026Q1")(fc.compare_statements("2327", q1, db))["status"] == "match"
+    db["2026Q1"]["eps"] = 1.3
+    assert _q("2026Q1")(fc.compare_statements("2327", q1, db))["status"] == "not_comparable"
+
+
+def test_financial_revenue_not_applicable(tmp_path):
+    # 金融保險業：資料庫營收、營益率為 0／空 → 不適用；EPS 照常比累計
+    db = make_db(tmp_path / "s.db", GOOD_REV, [("2330", "2026Q1", 1.0, 0.0, 0.0), ("2330", "2026Q2", 3.0, 0.0, 0.0)])
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE stock_info (symbol TEXT, industry TEXT)")
+    con.execute("INSERT INTO stock_info VALUES ('2330', '金融保險業')")
+    con.commit()
+    con.close()
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["2330"], db_path=db)
+    st = statuses(rep, "quarterly_report")
+    assert st[("2026Q2", "revenue")] == st[("2026Q2", "op_margin")] == "not_applicable"
+    assert st[("2026Q1", "revenue")] == "not_applicable"
+    assert st[("2026Q1", "eps")] == st[("2026Q2", "eps")] == "match"
+    assert rep["summary"]["db_missing"] == 0 and rep["summary"]["not_applicable"] == 4
+    assert rep["has_db_missing"] is False and rep["inconsistent"] is False
+    from bot import data_freshness as fresh
+    assert fresh._finmind_crosscheck(tmp_path, NOW)["status"] == fresh.OK
+    # 非金融業同樣的空營收仍是 db_missing
+    items = fc.compare_statements("2330", stmt_rows(), {"2026Q1": {"eps": 1.0, "revenue": None, "op_margin": None}})
+    assert {i["field"]: i["status"] for i in items if i["period"] == "2026Q1"}["revenue"] == "db_missing"
+    assert fc.is_financial("金融保險業") and not fc.is_financial("半導體業") and not fc.is_financial(None)
+    # 金融業營收不適用時無法佐證 → EPS 不一致仍是 mismatch
+    items = fc.compare_statements("2880", stmt_rows(), {"2026Q2": {"eps": 3.5, "revenue": None, "op_margin": None}},
+                                  financial=True)
+    assert _q("2026Q2", "revenue")(items)["status"] == "not_applicable"
+    assert _q("2026Q2")(items)["status"] == "mismatch"
+
+
+def test_skipped_without_token(tmp_path):
+    rep = fc.run_crosscheck(tmp_path, now=NOW, settings=SimpleNamespace(finmind_token=""),
+                            symbols=["2330"], db_path=tmp_path / "none.db")
+    assert rep["status"] == "skipped"
+    assert not (tmp_path / "data/reports").exists()
+
+
+def test_quota_exceeded_stops(tmp_path):
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+
+    class Quota(FakeClient):
+        def data(self, *a):
+            self.calls.append(a)
+            raise QuotaExceeded("finmind", "hourly", 500)
+
+    client = Quota()
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=client, symbols=["2330", "1514"], db_path=db)
+    assert rep["status"] == "quota_exceeded" and rep["requests"] == 0 and len(client.calls) == 1
+    assert (tmp_path / "data/reports/finmind_crosscheck_2026-11-24.json").exists()
+
+    http402 = FakeClient(exc=SourceError("finmind", 402, "limit"))
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=http402, symbols=["2330", "1514"], db_path=db)
+    assert rep["status"] == "quota_exceeded" and len(http402.calls) == 1
+
+
+def test_source_error_is_partial_and_redacted(tmp_path):
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+
+    class Flaky(FakeClient):
+        def data(self, dataset, *a):
+            if dataset == fc.STATEMENT_DATASET:
+                raise SourceError("finmind", 500, "boom token=SECRET123")
+            return super().data(dataset, *a)
+
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=Flaky(), symbols=["2330"], db_path=db)
+    assert rep["status"] == "partial" and rep["summary"]["total"] == 3
+    assert "SECRET123" not in json.dumps(rep) and "2330:statements" in rep["errors"]
+
+
+def test_main_dry_run_and_default_symbols(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(fc, "_tracked_symbols", lambda root, settings: [])
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/held_symbols_seen.json").write_text(
+        json.dumps({"symbols": {"1514": {"first_seen": "2026-11-20"}}}), encoding="utf-8")
+    assert fc.main(["--root", str(tmp_path), "--dry-run"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "dry_run" and out["symbols"] == ["1514"] and out["planned_requests"] == 2
+    assert fc.main(["--root", str(tmp_path), "--symbols", "2330, 2317", "--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["symbols"] == ["2330", "2317"]
+    assert not (tmp_path / "data/reports").exists()
+
+
+# ---------------- 第三階段：分批與排程（docs/free-sources/finmind.md 3.x） ----------------
+D = NOW.date()
+
+
+def _st(days_ago, fingerprint="fp", **kw):
+    return {"checked": (D - dt.timedelta(days=days_ago)).isoformat(), "fingerprint": fingerprint, **kw}
+
+
+def test_select_batch_priority_and_not_due():
+    scope = ["1514", "1101", "1102", "1103", "1104", "1105"]
+    state = {
+        "1101": _st(1, "old"),          # 指紋變了 → 2
+        "1102": _st(8),                 # 超過 7 天 → 3
+        "1103": _st(2),                 # 未到期 → 不查
+        "1104": _st(0, "old"),          # 今天查過 → 不查（即使指紋變了）
+        "1514": _st(1),                 # 持股 → 0（每天）
+    }                                   # 1105 從沒查過 → 1
+    fps = {s: "fp" for s in scope}
+    plan = fc.select_batch(scope, ["1514"], state, fps, D, max_symbols=10)
+    assert plan["selected"] == ["1514", "1105", "1101", "1102"]
+    assert set(plan["not_due"]) == {"1103", "1104"} and plan["deferred"] == []
+    # 同優先序內，上次核對越早越先
+    plan = fc.select_batch(["1201", "1202"], [], {"1201": _st(9), "1202": _st(20)},
+                           {"1201": "fp", "1202": "fp"}, D, max_symbols=1)
+    assert plan["selected"] == ["1202"] and plan["deferred"] == ["1201"]
+
+
+def _scope(monkeypatch, held, tracked):
+    monkeypatch.setattr(fc, "default_symbols", lambda root: list(held))
+    monkeypatch.setattr(fc, "_tracked_symbols", lambda root, settings: list(tracked))
+
+
+class QuotaLeft:
+    def __init__(self, left):
+        self.left = left
+
+    def remaining(self):
+        return self.left
+
+
+def test_batch_respects_budget_and_quota_remaining(tmp_path, monkeypatch):
+    _scope(monkeypatch, ["2330"], ["1101", "1102", "1103", "1104"])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    client = FakeClient()
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=client, db_path=db, max_requests=7)
+    assert rep["requests"] == 6 == len(client.calls)          # 7 // 2 = 3 檔
+    assert rep["symbols"] == ["2330", "1101", "1102"]
+    assert rep["batch"]["deferred"] == ["1103", "1104"] and rep["batch"]["scope"] == 5
+    # 該小時只剩 4 次 → 只查 2 檔，即使設定上限較大
+    client = FakeClient()
+    client.quota = QuotaLeft(4)
+    rep = fc.run_crosscheck(tmp_path / "b", now=NOW, client=client, db_path=db, max_requests=300)
+    assert len(client.calls) == 4 and rep["batch"]["budget"] == 4 and len(rep["batch"]["deferred"]) == 3
+
+
+def test_batch_no_budget_is_quota_exceeded(tmp_path, monkeypatch, capsys):
+    _scope(monkeypatch, ["2330"], [])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    client = FakeClient()
+    client.quota = QuotaLeft(1)
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=client, db_path=db)
+    assert rep["status"] == "quota_exceeded" and client.calls == [] and rep["requests"] == 0
+    monkeypatch.setattr(fc, "run_crosscheck", lambda *a, **k: {"status": "quota_exceeded"})
+    assert fc.main(["--root", str(tmp_path)]) == 1
+
+
+def test_batches_rotate_across_runs(tmp_path, monkeypatch):
+    _scope(monkeypatch, [], ["1101", "1102", "1103"])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+
+    class FailOne(FakeClient):
+        def data(self, dataset, data_id, *a):
+            if data_id == "1102" and dataset == fc.STATEMENT_DATASET:
+                raise SourceError("finmind", 500, "boom")
+            return super().data(dataset, data_id, *a)
+
+    first = fc.run_crosscheck(tmp_path, now=NOW, client=FailOne(), db_path=db, max_requests=4)
+    assert first["symbols"] == ["1101", "1102"] and first["status"] == "partial"
+    state = fc.load_state(tmp_path)
+    assert set(state) == {"1101"}                             # 1102 只成功一半，不記
+    assert state["1101"]["checked"] == D.isoformat() and state["1101"]["fingerprint"]
+    later = NOW + dt.timedelta(days=1)
+    client = FakeClient()
+    second = fc.run_crosscheck(tmp_path, now=later, client=client, db_path=db, max_requests=4)
+    assert second["symbols"] == ["1102", "1103"]               # 1101 未到期，不重查
+    assert set(fc.load_state(tmp_path)) == {"1101", "1102", "1103"}
+    third = fc.run_crosscheck(tmp_path, now=later, client=FakeClient(), db_path=db)
+    assert third["symbols"] == [] and third["status"] == "ok" and third["batch"]["not_due"] == 3
+
+
+def test_outstanding_carried_into_report(tmp_path, monkeypatch):
+    _scope(monkeypatch, [], ["1101", "1102"])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    # 1101 的資料庫沒有任何列 → db_missing
+    fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["1101"], db_path=db)
+    assert fc.load_state(tmp_path)["1101"]["db_missing"] > 0
+    rep = fc.run_crosscheck(tmp_path, now=NOW + dt.timedelta(days=1), client=FakeClient(), db_path=db)
+    assert rep["symbols"] == ["1102"]
+    assert [o["symbol"] for o in rep["outstanding"]] == ["1101"]
+    from bot import data_freshness as fresh
+    check = fresh._finmind_crosscheck(tmp_path, NOW + dt.timedelta(days=1))
+    assert check["status"] == fresh.WARN and "1101" in check["detail"]
+
+
+def test_scope_merges_tracked_and_filters_etf(tmp_path, monkeypatch):
+    _scope(monkeypatch, ["1514", "00981A"], ["2330", "0050", "1514", "6669"])
+    held, scope = fc.scope_symbols(tmp_path, SimpleNamespace(symbols=[]))
+    assert held == ["1514"] and scope == ["1514", "2330", "6669"]
+
+    def broken(root, settings):
+        raise RuntimeError("watchlist db locked")
+
+    monkeypatch.setattr(fc, "_tracked_symbols", broken)
+    assert fc.scope_symbols(tmp_path, None) == (["1514"], ["1514"])
+
+
+def test_main_skipped_exit_code(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fc, "_load_settings", lambda root: SimpleNamespace(finmind_token=""))
+    assert fc.main(["--root", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "skipped"
+    assert not (tmp_path / "data").exists()

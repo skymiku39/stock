@@ -109,3 +109,26 @@ def test_project_audit_exposes_canonical_semantic_gap(tmp_path) -> None:
     canonical = report["database"]["canonical"]
     assert canonical["tables"]["price_history"]["quality_status"] == "invalid"
     assert any(gap["code"] == "canonical_semantic_invalid" for gap in report["gaps"])
+
+
+def test_canonical_audit_accepts_same_timestamp_ticks_with_sequence() -> None:
+    tick = {"symbol": "0050", "ts": "2026-11-05 09:00:00.651047000", "interval": "tick",
+            "open": 99.35, "high": 99.35, "low": 99.35, "close": 99.35, "volume": 4, "amount": 397400}
+    result = audit_canonical_rows(
+        "intraday_bars",
+        [{**tick, "sequence": 0}, {**tick, "sequence": 1, "close": 99.3, "open": 99.3,
+                                   "high": 99.3, "low": 99.3}],
+    )
+    assert not any(item.check == "duplicate_key" for item in result.findings)
+    repeated = audit_canonical_rows("intraday_bars", [{**tick, "sequence": 0}, {**tick, "sequence": 0}])
+    assert any(item.check == "duplicate_key" for item in repeated.findings)
+
+
+def test_canonical_audit_accepts_issuer_pdf_quarterly_provenance() -> None:
+    result = audit_canonical_rows(
+        "quarterly_report",
+        [{"symbol": "4441", "period": "2024Q1", "revenue": 100,
+          "source_record_id": "source-doc:issuer_quarterly_pdf:abc"}],
+        source_documents={"source-doc:issuer_quarterly_pdf:abc": "issuer_quarterly_pdf"},
+    )
+    assert not any(item.check == "provenance_domain" for item in result.findings)
