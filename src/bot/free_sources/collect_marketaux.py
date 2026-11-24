@@ -249,11 +249,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="只列出將查詢的內容，不連網、不寫檔")
     ap.add_argument("--root", default=".", help="專案根目錄（預設目前目錄）")
     ap.add_argument("--symbols", help="逗號分隔的代號，預設 " + ",".join(DEFAULT_SYMBOLS))
+    ap.add_argument("--scheduled", action="store_true",
+                    help="排程呼叫：額度用完或被限流時回傳 0，避免排程器自動重試而多花額度")
     args = ap.parse_args(argv)
     syms = [s for s in args.symbols.split(",") if s.strip()] if args.symbols else None
     summary = collect(Path(args.root), now=dt.datetime.now(TAIPEI), symbols=syms, dry_run=args.dry_run)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 1 if summary.get("status") in ("error", "quota_exceeded", "rate_limited") else 0
+    status = summary.get("status")
+    if status in ("quota_exceeded", "rate_limited"):
+        return 0 if args.scheduled else 1
+    return 1 if status == "error" else 0
 
 
 if __name__ == "__main__":

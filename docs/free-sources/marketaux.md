@@ -54,3 +54,42 @@
 6. 402、429 實際的回應內文（確認 `SourceError.kind` 分類正確）。
 7. 一次查多檔（`symbols=TSM,NVDA`）與逐檔查的額度消耗差異（目前逐檔，確保每檔都有分數）。
 8. 分數範圍（預期 -1 ~ 1）與正負判斷（目前以 >0 為正、<0 為負、=0 為中性）。
+
+## 第三階段：實測與接線
+
+### 目標
+
+1. 拿到金鑰後逐項實測上面 8 項，依結果修正 `collect_marketaux.py`／`marketaux.py`，結果記在下方「實測紀錄」。每天只有 100 次，實測預算 30 次以內。
+2. 收集在 08:00 隔夜重點之前自動執行，有開關。
+3. 隔夜重點（`data/overnight_brief/<日期>.json`）多一個 `us_sentiment` 欄位，儀表板「美股隔夜重點」頁顯示小表；分數只當參考，不進交易規則。
+
+### 接線方式與原因
+
+- 用既有的背景排程器（`stock-scheduler`），新增每日一次的工作 `marketaux_sentiment`，時段 07:40–07:59（`SCHEDULER_MARKETAUX_TIME`／`SCHEDULER_MARKETAUX_END_TIME`），開關 `SCHEDULER_MARKETAUX_ENABLED`（預設開）。
+  原因：隔夜重點本來就由這個排程器在 08:00 跑，放在同一個排程器裡，先後順序有保證，不必另外註冊 Windows 排程工作。
+- 沒有 `MARKETAUX_API_TOKEN` 就不建立這個工作（不會每天跑一個註定 skipped 的程序，也不改變既有排程測試的預期工作清單）。
+- 排程呼叫帶 `--scheduled`：額度用完（402／自設上限）或被限流（429）時回傳 0。原因：排程器對失敗的每日工作會在時段內自動重試，重試會再花額度，違反「不自動重試 402／429」。手動執行不帶此旗標時仍回 1。
+- 隔夜重點只讀「當天」的 `marketaux_sentiment_<台灣日期>.json`；沒檔為 `status=missing`、`rows=[]`；代號為 `no_data` 或 `error` 時 `avg=None`、`display="無資料"`，不以 0 分代替。08:50 的開盤前更新會重讀一次，07:40 失敗而之後手動補跑也會被帶到。
+
+### 驗收標準
+
+| # | 標準 | 對應 |
+|---|------|------|
+| A1 | `published_after` 格式被伺服器按 UTC 解讀（回傳新聞的 `published_at` 都晚於該時間） | 實測紀錄 1 |
+| A2 | `page=2` 回不同的新聞，`meta.found` 與實際一致；否則修正分頁停止條件 | 實測紀錄 2 |
+| A3 | 免費方案每頁筆數確認，`PAGE_SIZE` 與實際一致 | 實測紀錄 3 |
+| A4 | TSM 的 entities 有 `symbol=TSM` 與數值 `sentiment_score` | 實測紀錄 4 |
+| A5 | 沒有新聞時程式得到 `no_data`，不是 error | 實測紀錄 5；`test_no_data_symbol_is_marked_not_zero` |
+| A6 | 402／429 內文被分類為 `quota_exhausted`／`rate_limited`，錯誤訊息不含金鑰 | 實測紀錄 6；`test_http_402_stops_and_redacts_key`、`test_http_429_stops` |
+| A7 | 多檔一次查與逐檔查的取捨有結論 | 實測紀錄 7 |
+| A8 | 分數範圍在 -1～1，正負判斷規則合理 | 實測紀錄 8 |
+| B1 | 有金鑰且開關開時排程有 `marketaux_sentiment`，時段在 08:00 之前；沒金鑰或關掉就沒有 | `test_scheduler_job_needs_token`、`test_scheduler_job_runs_before_overnight_brief`、`test_scheduler_time_settings_parse_from_strings` |
+| B2 | 排程呼叫遇額度／限流回 0（不被重試），一般錯誤仍回 1 | `test_scheduled_flag_does_not_fail_on_limits` |
+| B3 | 隔夜重點有 `us_sentiment`；`no_data`／`error` 顯示「無資料」、`avg=None`；沒檔為 `missing` | `tests/test_marketaux_wiring.py` 的 `test_us_sentiment_*`、`test_build_brief_*` |
+| B4 | 儀表板頁顯示情緒小表與「僅供參考、不進交易規則」說明 | 實測紀錄 9（Streamlit AppTest 冒煙） |
+| B5 | 實際跑一次收集（暫存 `--root`）寫出兩個檔，再產生隔夜重點能讀到 | 實測紀錄 10 |
+
+### 實測紀錄
+
+- 9（2026-11-24）：以 Streamlit `AppTest` 跑 `page_overnight_brief`，無例外；表格 TSM 顯示「+0.25（3 則：正 2／負 1）」、MU 顯示「無資料」，下方附說明。
+- 1～8、10：等使用者取得金鑰後補。

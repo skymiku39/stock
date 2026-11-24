@@ -395,6 +395,20 @@ class Scheduler:
                     window_start=start,
                     window_end=end,
                 ))
+        if (getattr(s, "scheduler_marketaux_enabled", False)
+                and str(getattr(s, "marketaux_api_token", "") or "").strip()):
+            # 個股隔夜情緒，排在 08:00 隔夜重點之前；額度或限流時不重試（--scheduled 回 0）。
+            jobs.append(Job(
+                name="marketaux_sentiment",
+                console_script="",
+                module="bot.free_sources.collect_marketaux",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--root", str(self.project_root), "--scheduled"],
+                run_once_per_day=True,
+                window_start=s.scheduler_marketaux_time,
+                window_end=s.scheduler_marketaux_end_time,
+            ))
         if getattr(s, "scheduler_company_interval_min", 0) > 0:
             jobs.append(Job(
                 name="company",
