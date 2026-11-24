@@ -43,16 +43,25 @@ def _key(item: dict) -> str:
 
 
 def merge_items(existing: Iterable[Any], new: Iterable[Any]) -> List[dict]:
-    """既有在前、新的在後；以 url（無 url 則 title）去重。"""
-    seen = set()
+    """既有在前、新的在後；以 url（無 url 則 title）去重，重複者的 us_tickers 併入保留的那則。"""
+    kept: Dict[str, dict] = {}
     out: List[dict] = []
     for it in list(existing) + list(new):
         if not isinstance(it, dict):
             continue
         k = _key(it)
-        if not k or k in seen:
+        if not k:
             continue
-        seen.add(k)
+        if k in kept:
+            first = kept[k]
+            tickers = list(first.get("us_tickers") or [])
+            for t in it.get("us_tickers") or []:
+                if t not in tickers:
+                    tickers.append(t)
+            first["us_tickers"] = tickers
+            continue
+        it = dict(it)
+        kept[k] = it
         out.append(it)
     return out
 

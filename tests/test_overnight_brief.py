@@ -210,7 +210,7 @@ def test_main_returns_2_on_error(tmp_path, monkeypatch, capsys):
         raise RuntimeError("x")
 
     monkeypatch.setattr(ob, "build_brief", boom)
-    assert ob.main(["--root", str(tmp_path), "--slot", "morning", "--no-notify"]) == 2
+    assert ob.main(["--root", str(tmp_path), "--slot", "morning", "--no-notify", "--no-collect"]) == 2
 
 
 def test_scheduler_has_overnight_jobs(tmp_path):
@@ -226,3 +226,180 @@ def test_scheduler_has_overnight_jobs(tmp_path):
     assert (a.window_start, a.window_end) == (dt.time(8, 0), dt.time(8, 49))
     assert (b.window_start, b.window_end) == (dt.time(8, 50), dt.time(10, 0))
     assert a.report_kind == "" and a.target_date_mode == ""
+
+
+# ---- 第三階段：API 新聞接線（docs/free-sources/finnhub.md B1～B11） ----
+
+SECRET = "SECRET-FINNHUB-KEY-123"
+
+
+def _api(title, ts, *, source="finnhub", sym="NVDA", url=None, tickers=None):
+    return {"title": title, "url": url or f"http://api/{title}", "desc": "", "summary": "",
+            "published_at": ts.astimezone(dt.timezone.utc).isoformat(), "source": "Reuters",
+            "feed": f"{source}:{sym}", "region": "us", "lang": "en",
+            "us_tickers": tickers if tickers is not None else [sym]}
+
+
+def _write_api(root: Path, source: str, day: str, items) -> Path:
+    path = root / "data" / "news" / f"api_{source}_{day}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(items), encoding="utf-8")
+    return path
+
+
+def test_b1_read_api_news_generic_and_tolerant(tmp_path):
+    _write_api(tmp_path, "finnhub", "2026-11-24", [_api("a", _t(24, 1)), "junk"])
+    _write_api(tmp_path, "massive", "2026-11-23", [_api("b", _t(23, 22), source="massive")])
+    _write_api(tmp_path, "marketaux", "2026-11-20", [_api("old", _t(20, 22))])  # 視窗外的日期
+    (tmp_path / "data" / "news" / "api_fmp_2026-11-24.json").write_text("{bad", encoding="utf-8")
+    _write_api(tmp_path, "x", "2026-11-24", {"not": "a list"})
+    _write_archive(tmp_path, "2026-11-24", [_item("rss", _t(24, 1))])
+    now = _t(24, 8)
+    rows, sources = ob.read_api_news(tmp_path, ob.window_start(now), now)
+    assert sorted(r["title"] for r in rows) == ["a", "b"]
+    assert sources["finnhub"] == {"files": ["api_finnhub_2026-11-24.json"], "items": 1}
+    assert sources["massive"]["items"] == 1
+    assert sources["fmp"]["items"] == 0 and sources["x"]["items"] == 0
+    assert "marketaux" not in sources and "rss" not in sources
+    assert ob.read_api_news(tmp_path / "nope", ob.window_start(now), now) == ([], {})
+
+
+def test_b2_api_merged_into_candidates_with_window_and_dedup(tmp_path):
+    _write_archive(tmp_path, "2026-11-24", [_item("Fed holds rates steady", _t(24, 3), url="http://same")])
+    _write_api(tmp_path, "finnhub", "2026-11-24", [
+        _api("Nvidia unveils new chip", _t(24, 2)),
+        _api("Fed holds rates steady dup", _t(24, 3), url="http://same"),   # 與 RSS 同 url
+        _api("Ancient news", _t(22, 10)),                                    # 視窗外
+    ])
+    b = _brief(tmp_path, _t(24, 8), notify=False)
+    titles = [c["title"] for c in b["news"]["candidates"]]
+    assert "Nvidia unveils new chip" in titles and "Ancient news" not in titles
+    assert "Fed holds rates steady" in titles and "Fed holds rates steady dup" not in titles
+    assert b["news"]["items_in_window"] == 2
+    assert b["news"]["rss_items_in_window"] == 1 and b["news"]["api_items_in_window"] == 1
+
+
+def test_b3_gaps_only_from_rss(tmp_path):
+    # RSS 只有 21 點一則，之後整晚沒有；API 每小時都有新聞也不能補掉缺口
+    _write_archive(tmp_path, "2026-11-23", [_item("early", _t(23, 21, 10))])
+    _write_api(tmp_path, "finnhub", "2026-11-24",
+               [_api(f"api {h}", _t(24, h, 5)) for h in range(0, 7)])
+    b = _brief(tmp_path, _t(24, 8), notify=False)
+    assert b["news"]["gaps"] and b["news"]["gaps"][0]["start"].startswith("2026-11-23T22:00")
+    assert b["news"]["api_items_in_window"] == 7
+
+
+def test_b4_api_sources_status(tmp_path):
+    _write_api(tmp_path, "finnhub", "2026-11-24", [_api("a", _t(24, 1)), _api("b", _t(24, 2))])
+    _write_api(tmp_path, "massive", "2026-11-24", [_api("c", _t(24, 1), source="massive")])
+    results = {"finnhub": {"status": "ok", "new_items": 2}, "marketaux": {"status": "skipped"}}
+    b = _brief(tmp_path, _t(24, 8), notify=False, collect_results=results)
+    src = b["news"]["api_sources"]
+    assert src["finnhub"] == {"items_in_window": 2, "files": ["api_finnhub_2026-11-24.json"],
+                              "collect": {"status": "ok", "new_items": 2}}
+    assert src["massive"]["items_in_window"] == 1 and src["massive"]["collect"] is None
+    assert src["marketaux"] == {"items_in_window": 0, "files": [], "collect": {"status": "skipped"}}
+    assert not any("新聞收集" in w for w in b["warnings"])
+
+
+def test_b5_candidate_us_tickers_union(tmp_path):
+    _write_api(tmp_path, "finnhub", "2026-11-24", [
+        _api("Nvidia AMD chip export curbs widen", _t(24, 1), tickers=["NVDA", "AMD"]),
+        _api("Nvidia AMD chip export curbs widen further", _t(24, 2), sym="TSM", tickers=["TSM"]),
+    ])
+    b = _brief(tmp_path, _t(24, 8), notify=False)
+    c = b["news"]["candidates"][0]
+    assert c["us_tickers"] == ["AMD", "NVDA", "TSM"]
+    assert c["feeds"] == ["finnhub:NVDA", "finnhub:TSM"]
+
+
+def test_b13_source_count_by_publisher_for_api(tmp_path):
+    same = [_api("Micron soars on record memory demand", _t(24, 1), sym="MU"),
+            _api("Micron soars on record memory demand again", _t(24, 2), sym="AMD")]
+    other = dict(_api("Micron soars on record memory demand today", _t(24, 3), sym="NVDA"),
+                 source="Yahoo")
+    _write_api(tmp_path, "finnhub", "2026-11-24", same + [other])
+    _write_archive(tmp_path, "2026-11-24",
+                   [_item("Micron soars on record memory demand rss", _t(24, 4), feed="rss1")])
+    b = _brief(tmp_path, _t(24, 8), notify=False)
+    c = b["news"]["candidates"][0]
+    assert len(c["feeds"]) == 4                  # 顯示仍列出所有 feed
+    assert c["source_count"] == 3                # Reuters、Yahoo、rss1
+    assert c["score"] == 2 * 3 + 1               # 有主題（半導體：Micron）、無台股代號
+
+
+def _fake_collect_writes(root, *, now):
+    _write_api(Path(root), "finnhub", now.date().isoformat(), [_api("Collected story", _t(24, 6))])
+    return {"status": "ok", "new_items": 1}
+
+
+def _patch_main(monkeypatch, tmp_path, collectors):
+    monkeypatch.setattr(ob, "API_NEWS_COLLECTORS", collectors)
+    monkeypatch.setattr(ob, "now_tw", lambda: _t(24, 8))
+    real = ob.build_brief
+
+    def wrapped(root, **kw):
+        return real(root, macro_loader=lambda: _snap(), **kw)
+
+    monkeypatch.setattr(ob, "build_brief", wrapped)
+
+
+def test_b6_main_collects_before_brief(tmp_path, monkeypatch, capsys):
+    _patch_main(monkeypatch, tmp_path, {"finnhub": _fake_collect_writes})
+    assert ob.main(["--root", str(tmp_path), "--slot", "morning", "--no-notify"]) == 0
+    brief = json.loads((tmp_path / "data" / "overnight_brief" / "latest.json").read_text(encoding="utf-8"))
+    assert [c["title"] for c in brief["news"]["candidates"]] == ["Collected story"]
+    assert brief["news"]["api_sources"]["finnhub"]["collect"] == {"status": "ok", "new_items": 1}
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["api_items_in_window"] == 1
+    assert printed["api_sources"] == {"finnhub": {"items_in_window": 1, "collect": "ok"}}
+
+
+def test_b7_collect_failures_only_warn(tmp_path, monkeypatch, capsys):
+    def boom(root, *, now):
+        raise RuntimeError(f"connect failed token={SECRET}")
+
+    collectors = {
+        "finnhub": boom,
+        "massive": lambda root, *, now: {"status": "error", "errors": {"news": "auth: 401"}},
+        "fmp": lambda root, *, now: {"status": "partial", "errors": {"NVDA": "x"}},
+        "marketaux": lambda root, *, now: {"status": "quota_exceeded", "errors": {"AAPL": "q"}},
+        "other": lambda root, *, now: {"status": "skipped"},
+    }
+    _patch_main(monkeypatch, tmp_path, collectors)
+    assert ob.main(["--root", str(tmp_path), "--slot", "morning", "--no-notify"]) == 0
+    text = (tmp_path / "data" / "overnight_brief" / "latest.json").read_text(encoding="utf-8")
+    brief = json.loads(text)
+    warns = [w for w in brief["warnings"] if "新聞收集" in w]
+    assert len(warns) == 4
+    assert any(w.startswith("finnhub 新聞收集失敗") for w in warns)
+    assert any(w.startswith("fmp 新聞收集部分失敗") for w in warns)
+    assert any(w.startswith("marketaux 新聞收集用量已達上限") for w in warns)
+    assert not any(w.startswith("other") for w in warns)
+    assert brief["news"]["api_sources"]["finnhub"]["collect"]["status"] == "failed"
+    # B11：金鑰不出現在 brief 與輸出
+    assert SECRET not in text and SECRET not in capsys.readouterr().out
+
+
+def test_b8_no_collect_skips_collectors(tmp_path, monkeypatch):
+    called = []
+    _patch_main(monkeypatch, tmp_path, {"finnhub": lambda root, *, now: called.append(1) or {}})
+    assert ob.main(["--root", str(tmp_path), "--slot", "preopen", "--no-collect"]) == 0
+    assert called == []
+    brief = json.loads((tmp_path / "data" / "overnight_brief" / "latest.json").read_text(encoding="utf-8"))
+    assert brief["news"]["api_sources"] == {}
+
+
+def test_b9_default_finnhub_collector_skips_without_key(tmp_path, monkeypatch):
+    from bot.free_sources import collect_finnhub as cf
+
+    assert ob.API_NEWS_COLLECTORS["finnhub"] == "bot.free_sources.collect_finnhub"
+
+    def no_net(*a, **k):
+        raise AssertionError("不應連網")
+
+    monkeypatch.setattr(cf.FinnhubClient, "_get", no_net)
+    monkeypatch.setattr("bot.config.Settings", lambda: SimpleNamespace(finnhub_api_key=""))
+    results = ob.run_api_collectors(tmp_path, _t(24, 8))
+    assert results == {"finnhub": {"status": "skipped"}}
+    assert not (tmp_path / "data").exists()
