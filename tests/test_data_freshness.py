@@ -162,3 +162,40 @@ def test_finmind_crosscheck_check_warns_outstanding(tmp_path):
                     outstanding=[{"symbol": "1514", "checked": "2026-11-23", "mismatch": 0, "db_missing": 6}])
     check = fresh._finmind_crosscheck(tmp_path, now)
     assert check["status"] == "warn" and "1514" in check["detail"] and check["extra"]["outstanding"] == 1
+
+
+def _etf_check(monkeypatch, holdings, now):
+    from bot import active_etf
+    monkeypatch.setattr(active_etf, "load_tracked_etfs", lambda r: [SimpleNamespace(symbol=s) for s in holdings])
+    monkeypatch.setattr(active_etf, "list_holdings_dates", lambda symbol, r: holdings[symbol])
+    return fresh._etf_holdings(None, now)
+
+
+def test_etf_holdings_compares_daily_etfs_with_peers(monkeypatch):
+    now = dt.datetime(2026, 11, 25, 21, tzinfo=TZ)                        # 週三 21 點，預期日 11-25
+    day = lambda d: dt.date(2026, 11, d)
+    holdings = {"E1": [day(25), day(24)], "E2": [day(25), day(24)],
+                "LATE": [day(23), day(20)],                              # 投信固定晚兩個交易日揭露
+                "M1": [dt.date(2026, 10, 31), dt.date(2026, 9, 30)]}     # 每月揭露
+    check = _etf_check(monkeypatch, holdings, now)
+    assert check["status"] == "ok" and "4/4" in check["detail"] and "2026-11-25" in check["detail"]
+    holdings["LATE"] = [day(20), day(19)]                                 # 落後參考日 3 個工作日
+    check = _etf_check(monkeypatch, holdings, now)
+    assert check["status"] == "warn" and "LATE（2026-11-20）" in check["detail"] and "M1" not in check["detail"]
+
+
+def test_etf_holdings_warns_when_every_daily_etf_stops(monkeypatch):
+    now = dt.datetime(2026, 11, 25, 21, tzinfo=TZ)
+    old = [dt.date(2026, 11, 20), dt.date(2026, 11, 19)]                  # 落後預期日 3 個工作日
+    check = _etf_check(monkeypatch, {"E1": old, "E2": old, "M1": [dt.date(2026, 10, 31), dt.date(2026, 9, 30)]}, now)
+    assert check["status"] == "fail" and "E1" in check["detail"] and "E2" in check["detail"]
+    assert "可能全部停更" in check["detail"] and "2026-11-20" in check["detail"] and "M1" not in check["detail"]
+
+
+def test_etf_holdings_monthly_rule_unchanged(monkeypatch):
+    now = dt.datetime(2026, 11, 25, 21, tzinfo=TZ)
+    daily = [dt.date(2026, 11, 25), dt.date(2026, 11, 24)]
+    ok = _etf_check(monkeypatch, {"E1": daily, "M1": [dt.date(2026, 10, 31), dt.date(2026, 9, 30)]}, now)
+    assert ok["status"] == "ok"
+    stale = _etf_check(monkeypatch, {"E1": daily, "M1": [dt.date(2026, 10, 1), dt.date(2026, 9, 1)]}, now)
+    assert stale["status"] == "warn" and "M1（2026-10-01）" in stale["detail"]

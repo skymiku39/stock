@@ -185,22 +185,43 @@ def _etf_holdings(root: Path, now: dt.datetime) -> Dict[str, Any]:
     from bot.active_etf import list_holdings_dates, load_tracked_etfs
     expected = expected_market_date(now, ready_hour=20)
     stale, missing, total = [], [], 0
+    daily: List[tuple] = []
     for etf in load_tracked_etfs(root):
         total += 1
         dates = list_holdings_dates(etf.symbol, root)
         if not dates:
             missing.append(etf.symbol)
-        else:
-            # 有些基金每月才揭露一次；用它自己最近兩期的間隔判斷，不拿每日揭露的標準去量。
-            monthly = len(dates) >= 2 and (dates[0] - dates[1]).days >= 20
-            if (weekday_lag(dates[0].isoformat(), expected) or 0) >= (30 if monthly else 3):
+            continue
+        # 有些基金每月才揭露一次；用它自己最近兩期的間隔判斷，不拿每日揭露的標準去量。
+        if len(dates) >= 2 and (dates[0] - dates[1]).days >= 20:
+            if (weekday_lag(dates[0].isoformat(), expected) or 0) >= 30:
                 stale.append(f"{etf.symbol}（{dates[0].isoformat()}）")
+        else:
+            daily.append((etf.symbol, dates[0]))
+    # 每日揭露的 ETF 和同期其他 ETF 比：有些投信（00986A、00997A、00402A）固定比同期晚兩個交易日揭露，
+    # 拿固定的預期日去量會天天誤報；落後同期最新 3 個工作日以上才算過期。
+    # 參考日（大家最新的那天）本身也落後預期日太多時，代表可能全部停更，改回用預期日判斷。
+    reference = max((d for _, d in daily), default=None)
+    reference_note = ""
+    if reference is not None:
+        ref_lag = weekday_lag(reference.isoformat(), expected) or 0
+        if ref_lag >= 3:
+            point, limit = expected, 3
+            reference_note = (f"；每日揭露的 ETF 最新也只到 {reference.isoformat()}，"
+                              f"落後 {ref_lag} 個工作日（預期 {expected.isoformat()}），可能全部停更")
+        else:
+            point, limit = reference, 3
+        stale.extend(f"{symbol}（{day.isoformat()}）" for symbol, day in daily
+                     if (weekday_lag(day.isoformat(), point) or 0) >= limit)
     bad = len(stale) + len(missing)
     detail = f"{total - bad}/{total} 檔的持股資料在預期的揭露週期內"
+    if reference is not None and not reference_note:
+        detail += f"（每日揭露的以同期最新 {reference.isoformat()} 為準）"
     if stale:
         detail += "；過期：" + "、".join(stale[:10]) + (" 等" if len(stale) > 10 else "")
     if missing:
         detail += "；沒有資料：" + "、".join(missing[:10])
+    detail += reference_note          # 參考日停更時，參考日那檔本身也落後 ≥3 天，必定列入過期
     return _check("ETF 持股", OK if not bad else FAIL if total and bad / total > 0.5 else WARN, detail)
 
 
