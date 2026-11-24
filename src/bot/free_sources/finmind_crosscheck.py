@@ -41,6 +41,12 @@ EPS_REL_TOL = 0.005
 MARGIN_ABS_TOL = 0.05        # 利潤率：0.05 個百分點
 
 MATCH, MISMATCH, DB_MISSING, SOURCE_MISSING = "match", "mismatch", "db_missing", "source_missing"
+# 不可比：累計 EPS 不一致但營收、營益率都一致（推測股數變動）；不適用：金融業資料庫刻意不存營收（見文件）。
+# 兩者都不算不一致、也不算缺資料。
+NOT_COMPARABLE, NOT_APPLICABLE = "not_comparable", "not_applicable"
+STATUSES = (MATCH, MISMATCH, DB_MISSING, SOURCE_MISSING, NOT_COMPARABLE, NOT_APPLICABLE)
+SHARE_CHANGE_NOTE = "營收與營業利益一致，EPS 差異推測為股數變動"
+FINANCIAL_INDUSTRY_KEYWORDS = ("金融", "保險")   # stock_info.industry，例：金融保險業（company_info 產業別 17）
 
 REQUESTS_PER_SYMBOL = 2
 DEFAULT_MAX_REQUESTS = 300   # 每次執行上限；免費 600／小時，自訂計數器 500／小時
@@ -119,11 +125,26 @@ def _quarter_label(date: str) -> Optional[tuple]:
     return (year, q) if q else None
 
 
-def compare_statements(symbol: str, rows: List[dict], db_rows: Dict[str, dict]) -> List[dict]:
-    """FinMind 單季損益表 -> 年初累計，對資料庫 quarterly_report（累計、營收千元）。
+def is_financial(industry: Optional[str]) -> bool:
+    """stock_info.industry 是否屬金融、證券、金控、保險（官方產業別「金融保險業」）。"""
+    text = str(industry or "")
+    return any(k in text for k in FINANCIAL_INDUSTRY_KEYWORDS)
 
-    比對 revenue、eps、op_margin（OperatingIncome / Revenue）。累計所需的季別 FinMind 缺任何一季
-    就標 source_missing（無法驗證）。
+
+def _special(item: dict, status: str, note: str) -> dict:
+    item.update(status=status, diff=None, note=note)
+    return item
+
+
+def compare_statements(symbol: str, rows: List[dict], db_rows: Dict[str, dict],
+                       financial: bool = False) -> List[dict]:
+    """FinMind 單季損益表對資料庫 quarterly_report（累計、營收千元）。
+
+    revenue、eps、op_margin（OperatingIncome / Revenue）：FinMind 各季加總成年初累計再比；累計所需的季別
+    FinMind 缺任何一季就標 source_missing（無法驗證）。
+    EPS 超出容許誤差、但同期營收與營益率都 match → not_comparable（股數變動時各季 EPS 加總本來就
+    不等於累計 EPS）；營收或營益率任一不是 match（含不適用、缺資料）→ 維持 mismatch。
+    financial（金融保險業）且資料庫營收為空時，revenue、op_margin 標 not_applicable。
     """
     table: Dict[tuple, Dict[str, float]] = {}
     for r in rows:
@@ -145,18 +166,24 @@ def compare_statements(symbol: str, rows: List[dict], db_rows: Dict[str, dict]) 
 
         db = db_rows.get(period)
         rev, eps, op = ytd("Revenue"), ytd("EPS"), ytd("OperatingIncome")
-        out.append(_item("quarterly_report", symbol, period, "revenue",
-                         db and db["revenue"], None if rev is None else rev / 1000.0, 0.0, "千元(累計)", REVENUE_REL_TOL))
-        out.append(_item("quarterly_report", symbol, period, "eps",
-                         db and db["eps"], eps, EPS_ABS_TOL, "元(累計)", EPS_REL_TOL))
         margin = op / rev * 100 if (op is not None and rev) else None
-        out.append(_item("quarterly_report", symbol, period, "op_margin",
-                         db and db["op_margin"], margin, MARGIN_ABS_TOL, "%(累計)"))
+        rev_item = _item("quarterly_report", symbol, period, "revenue",
+                         db and db.get("revenue"), None if rev is None else rev / 1000.0, 0.0, "千元(累計)", REVENUE_REL_TOL)
+        op_item = _item("quarterly_report", symbol, period, "op_margin",
+                        db and db.get("op_margin"), margin, MARGIN_ABS_TOL, "%(累計)")
+        if financial and not (db and db.get("revenue")):
+            note = "金融保險業：資料庫刻意不存營收與三率"
+            rev_item, op_item = _special(rev_item, NOT_APPLICABLE, note), _special(op_item, NOT_APPLICABLE, note)
+        eps_item = _item("quarterly_report", symbol, period, "eps",
+                         db and db.get("eps"), eps, EPS_ABS_TOL, "元(累計)", EPS_REL_TOL)
+        if eps_item["status"] == MISMATCH and rev_item["status"] == op_item["status"] == MATCH:
+            eps_item.update(status=NOT_COMPARABLE, note=SHARE_CHANGE_NOTE)   # 保留 diff 供查
+        out.extend((rev_item, eps_item, op_item))
     return out
 
 
 def summarize(items: List[dict]) -> Dict[str, int]:
-    s = {MATCH: 0, MISMATCH: 0, DB_MISSING: 0, SOURCE_MISSING: 0}
+    s = {k: 0 for k in STATUSES}
     for it in items:
         s[it["status"]] += 1
     s["total"] = len(items)
@@ -335,9 +362,12 @@ def run_crosscheck(
             db_rev = {k.replace("/", "-")[:7]: v for k, v in db_rev.items()}
             db_q = {str(r[0]): {"eps": _num(r[1]), "revenue": _num(r[2]), "op_margin": _num(r[3])}
                     for r in _db_rows(con, "SELECT period, eps, revenue, op_margin FROM quarterly_report WHERE symbol=?", (sym,))}
+            industry = _db_rows(con, "SELECT industry FROM stock_info WHERE symbol=?", (sym,))
+            financial = is_financial(industry[0][0] if industry else "")
             plan_steps = (
                 ("revenue", REVENUE_DATASET, start_rev, lambda rows: compare_revenue(sym, rows, db_rev)),
-                ("statements", STATEMENT_DATASET, start_stmt, lambda rows: compare_statements(sym, rows, db_q)),
+                ("statements", STATEMENT_DATASET, start_stmt,
+                 lambda rows: compare_statements(sym, rows, db_q, financial)),
             )
             sym_items: List[dict] = []
             ok_steps = 0

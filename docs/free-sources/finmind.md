@@ -27,7 +27,9 @@
 |---|---|
 | 單位 | 資料庫營收為千元，FinMind 為元：FinMind 除以 1000 再比 |
 | 月份對齊 | FinMind `date` 是營收月份的下個月 1 日，改用 `revenue_year`、`revenue_month` 組成 `YYYY-MM` 對資料庫 `year_month` |
-| 季別對齊 | 資料庫 `quarterly_report` 存「年初累計」（Q3 = Q1+Q2+Q3），FinMind 為單季；FinMind 的 Q1..Qn 加總後再比。累計所需任一季缺資料 → `source_missing`（無法驗證） |
+| 季別對齊 | 資料庫 `quarterly_report` 存「年初累計」（Q3 = Q1+Q2+Q3），FinMind 為單季。營收、EPS、營業利益率都是 FinMind 的 Q1..Qn 加總後比累計，累計所需任一季缺資料 → `source_missing`（無法驗證） |
+| EPS 不可比 | 股數變動（分割、增資、可轉債、配股、面額變更）時，各季 EPS 加總本來就不等於累計 EPS；改比單季（累計相減）也一樣對不上（2026-11-25 用 11-24 報告驗證過）。所以累計 EPS 超出容許誤差、但同期營收與營業利益率都是 `match` → `not_comparable`（不可比，保留 diff，note「營收與營業利益一致，EPS 差異推測為股數變動」），不算不一致也不算缺資料；營收或營業利益率任一不是 match（含不適用、缺資料）→ 維持 `mismatch` |
+| 金融保險業 | `stock_info.industry` 含「金融」或「保險」，且資料庫該季營收為空或 0（資料庫刻意不存金融、證券、金控業營收）→ 營收與營業利益率標 `not_applicable`（不適用，附 `note`），不算 `db_missing`；EPS 照常比，不一致時無法用營收佐證，仍是 `mismatch` |
 | 季別代碼 | FinMind `date` 月份 3/6/9/12 對應 `YYYYQ1..Q4` |
 | 營收容許誤差 | 相對 0.1% |
 | EPS 容許誤差 | 絕對 0.05 元，或相對 0.5%，取較大者（累計加權股數造成的小差異） |
@@ -36,7 +38,7 @@
 | FinMind 缺資料 | `source_missing`，不算不一致 |
 | 整體狀態 | `ok`（全部請求成功）、`partial`、`error`、`quota_exceeded`、`skipped`（沒有 `FINMIND_TOKEN`）、`dry_run` |
 
-報告欄位：`source`、`date`、`generated_at`、`symbols`、`requests`、`summary`（match / mismatch / db_missing / source_missing / total）、`inconsistent`、`has_db_missing`、`errors`、`items[]`（symbol、period、field、db、finmind、diff、unit、status）。
+報告欄位：`source`、`date`、`generated_at`、`symbols`、`requests`、`summary`（match / mismatch / db_missing / source_missing / not_comparable / not_applicable / total）、`inconsistent`、`has_db_missing`、`errors`、`items[]`（symbol、period、field、db、finmind、diff、unit、status；不可比、不適用時另有 note）。新鮮度檢查只看 mismatch 與 db_missing，兩個新狀態不會觸發警告。
 
 資料新鮮度檢查（「FinMind 交叉核對」）：沒有報告 → 資訊；有 mismatch 或 db_missing → 警告；報告超過 3 個日曆日 → 警告；報告狀態為 quota_exceeded/error/partial → 警告；skipped → 資訊；其餘正常。
 
@@ -46,6 +48,8 @@
 2. 單位、月份、累計季別換算正確，一致時全部 match：`test_all_match_and_report_written`
 3. 超出容許誤差 → mismatch，容許誤差內 → match：`test_mismatch_and_tolerance`
 4. 資料庫缺期或為 0 → db_missing；FinMind 缺季 → source_missing：`test_db_missing_and_source_missing`
+4a. 營收、營益率一致但 EPS 不一致 → not_comparable；營收或營業利益不一致或缺 → mismatch；Q1 同規則：`test_eps_share_count_change_not_comparable`、`test_eps_q1_cumulative_equals_single_quarter`
+4b. 金融保險業資料庫營收為空 → 營收、營益率 not_applicable，EPS 照比（不一致仍 mismatch），新鮮度正常：`test_financial_revenue_not_applicable`
 5. QuotaExceeded 或 402 → 停止後續請求並回報 quota_exceeded，仍寫報告：`test_quota_exceeded_stops`
 6. 單一請求失敗 → partial，不中斷其他：`test_source_error_is_partial_and_redacted`
 7. 報告原子寫入於 `data/reports/finmind_crosscheck_<台灣日期>.json` 並標示來源 FinMind：`test_all_match_and_report_written`

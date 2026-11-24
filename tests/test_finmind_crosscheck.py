@@ -82,14 +82,15 @@ def test_all_match_and_report_written(tmp_path):
 
 def test_mismatch_and_tolerance(tmp_path):
     q = [("2330", "2026Q1", 1.04, 1000.5, 30.0),      # EPS 差 0.04、營收差 0.05% 都在容許內
-         ("2330", "2026Q2", 3.2, 3000.0, 36.67)]      # EPS 差 0.2 超出
+         ("2330", "2026Q2", 3.2, 3000.0, 38.0)]       # EPS 差 0.2 超出；營益率也不一致 → EPS 算 mismatch
     rev = [("2330", "2026-08", 500.0), ("2330", "2026-09", 640.0), ("2330", "2026-10", 700.0)]
     db = make_db(tmp_path / "s.db", rev, q)
     rep = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["2330"], db_path=db)
     st = statuses(rep)
     assert st[("2026Q1", "eps")] == "match" and st[("2026Q1", "revenue")] == "match"
     assert st[("2026Q2", "eps")] == "mismatch" and st[("2026-09", "revenue")] == "mismatch"
-    assert rep["summary"]["mismatch"] == 2 and rep["inconsistent"] is True
+    assert st[("2026Q2", "op_margin")] == "mismatch"
+    assert rep["summary"]["mismatch"] == 3 and rep["inconsistent"] is True
 
 
 def test_db_missing_and_source_missing(tmp_path):
@@ -103,6 +104,67 @@ def test_db_missing_and_source_missing(tmp_path):
     rep2 = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["2330"], db_path=db)
     assert statuses(rep2)[("2026Q1", "eps")] == "db_missing"      # 0 視為缺
     assert rep2["has_db_missing"] is True and rep2["inconsistent"] is False
+
+
+def _q(period, field="eps"):
+    return lambda items: next(i for i in items if i["period"] == period and i["field"] == field)
+
+
+def test_eps_share_count_change_not_comparable():
+    # 股數變動：累計 EPS 對不上，但同期營收、營益率都一致 → not_comparable（保留 diff 與 note）
+    db = {"2026Q1": {"eps": 1.0, "revenue": 1000.0, "op_margin": 30.0},
+          "2026Q2": {"eps": 3.5, "revenue": 3000.0, "op_margin": 36.67}}
+    items = fc.compare_statements("2327", stmt_rows(), db)
+    q2 = _q("2026Q2")(items)
+    assert q2["status"] == "not_comparable" and q2["diff"] == 0.5 and "股數變動" in q2["note"]
+    assert _q("2026Q2", "revenue")(items)["status"] == _q("2026Q2", "op_margin")(items)["status"] == "match"
+    s = fc.summarize(items)
+    assert s["not_comparable"] == 1 and s["mismatch"] == 0 and s["db_missing"] == 0
+    # 營收也不一致 → 無法佐證，維持 mismatch
+    db["2026Q2"]["revenue"] = 3100.0
+    items = fc.compare_statements("2327", stmt_rows(), db)
+    assert _q("2026Q2")(items)["status"] == "mismatch" and "note" not in _q("2026Q2")(items)
+    # 營業利益缺（FinMind 沒有 OperatingIncome）→ 也維持 mismatch
+    db["2026Q2"]["revenue"] = 3000.0
+    no_op = [r for r in stmt_rows() if r["type"] != "OperatingIncome"]
+    assert _q("2026Q2")(fc.compare_statements("2327", no_op, db))["status"] == "mismatch"
+
+
+def test_eps_q1_cumulative_equals_single_quarter():
+    # Q1 的累計就是單季：一致 → match；只有 EPS 差（營收、營益率一致）→ not_comparable
+    db = {"2026Q1": {"eps": 1.0, "revenue": 1000.0, "op_margin": 30.0}}
+    q1 = [r for r in stmt_rows() if r["date"] == "2026-03-31"]
+    assert _q("2026Q1")(fc.compare_statements("2327", q1, db))["status"] == "match"
+    db["2026Q1"]["eps"] = 1.3
+    assert _q("2026Q1")(fc.compare_statements("2327", q1, db))["status"] == "not_comparable"
+
+
+def test_financial_revenue_not_applicable(tmp_path):
+    # 金融保險業：資料庫營收、營益率為 0／空 → 不適用；EPS 照常比累計
+    db = make_db(tmp_path / "s.db", GOOD_REV, [("2330", "2026Q1", 1.0, 0.0, 0.0), ("2330", "2026Q2", 3.0, 0.0, 0.0)])
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE stock_info (symbol TEXT, industry TEXT)")
+    con.execute("INSERT INTO stock_info VALUES ('2330', '金融保險業')")
+    con.commit()
+    con.close()
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["2330"], db_path=db)
+    st = statuses(rep, "quarterly_report")
+    assert st[("2026Q2", "revenue")] == st[("2026Q2", "op_margin")] == "not_applicable"
+    assert st[("2026Q1", "revenue")] == "not_applicable"
+    assert st[("2026Q1", "eps")] == st[("2026Q2", "eps")] == "match"
+    assert rep["summary"]["db_missing"] == 0 and rep["summary"]["not_applicable"] == 4
+    assert rep["has_db_missing"] is False and rep["inconsistent"] is False
+    from bot import data_freshness as fresh
+    assert fresh._finmind_crosscheck(tmp_path, NOW)["status"] == fresh.OK
+    # 非金融業同樣的空營收仍是 db_missing
+    items = fc.compare_statements("2330", stmt_rows(), {"2026Q1": {"eps": 1.0, "revenue": None, "op_margin": None}})
+    assert {i["field"]: i["status"] for i in items if i["period"] == "2026Q1"}["revenue"] == "db_missing"
+    assert fc.is_financial("金融保險業") and not fc.is_financial("半導體業") and not fc.is_financial(None)
+    # 金融業營收不適用時無法佐證 → EPS 不一致仍是 mismatch
+    items = fc.compare_statements("2880", stmt_rows(), {"2026Q2": {"eps": 3.5, "revenue": None, "op_margin": None}},
+                                  financial=True)
+    assert _q("2026Q2", "revenue")(items)["status"] == "not_applicable"
+    assert _q("2026Q2")(items)["status"] == "mismatch"
 
 
 def test_skipped_without_token(tmp_path):
