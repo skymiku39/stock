@@ -352,7 +352,7 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
     - Alpha Vantage：**不接**（新聞情緒是付費端點）。
     - 合併衝突只在 `scheduler.py`、`config.py`、兩個排程測試，都是各家新增的排程區塊，兩邊保留。
 - **2026-11-24 使用者對三項待決事項的決定**：
-  - Telegram：啟用，並把美股隔夜重點也接上（morning 那次與本機通知同時送，兩通道互不影響；任一送出就記 `notified_at`）。測試指令 `python -m bot.notifier --test "訊息"`。待使用者用 @BotFather 建 bot，把 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` 貼進 `.env` 後送測試訊息。
+  - Telegram：啟用，並把美股隔夜重點也接上（morning 那次與本機通知同時送，兩通道互不影響；任一送出就記 `notified_at`）。測試指令 `python -m bot.notifier --test "訊息"`。11-24 16:35 已設定並送出測試訊息成功（bot `@skymiku_stocklab_bot`，在使用者 Telegram 網頁版的帳號 2 建立）。注意：16:00 前後這台電腦呼叫 bot API 一律回 429（兩個不同的 bot 都一樣，Chrome 以外沒有程式在連 Telegram），約半小時後自行解除；若之後再遇到，Telegram 失敗不影響本機通知與排程。
   - 情緒賣出：維持停用（`SMILE_MOOD_SELL_ENABLED=false`、門檻不變），先每天記錄分數，累積幾週後用實際分布定門檻。新增 `bot.smile_mood_log`：平日 09:30–10:00 與 13:00–13:25 各記一次到 `data/smile_mood/daily.jsonl`，`--summary` 看分位數與各 REQUIRE 下會觸發幾天。為什麼：門檻全是暫定值、沒有回測或觸發紀錄，11-18 才開始存新聞。
   - #38：不做真實委託驗收。使用者說明：本專案之後會用來送委託，但目前用提醒的方式假裝買進賣出，以實際資料作參考（即現行盯盤提醒與模擬盤）。
   - 11-24 情緒紀錄實跑時 0050 漲跌幅 +10.0%：已查證是真的（TWSE MIS 0050 開高低都 95.7、昨收 87；2330、1514 同樣鎖漲停，富果也確認 2330 鎖漲停），不是解析錯誤。
