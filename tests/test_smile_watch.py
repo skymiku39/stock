@@ -124,3 +124,16 @@ def test_repo_watch_list_is_valid():
     from bot.smile_watch import load_targets
     targets = load_targets(Path(__file__).resolve().parents[1] / "config" / "smile_watch.json")
     assert all(t.reference > 0 for t in targets)
+
+
+def test_status_file_and_alert_record_source(tmp_path):
+    eng = engine()
+    watcher = SmileWatcher(tmp_path, None)
+    status = evaluate(eng, 100.0, TS)
+    assert status.price_source == "primary"
+    assert "報價來源" not in format_alert(status, "breakeven")  # 主來源：提醒文字不變
+    status.price_source, status.price_note = "fugle", "鎖漲停、最後成交價 100、時間 11:01:16"
+    watcher.handle(status)
+    saved = json.loads((tmp_path / "status-1514.json").read_text(encoding="utf-8"))
+    assert saved["price_source"] == "fugle" and "鎖漲停" in saved["price_note"]
+    assert "報價來源：fugle" in format_alert(status, "breakeven")

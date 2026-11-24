@@ -35,6 +35,8 @@ SIGNAL_LABELS = {
     "add_buy": "跌幅已達加碼階梯",
 }
 USABLE_PRICE_BASIS = ("last_trade", "previous_trade", "bid_ask_mid")
+PRIMARY_SOURCE = "primary"
+FUGLE_SOURCE = "fugle"
 
 
 @dataclass
@@ -62,6 +64,8 @@ class WatchStatus:
     tiers_crossed: int
     add_room_lots: int
     signals: list = field(default_factory=list)
+    price_source: str = PRIMARY_SOURCE  # 報價來源：primary（主來源）或 fugle（備援）
+    price_note: str = ""  # 備援報價的說明，例如「鎖漲停、最後成交價 X、時間 T」
 
 
 def parse_holding(symbol: str, text: str) -> Holding:
@@ -142,6 +146,8 @@ def format_alert(status: WatchStatus, signal: str) -> str:
         lines.append(f"單檔停損價約 {status.stop_price:.2f}")
     if signal == "add_buy":
         lines.append(f"已跌破 {status.tiers_crossed} 階，距單檔上限還有 {status.add_room_lots} 張")
+    if status.price_source != PRIMARY_SOURCE:
+        lines.append(f"報價來源：{status.price_source}（備援）｜{status.price_note}")
     lines.append("只是規則提醒，程式不會下單。")
     return "\n".join(lines)
 
@@ -335,6 +341,43 @@ def _usable_price(quote: Optional[dict], today: str) -> Optional[float]:
     return float(quote["price"])
 
 
+def build_fugle_client(settings):
+    """有富果金鑰才建立 client；沒有（或空白）回 None，之後完全不查。"""
+    key = (getattr(settings, "fugle_api_key", "") or "").strip()
+    if not key:
+        return None
+    from bot.free_sources.fugle import FugleClient
+    return FugleClient(key)
+
+
+def resolve_price(symbol: str, quote: Optional[dict], today: dt.date, once: bool = False,
+                  fugle=None, logger=None) -> Optional[tuple]:
+    """回傳 (價格, 來源, 說明)；主來源優先，只有它拿不到當日報價才查富果備援。
+
+    富果出錯（額度、網路、金鑰）一律只記警告並回 None，不影響盯盤迴圈。
+    """
+    if not once:
+        price = _usable_price(quote, today.isoformat())
+    else:
+        price = float(quote["price"]) if quote and quote.get("price") is not None else None
+    if price is not None:
+        return price, PRIMARY_SOURCE, ""
+    if fugle is None:
+        return None
+    from bot.free_sources.base import SourceError
+    from bot.free_sources.fugle import describe_quote
+    from bot.free_sources.quota import QuotaExceeded
+    try:
+        got = describe_quote(fugle.intraday_quote(symbol), today)
+    except (SourceError, QuotaExceeded) as exc:
+        if logger:
+            logger.warning("%s 富果備援查詢失敗：%s", symbol, exc)
+        return None
+    if got is None:
+        return None
+    return got["price"], FUGLE_SOURCE, got["note"]
+
+
 def main(argv=None) -> int:
     configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="實際持股的微笑盯盤（只提醒、不下單）")
@@ -420,6 +463,9 @@ def main(argv=None) -> int:
     logger.info("Telegram %s", "已啟用" if notifier.enabled else "未設定")
     logger.info("本機通知 %s", f"已啟用（{local.mode}）" if local.enabled else "已停用")
 
+    fugle = build_fugle_client(base_settings)
+    logger.info("富果報價備援 %s", "已啟用" if fugle else "未設定金鑰，不啟用")
+    last_source: dict = {}
     started = refreshed = time.monotonic()
     last_logged = float("-inf")
     while True:
@@ -449,18 +495,24 @@ def main(argv=None) -> int:
             log_now = args.once or time.monotonic() - last_logged >= 300
             for symbol, engine in engines.items():
                 quote = quotes.get(symbol)
-                price = _usable_price(quote, now.date().isoformat()) if not args.once else (
-                    float(quote["price"]) if quote and quote.get("price") is not None else None)
-                if price is None:
+                resolved = resolve_price(symbol, quote, now.date(), args.once, fugle, logger)
+                if resolved is None:
                     logger.info("%s 沒有可用的當日報價，略過這一輪", symbol)
                     continue
+                price, price_source, price_note = resolved
                 status = evaluate(engine, price, now.isoformat(timespec="seconds"))
+                status.price_source, status.price_note = price_source, price_note
                 watcher.handle(status)
+                if price_source != last_source.get(symbol):
+                    logger.info("%s 報價來源改為 %s %s", symbol, price_source, price_note)
+                last_source[symbol] = price_source
                 if log_now:
-                    logger.info("%s 現價 %.2f｜淨損益 %s 元（%+.1f%%）｜兩平 %.2f｜停損 %s｜訊號 %s",
+                    logger.info("%s 現價 %.2f｜淨損益 %s 元（%+.1f%%）｜兩平 %.2f｜停損 %s｜訊號 %s"
+                                "｜來源 %s%s",
                                 symbol, price, f"{status.pnl_twd:,.0f}", status.pnl_pct,
                                 status.breakeven_price, status.stop_price,
-                                status.signals or "無")
+                                status.signals or "無", price_source,
+                                f"（{price_note}）" if price_note else "")
             if log_now:
                 last_logged = time.monotonic()
         if args.once:
