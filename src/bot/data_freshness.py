@@ -252,6 +252,11 @@ def _finmind_crosscheck(root: Path, now: dt.datetime) -> Dict[str, Any]:
         problems.append(f"{mismatch} 項與資料庫不一致（{'、'.join(bad[:5])}{' 等' if len(bad) > 5 else ''}）")
     if missing:
         problems.append(f"{missing} 項資料庫缺資料")
+    outstanding = [o for o in report.get("outstanding") or [] if isinstance(o, dict)]
+    if outstanding:
+        names = [str(o.get("symbol")) for o in outstanding]
+        problems.append(f"另有 {len(names)} 檔先前核對仍有問題（{'、'.join(names[:5])}{' 等' if len(names) > 5 else ''}）")
+        extra["outstanding"] = len(names)
     if age is None or age > FINMIND_REPORT_STALE_DAYS:
         problems.append(f"報告已 {age if age is not None else '?'} 天沒更新")
     head = (f"{day}（來源 FinMind）核對 {summary.get('total', 0)} 項，一致 {summary.get('match', 0)} 項")

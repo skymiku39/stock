@@ -154,3 +154,11 @@ def test_finmind_crosscheck_check_does_not_change_overall_without_report(tmp_pat
     monkeypatch.setattr(active_etf, "load_active_etfs", lambda r: [])
     checks = _by_name(fresh.check_data_freshness(root, settings=SimpleNamespace(symbols=["2330"]), now=now))
     assert checks["FinMind 交叉核對"]["status"] == "info"
+
+
+def test_finmind_crosscheck_check_warns_outstanding(tmp_path):
+    now = dt.datetime(2026, 11, 24, 22, tzinfo=TZ)
+    _finmind_report(tmp_path, "2026-11-24",
+                    outstanding=[{"symbol": "1514", "checked": "2026-11-23", "mismatch": 0, "db_missing": 6}])
+    check = fresh._finmind_crosscheck(tmp_path, now)
+    assert check["status"] == "warn" and "1514" in check["detail"] and check["extra"]["outstanding"] == 1

@@ -327,3 +327,15 @@ def test_probe_error_classified(tmp_path):
     sess = FakeSession(FakeResp(None, 429, text="slow down"))
     res = run_probe(SimpleNamespace(finnhub_api_key=KEY), sources=["finnhub"], session=sess, quota_dir=tmp_path)
     assert res[0]["status"] == "error" and res[0]["error"] == "rate_limited" and res[0]["http_status"] == 429
+
+
+def test_quota_remaining(tmp_path):
+    clock = [dt.datetime(2026, 11, 24, 21, 0, tzinfo=TAIPEI)]
+    q = QuotaTracker("x", per_hour=3, daily_limit=10, directory=tmp_path, now=lambda: clock[0])
+    assert q.remaining() == 3
+    q.consume()
+    q.consume()
+    assert q.remaining() == 1
+    clock[0] += dt.timedelta(hours=1, seconds=1)               # 舊的請求出了小時視窗
+    assert q.remaining() == 3
+    assert QuotaTracker("y", directory=tmp_path).remaining() is None

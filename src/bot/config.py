@@ -75,6 +75,8 @@ class Settings(BaseSettings):
         "scheduler_overnight_brief_end_time",
         "scheduler_overnight_brief_update_time",
         "scheduler_overnight_brief_update_end_time",
+        "scheduler_finmind_crosscheck_time",
+        "scheduler_finmind_crosscheck_end_time",
         mode="before",
     )
     @classmethod
@@ -387,6 +389,9 @@ class Settings(BaseSettings):
     massive_api_key: str = ""
     marketaux_api_token: str = ""
     alphavantage_api_key: str = ""
+    # FinMind 交叉核對每次最多送幾次請求（每檔 2 次；免費 600／小時）、每檔多久重查一次
+    finmind_crosscheck_max_requests: int = 300
+    finmind_crosscheck_recheck_days: int = 7
 
     # Dashboard 單次背景任務期限，逾時終止工作程序，不自動重試。
     dashboard_task_timeout_seconds: int = Field(default=3600, ge=1)
@@ -438,6 +443,11 @@ class Settings(BaseSettings):
     scheduler_overnight_brief_end_time: datetime.time = datetime.time(8, 49)
     scheduler_overnight_brief_update_time: datetime.time = datetime.time(8, 50)
     scheduler_overnight_brief_update_end_time: datetime.time = datetime.time(10, 0)
+    # FinMind 交叉核對（月營收、損益表 vs. 資料庫）：平日晚上一次，等官方與 FinMind 都更新完；
+    # 沒有 FINMIND_TOKEN 時程式自己略過。分批上限見 finmind_crosscheck_max_requests。
+    scheduler_finmind_crosscheck_enabled: bool = True
+    scheduler_finmind_crosscheck_time: datetime.time = datetime.time(21, 0)
+    scheduler_finmind_crosscheck_end_time: datetime.time = datetime.time(23, 30)
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
     scheduler_market_hours_only: bool = True
     scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪

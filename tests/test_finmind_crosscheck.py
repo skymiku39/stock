@@ -144,7 +144,8 @@ def test_source_error_is_partial_and_redacted(tmp_path):
     assert "SECRET123" not in json.dumps(rep) and "2330:statements" in rep["errors"]
 
 
-def test_main_dry_run_and_default_symbols(tmp_path, capsys):
+def test_main_dry_run_and_default_symbols(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(fc, "_tracked_symbols", lambda root, settings: [])
     (tmp_path / "data").mkdir()
     (tmp_path / "data/held_symbols_seen.json").write_text(
         json.dumps({"symbols": {"1514": {"first_seen": "2026-11-20"}}}), encoding="utf-8")
@@ -154,3 +155,126 @@ def test_main_dry_run_and_default_symbols(tmp_path, capsys):
     assert fc.main(["--root", str(tmp_path), "--symbols", "2330, 2317", "--dry-run"]) == 0
     assert json.loads(capsys.readouterr().out)["symbols"] == ["2330", "2317"]
     assert not (tmp_path / "data/reports").exists()
+
+
+# ---------------- 第三階段：分批與排程（docs/free-sources/finmind.md 3.x） ----------------
+D = NOW.date()
+
+
+def _st(days_ago, fingerprint="fp", **kw):
+    return {"checked": (D - dt.timedelta(days=days_ago)).isoformat(), "fingerprint": fingerprint, **kw}
+
+
+def test_select_batch_priority_and_not_due():
+    scope = ["1514", "1101", "1102", "1103", "1104", "1105"]
+    state = {
+        "1101": _st(1, "old"),          # 指紋變了 → 2
+        "1102": _st(8),                 # 超過 7 天 → 3
+        "1103": _st(2),                 # 未到期 → 不查
+        "1104": _st(0, "old"),          # 今天查過 → 不查（即使指紋變了）
+        "1514": _st(1),                 # 持股 → 0（每天）
+    }                                   # 1105 從沒查過 → 1
+    fps = {s: "fp" for s in scope}
+    plan = fc.select_batch(scope, ["1514"], state, fps, D, max_symbols=10)
+    assert plan["selected"] == ["1514", "1105", "1101", "1102"]
+    assert set(plan["not_due"]) == {"1103", "1104"} and plan["deferred"] == []
+    # 同優先序內，上次核對越早越先
+    plan = fc.select_batch(["1201", "1202"], [], {"1201": _st(9), "1202": _st(20)},
+                           {"1201": "fp", "1202": "fp"}, D, max_symbols=1)
+    assert plan["selected"] == ["1202"] and plan["deferred"] == ["1201"]
+
+
+def _scope(monkeypatch, held, tracked):
+    monkeypatch.setattr(fc, "default_symbols", lambda root: list(held))
+    monkeypatch.setattr(fc, "_tracked_symbols", lambda root, settings: list(tracked))
+
+
+class QuotaLeft:
+    def __init__(self, left):
+        self.left = left
+
+    def remaining(self):
+        return self.left
+
+
+def test_batch_respects_budget_and_quota_remaining(tmp_path, monkeypatch):
+    _scope(monkeypatch, ["2330"], ["1101", "1102", "1103", "1104"])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    client = FakeClient()
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=client, db_path=db, max_requests=7)
+    assert rep["requests"] == 6 == len(client.calls)          # 7 // 2 = 3 檔
+    assert rep["symbols"] == ["2330", "1101", "1102"]
+    assert rep["batch"]["deferred"] == ["1103", "1104"] and rep["batch"]["scope"] == 5
+    # 該小時只剩 4 次 → 只查 2 檔，即使設定上限較大
+    client = FakeClient()
+    client.quota = QuotaLeft(4)
+    rep = fc.run_crosscheck(tmp_path / "b", now=NOW, client=client, db_path=db, max_requests=300)
+    assert len(client.calls) == 4 and rep["batch"]["budget"] == 4 and len(rep["batch"]["deferred"]) == 3
+
+
+def test_batch_no_budget_is_quota_exceeded(tmp_path, monkeypatch, capsys):
+    _scope(monkeypatch, ["2330"], [])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    client = FakeClient()
+    client.quota = QuotaLeft(1)
+    rep = fc.run_crosscheck(tmp_path, now=NOW, client=client, db_path=db)
+    assert rep["status"] == "quota_exceeded" and client.calls == [] and rep["requests"] == 0
+    monkeypatch.setattr(fc, "run_crosscheck", lambda *a, **k: {"status": "quota_exceeded"})
+    assert fc.main(["--root", str(tmp_path)]) == 1
+
+
+def test_batches_rotate_across_runs(tmp_path, monkeypatch):
+    _scope(monkeypatch, [], ["1101", "1102", "1103"])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+
+    class FailOne(FakeClient):
+        def data(self, dataset, data_id, *a):
+            if data_id == "1102" and dataset == fc.STATEMENT_DATASET:
+                raise SourceError("finmind", 500, "boom")
+            return super().data(dataset, data_id, *a)
+
+    first = fc.run_crosscheck(tmp_path, now=NOW, client=FailOne(), db_path=db, max_requests=4)
+    assert first["symbols"] == ["1101", "1102"] and first["status"] == "partial"
+    state = fc.load_state(tmp_path)
+    assert set(state) == {"1101"}                             # 1102 只成功一半，不記
+    assert state["1101"]["checked"] == D.isoformat() and state["1101"]["fingerprint"]
+    later = NOW + dt.timedelta(days=1)
+    client = FakeClient()
+    second = fc.run_crosscheck(tmp_path, now=later, client=client, db_path=db, max_requests=4)
+    assert second["symbols"] == ["1102", "1103"]               # 1101 未到期，不重查
+    assert set(fc.load_state(tmp_path)) == {"1101", "1102", "1103"}
+    third = fc.run_crosscheck(tmp_path, now=later, client=FakeClient(), db_path=db)
+    assert third["symbols"] == [] and third["status"] == "ok" and third["batch"]["not_due"] == 3
+
+
+def test_outstanding_carried_into_report(tmp_path, monkeypatch):
+    _scope(monkeypatch, [], ["1101", "1102"])
+    db = make_db(tmp_path / "s.db", GOOD_REV, GOOD_Q)
+    # 1101 的資料庫沒有任何列 → db_missing
+    fc.run_crosscheck(tmp_path, now=NOW, client=FakeClient(), symbols=["1101"], db_path=db)
+    assert fc.load_state(tmp_path)["1101"]["db_missing"] > 0
+    rep = fc.run_crosscheck(tmp_path, now=NOW + dt.timedelta(days=1), client=FakeClient(), db_path=db)
+    assert rep["symbols"] == ["1102"]
+    assert [o["symbol"] for o in rep["outstanding"]] == ["1101"]
+    from bot import data_freshness as fresh
+    check = fresh._finmind_crosscheck(tmp_path, NOW + dt.timedelta(days=1))
+    assert check["status"] == fresh.WARN and "1101" in check["detail"]
+
+
+def test_scope_merges_tracked_and_filters_etf(tmp_path, monkeypatch):
+    _scope(monkeypatch, ["1514", "00981A"], ["2330", "0050", "1514", "6669"])
+    held, scope = fc.scope_symbols(tmp_path, SimpleNamespace(symbols=[]))
+    assert held == ["1514"] and scope == ["1514", "2330", "6669"]
+
+    def broken(root, settings):
+        raise RuntimeError("watchlist db locked")
+
+    monkeypatch.setattr(fc, "_tracked_symbols", broken)
+    assert fc.scope_symbols(tmp_path, None) == (["1514"], ["1514"])
+
+
+def test_main_skipped_exit_code(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fc, "_load_settings", lambda root: SimpleNamespace(finmind_token=""))
+    assert fc.main(["--root", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "skipped"
+    assert not (tmp_path / "data").exists()
