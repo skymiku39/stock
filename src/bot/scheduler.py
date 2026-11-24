@@ -395,6 +395,19 @@ class Scheduler:
                     window_start=start,
                     window_end=end,
                 ))
+        if getattr(s, "scheduler_finmind_crosscheck_enabled", False):
+            # FinMind 交叉核對：沒有 FINMIND_TOKEN 時程式回 skipped（結束碼 0），不會重試。
+            jobs.append(Job(
+                name="finmind_crosscheck",
+                console_script="",
+                module="bot.free_sources.finmind_crosscheck",
+                interval_min=1440,
+                market_hours_only=False,
+                extra_args=["--root", str(self.project_root)],
+                run_once_per_day=True,
+                window_start=s.scheduler_finmind_crosscheck_time,
+                window_end=s.scheduler_finmind_crosscheck_end_time,
+            ))
         if getattr(s, "scheduler_company_interval_min", 0) > 0:
             jobs.append(Job(
                 name="company",

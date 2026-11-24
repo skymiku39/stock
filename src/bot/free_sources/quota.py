@@ -76,6 +76,21 @@ class QuotaTracker:
         now = self._now().astimezone(TAIPEI)
         return int(self._load(now.date().isoformat())["count"])
 
+    def remaining(self) -> Optional[int]:
+        """各維度還能送幾次的最小值；完全沒有限制時回 None。不計數。"""
+        now = self._now().astimezone(TAIPEI)
+        ts = now.timestamp()
+        data = self._load(now.date().isoformat())
+        stamps = [s for s in data["stamps"] if isinstance(s, (int, float)) and ts - s < 3600]
+        left = []
+        if self.daily_limit is not None:
+            left.append(self.daily_limit - int(data["count"]))
+        if self.per_hour is not None:
+            left.append(self.per_hour - len(stamps))
+        if self.per_minute is not None:
+            left.append(self.per_minute - sum(1 for s in stamps if ts - s < 60))
+        return max(0, min(left)) if left else None
+
     def consume(self) -> None:
         """登記一次請求；任何一個維度超限就 raise，且不計數。"""
         with self._lock:
