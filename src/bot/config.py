@@ -455,6 +455,11 @@ class Settings(BaseSettings):
     scheduler_massive_end_time: datetime.time = datetime.time(7, 59)
     scheduler_massive_update_time: datetime.time = datetime.time(8, 40)
     scheduler_massive_update_end_time: datetime.time = datetime.time(8, 49)
+    # Marketaux 個股隔夜情緒：在 08:00 隔夜重點之前收集（沒有 MARKETAUX_API_TOKEN 就不排）。
+    # 時間用 pydantic 內建解析（"07:40" 可）；每天最多 8 次請求（4 檔 × 2 頁），額度上限 100。
+    scheduler_marketaux_enabled: bool = True
+    scheduler_marketaux_time: datetime.time = datetime.time(7, 40)
+    scheduler_marketaux_end_time: datetime.time = datetime.time(7, 59)
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
     scheduler_market_hours_only: bool = True
     scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪

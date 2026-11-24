@@ -337,6 +337,41 @@ def notification_text(brief: dict) -> str:
     return "\n".join(lines)
 
 
+US_SENTIMENT_NO_DATA = "無資料"
+US_SENTIMENT_NOTE = "Marketaux 個股隔夜情緒，分數由 Marketaux 計算、方法不透明，僅供參考，不進交易規則"
+
+
+def _sentiment_display(row: dict) -> str:
+    avg = row.get("avg")
+    if row.get("status") != "ok" or not isinstance(avg, (int, float)) or isinstance(avg, bool):
+        return US_SENTIMENT_NO_DATA
+    return (f"{avg:+.2f}（{int(row.get('count') or 0)} 則："
+            f"正 {int(row.get('positive') or 0)}／負 {int(row.get('negative') or 0)}）")
+
+
+def us_sentiment_section(root: Path, day: dt.date) -> dict:
+    """讀 data/news/marketaux_sentiment_<日期>.json；沒有檔或代號無資料時標「無資料」，不以 0 分代替。"""
+    path = Path(root) / "data" / "news" / f"marketaux_sentiment_{day.isoformat()}.json"
+    data = read_json(path, None)
+    out = {"status": "missing", "source": "marketaux", "published_after": "", "note": US_SENTIMENT_NOTE,
+           "rows": []}
+    if not isinstance(data, dict) or not isinstance(data.get("symbols"), dict):
+        return out
+    rows = []
+    for sym, row in data["symbols"].items():
+        row = row if isinstance(row, dict) else {}
+        ok = row.get("status") == "ok" and isinstance(row.get("avg"), (int, float))
+        rows.append({
+            "symbol": str(sym), "status": "ok" if ok else str(row.get("status") or "no_data"),
+            "avg": float(row["avg"]) if ok else None, "count": int(row.get("count") or 0),
+            "positive": int(row.get("positive") or 0), "negative": int(row.get("negative") or 0),
+            "neutral": int(row.get("neutral") or 0), "display": _sentiment_display(row),
+        })
+    out.update(status="ok" if any(r["status"] == "ok" for r in rows) else "no_data",
+               published_after=str(data.get("published_after") or ""), rows=rows)
+    return out
+
+
 def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, notifier=None,
                 notify: bool = True, summarize=None, collect_results: Optional[dict] = None) -> dict:
     root = Path(root)
@@ -402,6 +437,7 @@ def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, n
             "gaps": gaps,
             "candidates": build_candidates(in_window),
         },
+        "us_sentiment": us_sentiment_section(root, now.date()),
         "summary": {"status": "pending_model", "points": [], "model": "", "generated_at": "",
                     "note": SUMMARY_PENDING_NOTE},
         "warnings": warnings,

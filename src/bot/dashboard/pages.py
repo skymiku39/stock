@@ -7389,6 +7389,17 @@ def page_overnight_brief() -> None:
         st.caption(f"行情抓取時間：{_brief_hhmm(market.get('fetched_at'), True)}。"
                    "台股收盤、匯率與 ADR 的日期可能不同，溢價僅供參考。")
 
+    us_sentiment = as_dict(data.get("us_sentiment"))
+    sentiment_rows = as_list(us_sentiment.get("rows"))
+    if sentiment_rows:
+        st.markdown("### 個股隔夜情緒（參考）")
+        st.dataframe(pd.DataFrame([{
+            "代號": r.get("symbol", ""), "情緒": r.get("display") or "無資料",
+            "則數": r.get("count", 0),
+        } for r in sentiment_rows]), hide_index=True, use_container_width=True)
+        st.caption(str(us_sentiment.get("note") or "") + "；涵蓋 "
+                   f"{_brief_hhmm(us_sentiment.get('published_after'), True)} 之後的新聞（UTC）")
+
     summary = as_dict(data.get("summary"))
     st.markdown("### 重點")
     points = as_list(summary.get("points"))
