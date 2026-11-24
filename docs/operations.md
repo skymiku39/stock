@@ -301,6 +301,22 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
 
 ---
 
+## 〇・七、美股隔夜重點
+
+每個平日 08:00 產生一次、08:50 再更新一次，內容是美股行情加上隔夜美國新聞的候選清單。目前不呼叫模型，`summary.status` 會是 `pending_model`；模型摘要要等額度恢復後另外接上。
+
+```powershell
+uv run --offline --no-sync python -m bot.overnight_brief --root . --slot morning
+```
+
+- `--slot morning` 是 08:00 版，當天第一次會跳一則本機通知；`--slot preopen` 是開盤前更新，不通知。加 `--no-notify` 可以完全不通知。
+- 輸出在 `data/overnight_brief/<日期>.json` 與 `latest.json`。同一天重跑會覆寫內容，`runs` 保留每次產生的時間。
+- 看的地方：系統匣視窗的「美股隔夜」卡片（行情與提醒），儀表板「美股隔夜重點」頁（完整行情、候選新聞與連結）。
+- 新聞範圍：前一個平日 21:00 到產生當下，只取美國來源、排除官媒。來源是每日 RSS 存檔，所以**前提是電腦整晚開著**；連續兩小時以上沒有收到任何新項目時，檔案的 `warnings` 會寫出是哪一段。
+- 行情每次都重新抓（不沿用當天的快取）。為什麼：當天的行情快取可能是美股盤中抓的，不是收盤。重抓也會更新 `data/macro/` 當天的快取。
+- 候選新聞是規則篩選（同一件事越多家報導排越前面），只是之後交給模型的前置步驟，不是重要性判斷。同一件事可能被拆成好幾則。
+- 排程設定：`SCHEDULER_OVERNIGHT_BRIEF_ENABLED`（預設 true）與 `SCHEDULER_OVERNIGHT_BRIEF_TIME`、`_END_TIME`、`_UPDATE_TIME`、`_UPDATE_END_TIME`。台股休市日不會另外判斷，平日都會產生。
+
 ## 一、每日操作流程
 
 ### 盤前（08:00 ~ 09:00）
