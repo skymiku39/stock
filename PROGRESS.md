@@ -118,6 +118,14 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
   - 狀態：已於 2026-11-16 由 PR #21 合併。
 
 ## 進行中 / 下一步
+- **2026-11-24 LLM 改以 NAS 的 Gemini 網頁閘道為主（使用者決定）**：
+  - 現況：Codex（gpt-6-sol）11-06 起額度被擋，系統排定 12-06 再試；`.env` 沒有 `GEMINI_API_KEY`。所以 11-06 起研究、簡報、問答都沒有產出。
+  - 為什麼用閘道：使用者已有 `skymiku39/gemini-browser-gateway`，跑在 NAS（`http://100.106.209.11:8816`，經 Tailscale），走 Google One 訂閱額度、不另計費。11-24 實測 `/health` 正常、已登入。
+  - 沒選 Claude API：Ultra 方案的 US$200 API 額度已領取（到 12-19），但照 10-27 用量全改 Claude 每天約 US$29–59，撐不到一週；先保留不用。
+  - 閘道限制：單則訊息 10 萬字；`daily_brief` 中位數約 24 萬字放不下，所以閘道新增附件上傳。
+  - 閘道端已寫好（分支 `feat/attachments-request-log`，從 PR #2 的分支拉出，未提交）：選配的寄件者標記（`client.app/task/ref/tags` 或 `X-Client-*` 標頭）、文字附件（存在 NAS 的 `uploads/<使用者>/<日期>/<請求編號>/`，預設保留 7 天）、請求紀錄表（不存全文，預設保留 90 天）、`GET /v1/requests` 與 `gemini-gateway requests` 指令。閘道測試 177 passed。
+  - 未驗證：Gemini 網頁上傳按鈕的選擇器是照推測寫的，要部署到 NAS 後實測。NAS 的 Docker 要 root，重建容器要使用者自己做。
+  - 下一步：閘道部署並實測附件 → 在 NAS 建 `stock-bot` 使用者 → stock 專案新增 `LLM_PROVIDER=gemini_gateway`（自動帶 `app=stock-bot`、`task=<prompt_id>`、`ref=<股票代號>`；超過門檻改用附件）。
 - #29 已由 PR #40 合併（2026-11-16）：回測 JSON 有 `distributions`、`distribution_total_twd`、`ex_rights_no_events`，CLI 有 `--no-ex-rights`。
 - 六檔對照（1598、2328、2412、4766、2317、2603，2020-01-02～2026-10-15，共用 50 萬）。`--no-ex-rights` 與 #28 基準完全相同；套用後：輪數 29→40、勝率 86%→92.5%、每輪期望值 4.0%→4.01%、持有平均 153→120 天（中位 26→21，最長仍 1,214）、超過 90 天 31%→27.5%、年化 8.8%→10.2%、最大回撤 20.2%→29.3%、資金使用率 69%→73%。配發入帳 55,540 元（2317 與 2412；2603 除權息時都沒持倉）。2317 不再於 2024-08-06 被停損停用。
 - 判讀：差異主要不是股利本身，而是標準價跟著除權息下修後，除權息跳空不再被當成跌幅而觸發買進或停損，交易路徑改變；回撤變大要在 #31 一併看。
@@ -312,7 +320,7 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
     - 實測 12:38（`--once`）：1514 剩 08-04、11-03、11-06、11-19 四張，均價 85.65（券商 78.01）、兩平 85.98、停損價 64.48（原 58.73）；11-23 那筆賣出改算為 +600（券商 −29,944）。**停損價因此比券商帳面算法高，離現價更近。**
     - 排程器裡執行中的盯盤（12:27 啟動）還是舊程式與舊設定，約 13:18 下一輪才生效；在那之前狀態檔仍是 78.01，系統匣不顯示成本說明。系統匣顯示新算法的畫面還沒實際看過。
   - 系統匣程式目前是手動啟動的（11-23 重啟過），重開機或登出後不會自己回來，要等第 4 階段。
-- **2026-11-24 美股隔夜重點（使用者決定要做；不需要模型的部分已實作、尚未提交；模型摘要等 12-06）**：
+- **2026-11-24 美股隔夜重點（使用者決定要做；不需要模型的部分已實作並提交 `2155924`；免費 API 新聞已接入；模型摘要等 12-06）**：
   - 已做：`src/bot/overnight_brief.py`（新聞視窗＝前一個平日 21:00 起、規則篩出 40 則候選、夜間缺口偵測、行情、存檔 `data/overnight_brief/<日期>.json` 與 `latest.json`、08:00 版跳本機通知）；排程器新增 `overnight_brief`（08:00–08:49）與 `overnight_brief_update`（08:50–10:00）兩個每日一次的工作；系統匣「美股隔夜」卡片（`tray/status.py`、`tray/window.py`）；儀表板「美股隔夜重點」頁；說明在 `docs/operations.md`「〇・七」。
   - 決策：行情每次強制重抓。為什麼：`data/macro/macro_2026-11-24.json` 是 00:25 抓的（美股盤中），之後整天沿用，不是收盤價。「美股 / 跨市場」頁在別的時段仍有同樣的問題，沒有另外修。
   - 決策：畫面與通知在模型摘要接上前只顯示行情與「模型摘要尚未可用」，候選新聞清單只放在儀表板頁。為什麼：使用者選的是模型摘要，不是規則排出來的標題。
@@ -322,7 +330,27 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
   - 起因：使用者覺得晚上的美國新聞沒收到。查存檔（`data/news/rss_<日期>.json`，11-17～11-24）：美國 30 個來源都有資料，每天 1,100～2,400 則，每 5 分鐘收一輪、夜間每小時都有新項目。所以不是沒抓，是沒有整理與呈現；不需要另加夜間排程。前提是電腦整晚開著。
   - 使用者的選擇：(1) 用模型寫摘要，等 12-06 額度恢復，不先做只列標題的規則版；(2) 顯示在系統匣視窗、本機通知、儀表板頁面，並每天存檔；(3) 內容是行情（`market_macro` 既有的美股指數、費半、ADR）加新聞；(4) 08:00 產生、08:50 再更新一次。
   - 12-06 後要做：接上模型摘要（一天多用兩次額度）。本機通知的排程工作 11-20 已註冊，不需要另外處理。
-- **2026-11-24 免費資料來源（使用者決定七家免費方案都要接；只有規劃，尚未實作，使用者要另開對話處理）**：Finnhub、富果、FinMind、Financial Modeling Prep、Massive、Marketaux、Alpha Vantage。每一家的用途、端點、額度、金鑰變數名稱與未確認的項目寫在 `docs/free-data-sources-plan.md`。不接的：EODHD（每天 20 次）、NewsAPI.org（延遲 24 小時）、FinLab（免費版資料到 2023 年底）、TEJ（試用版只有一年）。付費方案的價格比較只在對話中給過，沒有存檔。金鑰由使用者自己註冊、自己貼進 `.env`。
+- **2026-11-24 免費資料來源（使用者決定七家免費方案都要接；2026-11-24 已實作、合併並推送：Finnhub、富果、FinMind、FMP、Massive 可用，Marketaux 放棄、Alpha Vantage 不接）**：Finnhub、富果、FinMind、Financial Modeling Prep、Massive、Marketaux、Alpha Vantage。每一家的用途、端點、額度、金鑰變數名稱與未確認的項目寫在 `docs/free-data-sources-plan.md`。不接的：EODHD（每天 20 次）、NewsAPI.org（延遲 24 小時）、FinLab（免費版資料到 2023 年底）、TEJ（試用版只有一年）。付費方案的價格比較只在對話中給過，沒有存檔。金鑰由使用者自己註冊、自己貼進 `.env`。
+  - 2026-11-24 第一階段完成（已提交 f06cd21）：`Settings` 加七個金鑰欄位、`.env.example` 補變數；新增 `src/bot/free_sources/`（每家一個 client、`quota.py` 每日／每分鐘上限計數存 `data/api_quota/`、`probe.py` 探測指令 `python -m bot.free_sources.probe [--source X] [--json]`，只列欄位名不印金鑰）；`tests/test_free_sources.py` 離線測試 45 項（含 config）通過。尚未接線到 overnight_brief／smile_watch／排程。
+  - 註冊狀態：Alpha Vantage 已申請到金鑰（未貼進 `.env`）；Finnhub、Marketaux、FMP、FinMind 已預填姓名與信箱、待使用者填密碼送出；Massive 用 Google／GitHub 登入；富果要富果帳號登入後申請。為什麼由使用者完成：密碼、驗證碼與 `.env` 由使用者本人處理。
+  - 2026-11-24 實測（每家一個子任務）：
+    - Finnhub 可用；標頭確認每分鐘 60 次。company_news NVDA 近 3 天 248 則，general 100 則；欄位 category/datetime/headline/id/image/related/source/summary/url。
+    - 富果可用（盤中 1514、2330 都有當日成交）。盤中報價**沒有 `isTrial` 欄位**，原本把缺欄位判成不可用、所有報價都被擋，已改成只有 `isTrial` 為 true 才拒絕。1514 當時 76.4、昨收 69.5、`isLimitUpPrice` 欄位存在，看起來是漲停鎖住、成交稀少，可能就是 11-24 盯盤拿不到報價的原因（未逐筆核對 10:12 當時的狀態）。
+    - FinMind 可用，免費 level 1、每小時 600 次；2330 月營收 5 筆、2026 三季財報 54 列，欄位與規劃一致。
+    - FMP 可用：stable 端點正確，年報、季報（period=quarter）、TSM 都查得到；TSM 的 `reportedCurrency` 是 TWD；`fiscalYear`、`date` 是字串。
+    - Alpha Vantage：NEWS_SENTIMENT 回「premium endpoint」，**免費金鑰不能用，依規劃不接**。分類已從 quota_exhausted 改為 forbidden。
+    - Massive：401 Unknown API Key。`.env` 的金鑰與後台那把（結尾不同）不一致，待使用者重貼。
+    - Marketaux：`.env` 還沒有金鑰，註冊頁是空表單，待使用者完成註冊。
+  - 2026-11-24 第三階段（使用者要求每家一個獨立對話、各自寫目標與驗收標準）：六個對話各在 worktree 分支完成後，使用者決定六家全部合併回本分支（merge commit `7eb4e1a`）。各家細節、決策與實測紀錄在 `docs/free-sources/<服務>.md`。
+    - Finnhub：隔夜重點讀入 `data/news/api_<來源>_<日期>.json`（Finnhub／Massive／Marketaux 共用），RSS 缺口偵測仍只看 RSS。
+    - 富果：盯盤備援盤中端到端實測通過，托盤顯示報價來源；1514 拿不到報價的原因寫在 `docs/free-sources/fugle.md`。
+    - FinMind：`finmind_crosscheck` 平日 21:00–23:30，追蹤名單依每小時額度分批。補 1514 缺的 2025Q4／2026Q1 資料的指令待使用者同意（在該對話）。
+    - FMP：`fmp_fundamentals` 每週一次；402 細分為 invalid_params／plan_restricted／quota_exhausted；趨勢摘要接進個股研究快照，不進交易規則。
+    - FMP 排程 11-24 14:22 實跑：免費方案不含 ASML、AVGO、MU、UMC、ASX（14 檔能抓 9 檔）。這類 402 原本被判成參數錯誤而整批停止，已改成只跳過該檔；只剩方案不含的錯誤時結束碼 0。
+    - Massive：金鑰重貼後可用，8 項實測有紀錄；每頁 1000 則；07:50 與 08:40 各收集一次（沒金鑰不排）。
+    - Marketaux：**放棄**，使用者註冊失敗。接線程式已合併但沒有 `MARKETAUX_API_TOKEN` 就不排、不顯示。為什麼仍合併：使用者決定六家全部合併；無金鑰時不影響現有流程。
+    - Alpha Vantage：**不接**（新聞情緒是付費端點）。
+    - 合併衝突只在 `scheduler.py`、`config.py`、兩個排程測試，都是各家新增的排程區塊，兩邊保留。
 - 下一步由使用者決定：要不要設定 Telegram；情緒賣出的門檻、是否在模擬盤啟用；#38 要不要做。日 K 回補跑完後要產生 ETF 名單的因子報告。
 - 排程設計備忘：exit 4=busy 60 秒後重試；exit 3=blocked/partial 依 `next_retry_epoch`；重試次數用完只照一般間隔執行，直到成功才歸零。
 
