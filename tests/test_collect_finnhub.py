@@ -187,3 +187,26 @@ def test_quota_stored_under_root(tmp_path, monkeypatch):
     assert r["requests"] == 2
     q = json.loads((tmp_path / "data" / "api_quota" / "finnhub.json").read_text())
     assert q["count"] == 2
+
+
+def test_b10_duplicate_story_merges_us_tickers(tmp_path):
+    c = FakeClient(company={"NVDA": [row(1)], "AMD": [row(1, related="AMD")], "TSM": [row(2)]})
+    cf.collect(tmp_path, now=NOW, client=c, symbols=["NVDA", "AMD", "TSM"])
+    data = json.loads(out(tmp_path).read_text(encoding="utf-8"))
+    first = [i for i in data if i["url"] == "http://u/1"]
+    assert len(first) == 1
+    assert first[0]["us_tickers"] == ["NVDA", "AMD"] and first[0]["feed"] == "finnhub:NVDA"
+    # 重跑時另一檔也提到同一則：併進既有檔那則，不重複
+    c2 = FakeClient(company={"AVGO": [row(1, related="AVGO")]})
+    cf.collect(tmp_path, now=NOW, client=c2, symbols=["AVGO"])
+    data = json.loads(out(tmp_path).read_text(encoding="utf-8"))
+    first = [i for i in data if i["url"] == "http://u/1"]
+    assert len(first) == 1 and first[0]["us_tickers"] == ["NVDA", "AMD", "AVGO"]
+
+
+def test_b10_merge_items_does_not_mutate_inputs():
+    a = {"url": "u", "us_tickers": ["NVDA"]}
+    b = {"url": "u", "us_tickers": ["AMD"]}
+    merged = cf.merge_items([a], [b])
+    assert merged == [{"url": "u", "us_tickers": ["NVDA", "AMD"]}]
+    assert a["us_tickers"] == ["NVDA"]

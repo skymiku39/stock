@@ -43,3 +43,41 @@
 - 每次執行：14 檔公司新聞 + 1 次大盤 = 15 次請求；08:00 與 08:50 各一次約 30 次/天。
 - 免費額度每分鐘 60 次；quota 設定為每分鐘 50、每日 1500，遠低於上限。
 - 一次執行 15 次請求在同一分鐘內，低於每分鐘 50 的保護線。
+
+## 第三階段：接線（2026-11-24）
+
+### 目標
+
+把 Finnhub 新聞接進美股隔夜重點，補夜間 RSS 的缺口：08:00 與 08:50 兩次隔夜重點產生前先跑 `collect_finnhub`，隔夜重點再把 `data/news/api_<來源>_<日期>.json` 併入視窗候選。讀取函式是通用的，Massive、Marketaux 產生同格式的檔時不用改讀取端。
+
+### 設計決策
+
+- **收集放在 `overnight_brief.main` 裡先跑，不在 `scheduler.py` 加獨立工作。** 原因：(1) 順序有保證：收集一定在產生 brief 之前，排程器在同一分鐘內的工作先後與重試無法保證這點；(2) 收集狀態可以直接寫進同一份 brief 的 `news.api_sources` 與警告，不必再讀另一份狀態檔；(3) 不動 `scheduler.py`、`config.py`，和其他分支不衝突。代價是隔夜重點工作多花約 15 次請求的時間（數秒），可接受。
+- 收集器登記在 `overnight_brief.API_NEWS_COLLECTORS`（來源名 → 模組名），其他來源要接時各加一行即可，可加總合併。模組須提供 `collect(root, *, now) -> dict`。
+- `--no-collect` 可在手動重跑時略過收集。
+- 收集失敗（例外、`error`、`partial`、`quota_exceeded`）只記成警告，隔夜重點照常產生；`skipped`（沒金鑰）不記警告。
+- RSS 缺口偵測（`detect_gaps`）與 RSS 存檔新舊警告只看 RSS；API 新聞只進候選。
+- 合併時 RSS 在前，同 url 以 RSS 那則為準。
+- `news.items_in_window` 維持「進入候選計算的總筆數」（RSS＋API），另加 `rss_items_in_window`、`api_items_in_window` 與 `api_sources`。
+- 候選分數不變（API 新聞不額外加分，避免每則公司新聞都因有代號而被抬高）；候選另加 `us_tickers` 欄位（群內聯集）。
+- **多檔代號改成合併：** 同一則新聞在 NVDA、AMD 查詢都出現時，原本只留第一個代號；改為保留第一則、`us_tickers` 取聯集（與同日既有檔合併時也一樣）。原因：只留一個代號會讓候選的 `us_tickers` 漏掉實際相關的標的，而去重鍵（url）不變，不會多出重複項目。`feed` 仍是第一個查詢的 `finnhub:<代號>`。
+
+### 驗收標準
+
+| # | 標準 | 驗證 |
+|---|---|---|
+| B1 | `read_api_news` 讀視窗涵蓋日期的 `data/news/api_<來源>_<日期>.json`（任何來源），回傳項目與各來源的檔案數、筆數；損毀檔或非 list 視為空、不報錯；`rss_*.json` 不會被讀成 API 檔 | 測試 |
+| B2 | API 新聞與 RSS 合併進視窗候選；時間不在視窗內者排除；同 url 的 RSS 與 API 只算一則 | 測試 |
+| B3 | `detect_gaps` 只看 RSS：有 API 新聞時，RSS 的缺口仍照樣偵測出來 | 測試 |
+| B4 | brief 的 `news` 含 `rss_items_in_window`、`api_items_in_window`、`api_sources`（每個來源有 `items_in_window`、`files`、`collect`） | 測試 |
+| B5 | 候選有 `us_tickers`（群內聯集） | 測試 |
+| B6 | `main` 先跑收集器再產生 brief，收集摘要寫進 `api_sources[來源].collect` | 測試 |
+| B7 | 收集器拋例外或回傳 `error`／`partial`／`quota_exceeded` 時，brief 照常產生、`main` 回傳 0，只多一條警告；`skipped` 不加警告 | 測試 |
+| B8 | `--no-collect` 不跑收集器 | 測試 |
+| B9 | 沒有金鑰時 Finnhub 收集為 `skipped`，不連網 | 測試（沿用 A1）＋實測 |
+| B10 | 同一則新聞在多檔查詢都出現時，保留一則、`us_tickers` 取聯集；與既有檔合併時也一樣 | 測試 |
+| B11 | brief 與 `main` 輸出、警告都不含金鑰 | 測試＋實測 |
+| B12 | 暫存 root 實測：收集 → 隔夜重點，候選裡有 `finnhub:` 來源的新聞，輸出不含金鑰 | 實測 |
+| B13 | 候選的 `source_count` 與分數裡的來源數：API 新聞以發布者（`source` 欄）計，RSS 仍以 feed 計；同一發布者在多檔查詢（`finnhub:NVDA`、`finnhub:AMD`）出現只算一個來源。`feeds` 仍列出所有 feed | 測試＋實測 |
+
+B13 是實測後補的：第一次實測時排第一的候選 `source_count` 是 5，但全部都是 Finnhub、只是查詢代號不同，分數被灌高。

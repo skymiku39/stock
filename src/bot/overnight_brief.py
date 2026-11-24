@@ -4,11 +4,15 @@
 
 只做規則篩選，不呼叫模型；模型摘要留了 `summarize` 掛勾，沒接上時 summary.status 為 pending_model。
 輸出：data/overnight_brief/<date>.json 與 latest.json（結構給顯示端讀，欄位名不可改）。
+
+API 新聞：main 先跑 API_NEWS_COLLECTORS 的收集器（失敗只記警告），build_brief 再把
+data/news/api_<來源>_<日期>.json 併入視窗候選；缺口偵測只看 RSS。
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib
 import json
 import re
 import sys
@@ -26,6 +30,14 @@ MAX_CANDIDATES = 40
 SIMILARITY = 0.4
 STALE_ARCHIVE_MINUTES = 90
 BRIEF_INDICES = ("^GSPC", "^IXIC", "^DJI", "^SOX", "^VIX")
+
+# 隔夜重點產生前要先跑的 API 新聞收集器：來源名 -> 模組（須有 collect(root, *, now) -> dict）。
+# 其他來源接線時各加一行。
+API_NEWS_COLLECTORS: dict = {
+    "finnhub": "bot.free_sources.collect_finnhub",
+}
+API_NEWS_RE = re.compile(r"^api_([a-z0-9]+)_(\d{4}-\d{2}-\d{2})\.json$")
+COLLECT_WARN_STATUSES = frozenset({"error", "partial", "quota_exceeded", "failed"})
 
 STOPWORDS = frozenset({
     "that", "with", "from", "this", "says", "said", "after", "over", "will", "have",
@@ -96,6 +108,79 @@ def _read_archives(root: Path, start: dt.datetime, now: dt.datetime):
     return rows, latest
 
 
+def read_api_news(root: Path, start: dt.datetime, now: dt.datetime):
+    """讀 start 那天到 now 那天的 data/news/api_<來源>_<日期>.json。
+
+    回傳 (全部項目, {來源: {"files": [檔名], "items": 筆數}})；損毀或非 list 的檔視為空。
+    """
+    news_dir = Path(root) / "data" / "news"
+    days = set()
+    day = start.date()
+    while day <= now.date():
+        days.add(day.isoformat())
+        day += dt.timedelta(days=1)
+    rows: list = []
+    sources: dict = {}
+    try:
+        paths = sorted(news_dir.iterdir())
+    except OSError:
+        return rows, sources
+    for path in paths:
+        m = API_NEWS_RE.match(path.name)
+        if not m or m.group(2) not in days:
+            continue
+        src = sources.setdefault(m.group(1), {"files": [], "items": 0})
+        src["files"].append(path.name)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, list):
+            continue
+        items = [i for i in data if isinstance(i, dict)]
+        src["items"] += len(items)
+        rows.extend(items)
+    return rows, sources
+
+
+def _source_key(item: dict) -> str:
+    """算「幾個來源」用：API 新聞以發布者（source 欄）計，RSS 以 feed 計。
+
+    Finnhub 的 feed 是查詢代號（finnhub:NVDA、finnhub:AMD），同一發布者在多檔查詢出現不能算多個來源。
+    """
+    publisher = str(item.get("source") or "").strip()
+    return f"publisher:{publisher.lower()}" if publisher else str(item.get("feed") or "")
+
+
+def _source_of(item: dict) -> str:
+    return str(item.get("feed") or "").split(":", 1)[0]
+
+
+def run_api_collectors(root: Path, now: dt.datetime, collectors: Optional[dict] = None) -> dict:
+    """依序跑收集器；任何例外都吞掉並記成 {"status": "failed"}，回傳 {來源: 摘要}。"""
+    from bot.free_sources.base import redact
+
+    results: dict = {}
+    for name, module in (API_NEWS_COLLECTORS if collectors is None else collectors).items():
+        try:
+            fn = module if callable(module) else importlib.import_module(module).collect
+            summary = fn(Path(root), now=now)
+            results[name] = summary if isinstance(summary, dict) else {"status": "failed",
+                                                                       "error": "回傳不是 dict"}
+        except Exception as exc:  # noqa: BLE001 - 收集失敗不能讓隔夜重點失敗
+            results[name] = {"status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")}
+    return results
+
+
+def _collect_warning(name: str, summary: dict) -> Optional[str]:
+    status = str(summary.get("status") or "")
+    if status not in COLLECT_WARN_STATUSES:
+        return None
+    detail = summary.get("error") or "、".join(sorted((summary.get("errors") or {}).keys()))
+    label = {"partial": "部分失敗", "quota_exceeded": "用量已達上限"}.get(status, "失敗")
+    return f"{name} 新聞收集{label}" + (f"：{detail}" if detail else "") + "，隔夜重點只用已有的資料"
+
+
 def _item_ts(item: dict, tz) -> Optional[dt.datetime]:
     return _parse_ts(item.get("published_at") or item.get("first_seen_at"), tz)
 
@@ -135,15 +220,18 @@ def build_candidates(items: list) -> list:
         members = g["members"]  # 已依時間由舊到新，第一則最早
         ts0, rep = members[0]
         feeds = sorted({str(i.get("feed", "")) for _, i in members if i.get("feed")})
+        n_sources = len({k for _, i in members for k in [_source_key(i)] if k})
         tickers = sorted({t for _, i in members for t in (i.get("related_tickers") or [])})
+        us_tickers = sorted({str(t) for _, i in members for t in (i.get("us_tickers") or [])})
         text = " ".join(str(i.get("title", "")) for _, i in members)
         topics = [name for name, rx in _TOPIC_RE.items() if rx.search(text)]
-        score = 2 * len(feeds) + (2 if tickers else 0) + (1 if topics else 0)
+        score = 2 * n_sources + (2 if tickers else 0) + (1 if topics else 0)
         out.append((score, ts0, {
             "title": rep.get("title", ""), "url": rep.get("url", ""), "feed": rep.get("feed", ""),
             "published_at": rep.get("published_at") or rep.get("first_seen_at", ""),
-            "desc": rep.get("desc", ""), "feeds": feeds, "source_count": len(feeds),
-            "related_tickers": tickers, "topics": topics, "score": score,
+            "desc": rep.get("desc", ""), "feeds": feeds, "source_count": n_sources,
+            "related_tickers": tickers, "us_tickers": us_tickers, "topics": topics,
+            "score": score,
         }))
     out.sort(key=lambda p: p[1], reverse=True)       # 同分：新的在前
     out.sort(key=lambda p: p[0], reverse=True)       # 穩定排序，分數高的在前
@@ -250,15 +338,30 @@ def notification_text(brief: dict) -> str:
 
 
 def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, notifier=None,
-                notify: bool = True, summarize=None) -> dict:
+                notify: bool = True, summarize=None, collect_results: Optional[dict] = None) -> dict:
     root = Path(root)
     start = window_start(now)
     expected_date = previous_weekday(now.date()).isoformat()
     warnings: list = []
 
     rows, latest = _read_archives(root, start, now)
-    in_window = _window_us_items(rows, start, now)
-    gaps, gap_warnings = detect_gaps(rows, start, now)
+    rss_in_window = _window_us_items(rows, start, now)
+    api_rows, api_files = read_api_news(root, start, now)
+    in_window = _window_us_items(rows + api_rows, start, now)  # RSS 在前，同 url 以 RSS 為準
+    rss_ids = {id(i) for _, i in rss_in_window}
+    api_in_window = [i for _, i in in_window if id(i) not in rss_ids]
+    api_sources: dict = {}
+    for name in sorted(set(api_files) | set(collect_results or {})):
+        api_sources[name] = {
+            "items_in_window": sum(1 for i in api_in_window if _source_of(i) == name),
+            "files": api_files.get(name, {}).get("files", []),
+            "collect": (collect_results or {}).get(name),
+        }
+    for name, summary in (collect_results or {}).items():
+        msg = _collect_warning(name, summary) if isinstance(summary, dict) else None
+        if msg:
+            warnings.append(msg)
+    gaps, gap_warnings = detect_gaps(rows, start, now)  # 只看 RSS
     warnings += gap_warnings
     collected_at = latest[1] if latest else ""
     if latest is None:
@@ -291,6 +394,9 @@ def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, n
         "market": market,
         "news": {
             "items_in_window": len(in_window),
+            "rss_items_in_window": len(rss_in_window),
+            "api_items_in_window": len(api_in_window),
+            "api_sources": api_sources,
             "feeds_in_window": len({i.get("feed") for _, i in in_window if i.get("feed")}),
             "archive_collected_at": collected_at,
             "gaps": gaps,
@@ -330,16 +436,29 @@ def main(argv=None) -> int:
     p.add_argument("--root", default=".")
     p.add_argument("--slot", choices=("morning", "preopen"), required=True)
     p.add_argument("--no-notify", action="store_true")
+    p.add_argument("--no-collect", action="store_true", help="不先跑 API 新聞收集")
     args = p.parse_args(argv)
     root = Path(args.root)
+    now = now_tw()
+    collect_results = None
+    if not args.no_collect:
+        try:
+            collect_results = run_api_collectors(root, now)
+        except Exception:  # noqa: BLE001
+            get_logger("overnight_brief", log_dir=root / "log").exception("API 新聞收集失敗")
     try:
-        brief = build_brief(root, now=now_tw(), slot=args.slot, notify=not args.no_notify)
+        brief = build_brief(root, now=now, slot=args.slot, notify=not args.no_notify,
+                            collect_results=collect_results)
     except Exception:  # noqa: BLE001
         get_logger("overnight_brief", log_dir=root / "log").exception("美股隔夜重點產生失敗")
         return 2
     print(json.dumps({
         "date": brief["date"], "slot": brief["slot"], "market": brief["market"]["status"],
         "items_in_window": brief["news"]["items_in_window"],
+        "api_items_in_window": brief["news"]["api_items_in_window"],
+        "api_sources": {k: {"items_in_window": v["items_in_window"],
+                            "collect": (v["collect"] or {}).get("status", "")}
+                        for k, v in brief["news"]["api_sources"].items()},
         "candidates": len(brief["news"]["candidates"]), "gaps": len(brief["news"]["gaps"]),
         "summary": brief["summary"]["status"], "warnings": brief["warnings"],
         "notified_at": brief["notified_at"],
