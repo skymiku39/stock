@@ -137,3 +137,107 @@ def test_status_file_and_alert_record_source(tmp_path):
     saved = json.loads((tmp_path / "status-1514.json").read_text(encoding="utf-8"))
     assert saved["price_source"] == "fugle" and "鎖漲停" in saved["price_note"]
     assert "報價來源：fugle" in format_alert(status, "breakeven")
+
+
+# ---- 持股開盤跳空 ----------------------------------------------------------------
+DAY = "2026-11-25"
+
+
+def gap_quote(open_=None, last=None, prev=100.0, day=DAY, **kw):
+    q = {"open": open_, "last_trade": last, "prev_close": prev, "quote_date": day,
+         "price": last, "price_basis": "last_trade" if last else ""}
+    q.update(kw)
+    return q
+
+
+@pytest.mark.parametrize("open_, fired", [(103.2, True), (96.9, True), (102.9, False)])
+def test_open_gap_threshold(tmp_path, open_, fired):
+    sent = []
+    watcher = SmileWatcher(tmp_path, sent.append)
+    assert watcher.handle_open_gap("1514", gap_quote(open_), DAY, 3.0, "4 張、均價 85.65") is fired
+    assert len(sent) == int(fired)
+    if fired:
+        assert ("開高 +3.2%" if open_ > 100 else "開低 -3.1%") in sent[0]
+        assert "不會下單" in sent[0] and "4 張" in sent[0] and "昨收 100.00" in sent[0]
+
+
+def test_open_gap_alerts_once_per_day_and_survives_restart(tmp_path):
+    sent = []
+    watcher = SmileWatcher(tmp_path, sent.append)
+    assert watcher.handle_open_gap("1514", gap_quote(104.0), DAY, 3.0)
+    assert not watcher.handle_open_gap("1514", gap_quote(104.0), DAY, 3.0)
+    assert not SmileWatcher(tmp_path, sent.append).handle_open_gap("1514", gap_quote(104.0), DAY, 3.0)
+    assert len(sent) == 1
+    # 和其他訊號共用每日去重狀態，互不吃掉
+    assert SmileWatcher(tmp_path, sent.append).handle(evaluate(engine(), 66.0, DAY + "T10:00:00+08:00")) == ["stop_near"]
+    assert SmileWatcher(tmp_path, sent.append).handle_open_gap(
+        "1514", gap_quote(104.0, day="2026-11-26"), "2026-11-26", 3.0)
+    rows = [json.loads(x) for x in (tmp_path / "alerts.jsonl").read_text("utf-8").splitlines()]
+    assert [r["signal"] for r in rows] == ["open_gap", "stop_near", "open_gap"]
+
+
+def test_open_gap_uses_first_trade_when_open_missing_and_ignores_later_trades(tmp_path):
+    sent = []
+    watcher = SmileWatcher(tmp_path, sent.append)
+    assert not watcher.handle_open_gap("1514", gap_quote(last=101.0), DAY, 3.0)  # 第一筆 +1%
+    assert not watcher.handle_open_gap("1514", gap_quote(last=105.0), DAY, 3.0)  # 盤中漲上去不算
+    assert sent == []
+    other = SmileWatcher(tmp_path / "b", sent.append)
+    assert other.handle_open_gap("2412", gap_quote(last=96.5), DAY, 3.0)
+    assert "第一次拿到的成交價" in sent[0]
+
+
+def test_open_gap_ignores_bid_ask_mid_only(tmp_path):
+    sent = []
+    watcher = SmileWatcher(tmp_path, sent.append)
+    mid_only = gap_quote(price=110.0, price_basis="bid_ask_mid")
+    assert not watcher.handle_open_gap("1514", mid_only, DAY, 3.0)
+    assert not watcher.handle_open_gap("1514", gap_quote(105.0, day="2026-11-24"), DAY, 3.0)  # 舊日報價
+    assert not watcher.handle_open_gap("1514", None, DAY, 3.0)
+    assert sent == []
+    assert watcher.handle_open_gap("1514", gap_quote(105.0), DAY, 3.0)  # 中間價沒有佔掉今天的判斷
+
+
+def test_open_gap_disabled_by_zero_threshold(tmp_path):
+    sent = []
+    assert not SmileWatcher(tmp_path, sent.append).handle_open_gap("1514", gap_quote(110.0), DAY, 0)
+    assert sent == [] and not (tmp_path / "state.json").exists()
+
+
+def test_load_open_gap_pct(tmp_path):
+    from bot.smile_watch import load_open_gap_pct
+    path = tmp_path / "smile_watch.json"
+    assert load_open_gap_pct(path) == 3.0
+    path.write_text('{"targets": []}', encoding="utf-8")
+    assert load_open_gap_pct(path) == 3.0
+    path.write_text('{"open_gap_alert_pct": 0, "targets": []}', encoding="utf-8")
+    assert load_open_gap_pct(path) == 0.0
+    path.write_text('{"open_gap_alert_pct": 2.5, "targets": []}', encoding="utf-8")
+    assert load_open_gap_pct(path) == 2.5
+    for bad in ('{"open_gap_alert_pct": -1}', '{"open_gap_alert_pct": "x"}'):
+        path.write_text(bad, encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_open_gap_pct(path)
+
+
+def test_read_other_holdings(tmp_path):
+    from bot.smile_watch import read_other_holdings
+    assert read_other_holdings(tmp_path) == {}
+    path = tmp_path / "data" / "smile_watch" / "holdings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"holdings": [{"symbol": "1514", "shares": 4000},
+                                             {"symbol": "00878", "shares": 250},
+                                             {"symbol": "2412", "shares": 0}]}), encoding="utf-8")
+    assert read_other_holdings(tmp_path) == {"1514": 4000.0, "00878": 250.0}
+
+
+def test_telegram_failure_does_not_block_local_notify(tmp_path):
+    from bot.smile_watch import make_notify_all
+    local = []
+
+    def telegram(_text):
+        raise RuntimeError("telegram down")
+
+    watcher = SmileWatcher(tmp_path, make_notify_all([telegram, local.append]))
+    assert watcher.handle_open_gap("1514", gap_quote(103.5), DAY, 3.0)
+    assert len(local) == 1 and "持股開盤跳空 1514" in local[0]

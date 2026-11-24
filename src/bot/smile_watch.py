@@ -3,6 +3,7 @@
 微笑策略（`strategy_smile.py`）只認模擬帳戶的部位。這個模組把券商的實際庫存（唯讀查詢）
 當成一批微笑持倉，輪詢交易所公開報價，用同一個 `SmileCurveEngine` 的規則判斷，
 條件第一次成立時寫紀錄、跳本機通知，並發 Telegram（有設定才發）。買賣由使用者自己決定與操作。
+另外，持股當天第一筆成交相對昨收跳空達門檻（預設 ±3%）時提醒一次（名單外的持股也一起查）。
 
     python -m bot.smile_watch --symbol 1514 --reference 105
     python -m bot.smile_watch --config config/smile_watch.json   # 排程器用
@@ -37,6 +38,8 @@ SIGNAL_LABELS = {
 USABLE_PRICE_BASIS = ("last_trade", "previous_trade", "bid_ask_mid")
 PRIMARY_SOURCE = "primary"
 FUGLE_SOURCE = "fugle"
+OPEN_GAP_SIGNAL = "open_gap"
+DEFAULT_OPEN_GAP_PCT = 3.0  # config/smile_watch.json 的 open_gap_alert_pct；0＝停用
 
 
 @dataclass
@@ -197,6 +200,108 @@ class SmileWatcher:
             self._alerted[status.symbol] = seen
             self._write(self._state_path, self._alerted)
         return fresh
+
+    def handle_open_gap(self, symbol: str, quote: Optional[dict], day: str, threshold_pct: float,
+                        held: str = "") -> bool:
+        """持股開盤跳空：當天第一筆成交相對昨收的漲跌幅 |x| ≥ 門檻就提醒一次。回傳這次是否發出提醒。
+
+        第一筆成交用 MIS 的開盤價 o；沒有 o 時用當天第一次拿到的成交價 z（不用委買委賣中間價）。
+        一旦拿到第一筆成交就記為「今天已判斷」，之後的成交價不再拿來判斷（不論有沒有提醒）。
+        """
+        if threshold_pct <= 0:
+            return False
+        seen = self._alerted.get(symbol, {})
+        if seen.get("day") != day:
+            seen = {"day": day, "signals": []}
+        if OPEN_GAP_SIGNAL in seen["signals"] or seen.get("open_gap_checked"):
+            return False
+        got = first_trade_price(quote, day)
+        prev_close = float((quote or {}).get("prev_close") or 0.0)
+        if got is None or prev_close <= 0:
+            return False
+        price, basis = got
+        gap_pct = round(100.0 * (price - prev_close) / prev_close, 2)
+        fired = abs(gap_pct) + 1e-9 >= threshold_pct
+        if fired:
+            text = format_open_gap_alert(symbol, price, prev_close, gap_pct, basis, held)
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            with (self.out_dir / "alerts.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"signal": OPEN_GAP_SIGNAL, "symbol": symbol, "day": day,
+                                     "first_trade": price, "basis": basis,
+                                     "prev_close": prev_close, "gap_pct": gap_pct},
+                                    ensure_ascii=False, allow_nan=False) + "\n")
+            self.logger.warning(text.replace("\n", "｜"))
+            if self.notify:
+                self.notify(text)
+            seen["signals"] = seen["signals"] + [OPEN_GAP_SIGNAL]
+        seen["open_gap_checked"] = True
+        self._alerted[symbol] = seen
+        self._write(self._state_path, self._alerted)
+        return fired
+
+
+def first_trade_price(quote: Optional[dict], today: str) -> Optional[tuple]:
+    """回傳 (當天第一筆成交價, 依據)；依據是 open（開盤價 o）或 last_trade（第一次拿到的成交價 z）。
+
+    只認當日報價；只有委買委賣（中間價、單邊）時回 None，不拿來判斷跳空。
+    """
+    if not quote or quote.get("quote_date") != today:
+        return None
+    if quote.get("open"):
+        return float(quote["open"]), "open"
+    if quote.get("last_trade"):
+        return float(quote["last_trade"]), "last_trade"
+    return None
+
+
+def format_open_gap_alert(symbol: str, price: float, prev_close: float, gap_pct: float,
+                          basis: str, held: str = "") -> str:
+    lines = [f"持股開盤跳空 {symbol}：{'開高' if gap_pct > 0 else '開低'} {gap_pct:+.1f}%",
+             f"第一筆成交 {price:.2f}｜昨收 {prev_close:.2f}"
+             f"（{'開盤價' if basis == 'open' else '開盤價未提供，用當天第一次拿到的成交價'}）"]
+    if held:
+        lines.append(f"持有 {held}")
+    lines.append("只是提醒，程式不會下單。")
+    return "\n".join(lines)
+
+
+def load_open_gap_pct(path: Path) -> float:
+    """讀 config/smile_watch.json 的 open_gap_alert_pct；檔案或欄位不存在用預設 3，0＝停用。"""
+    path = Path(path)
+    if not path.exists():
+        return DEFAULT_OPEN_GAP_PCT
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get(
+            "open_gap_alert_pct", DEFAULT_OPEN_GAP_PCT)
+        pct = float(DEFAULT_OPEN_GAP_PCT if value is None else value)
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(f"{path} 的 open_gap_alert_pct 格式錯誤：{exc}") from exc
+    if pct < 0:
+        raise ValueError(f"{path} 的 open_gap_alert_pct 不可為負：{pct}")
+    return pct
+
+
+def read_other_holdings(root: Path) -> dict:
+    """讀 data/smile_watch/holdings.json（券商全部庫存快照，唯讀）：{代號: 股數}。讀不到回空。"""
+    path = Path(root) / "data" / "smile_watch" / "holdings.json"
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8")).get("holdings", [])
+        return {str(r["symbol"]): float(r.get("shares") or 0) for r in rows
+                if float(r.get("shares") or 0) > 0}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError):
+        return {}
+
+
+def make_notify_all(senders: list, logger=None) -> Callable[[str], None]:
+    """逐一送出；任何一個通道（例如 Telegram）出錯都不影響其他通道（例如本機通知）。"""
+    def notify_all(text: str) -> None:
+        for send in senders:
+            try:
+                send(text)
+            except Exception:  # noqa: BLE001 - 通知失敗不能讓盯盤停下
+                if logger:
+                    logger.warning("通知通道 %s 發送失敗", getattr(send, "__qualname__", send))
+    return notify_all
 
 
 @dataclass
@@ -447,12 +552,22 @@ def main(argv=None) -> int:
     local = LocalNotifier(base_settings.local_notify_enabled, logger=logger)
     senders = [n.send for n in (notifier, local) if n.enabled]
 
-    def notify_all(text: str) -> None:
-        for send in senders:
-            send(text)
+    notify_all = make_notify_all(senders, logger)
+    gap_pct = load_open_gap_pct(Path(args.config)) if args.config else DEFAULT_OPEN_GAP_PCT
+    target_symbols = [t.symbol for t in targets]
 
+    def other_holdings() -> dict:
+        # 名單外的持股也一起查開盤跳空（併進同一次 MIS 請求）；門檻 0 時不查。
+        if gap_pct <= 0:
+            return {}
+        return {s: n for s, n in read_other_holdings(Path.cwd()).items()
+                if s not in target_symbols}
+
+    extra_held = other_holdings()
     watcher = SmileWatcher(Path(args.out_dir), notify_all if senders else None, logger)
-    source = TwsePublicMarketSource([t.symbol for t in targets], logger=logger)
+    source = TwsePublicMarketSource(target_symbols + sorted(extra_held), logger=logger)
+    logger.info("持股開盤跳空提醒 %s", f"門檻 ±{gap_pct:g}%（含名單外持股 {len(extra_held)} 檔）"
+                if gap_pct > 0 else "已停用")
     for t in targets:
         h = holdings.get(t.symbol)
         logger.info("盯 %s：%s、標準價 %.2f", t.symbol,
@@ -491,8 +606,17 @@ def main(argv=None) -> int:
                                        {s: (h.lots, h.avg_price) for s, h in holdings.items()},
                                        {s: (h.lots, h.avg_price) for s, h in latest.items()})
                         holdings, engines = latest, build_engines(latest)
-            quotes = source.get_quotes() if engines else {}
+                    extra_held = other_holdings()
+                    source.symbols = target_symbols + sorted(extra_held)
+            quotes = source.get_quotes() if engines or extra_held else {}
             log_now = args.once or time.monotonic() - last_logged >= 300
+            if gap_pct > 0:
+                gap_held = {s: f"{h.lots} 張、均價 {h.avg_price:.2f}" for s, h in holdings.items()
+                            if s in engines}
+                gap_held.update({s: f"{n:,.0f} 股（名單外）" for s, n in extra_held.items()})
+                for symbol, held in gap_held.items():
+                    watcher.handle_open_gap(symbol, quotes.get(symbol), now.date().isoformat(),
+                                            gap_pct, held)
             for symbol, engine in engines.items():
                 quote = quotes.get(symbol)
                 resolved = resolve_price(symbol, quote, now.date(), args.once, fugle, logger)

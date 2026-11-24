@@ -1,4 +1,5 @@
 {
+  "open_gap_alert_pct": 3,
   "targets": [
     {"symbol": "1514", "reference": 105, "sell_latest_first_since": "2026-11-23"}
   ]

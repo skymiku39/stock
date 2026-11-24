@@ -135,11 +135,19 @@ class TwsePublicMarketSource:
             return 0
 
     @classmethod
+    def _parse_price(cls, value: Any) -> Optional[float]:
+        """Parse a quote price; MIS uses 0 for "no price" (e.g. 市價委買 at limit-up)."""
+        price = cls._parse_float(value)
+        if price is None or price <= 0:
+            return None
+        return price
+
+    @classmethod
     def _first_book_price(cls, value: Any) -> Optional[float]:
         text = str(value or "").strip()
         if not text or text == "-":
             return None
-        return cls._parse_float(text.split("_", 1)[0])
+        return cls._parse_price(text.split("_", 1)[0])
 
     def get_prev_close(self, symbols: List[str]) -> Dict[str, float]:
         """取得昨日收盤價 (y 欄位)。"""
@@ -181,8 +189,8 @@ class TwsePublicMarketSource:
             if len(raw_date) == 8 and raw_date.isdigit():
                 quote_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
 
-            last_trade = self._parse_float(z_str)
-            previous_trade = self._parse_float(pz_str)
+            last_trade = self._parse_price(z_str)
+            previous_trade = self._parse_price(pz_str)
             best_bid = self._first_book_price(item.get("b"))
             best_ask = self._first_book_price(item.get("a"))
             price: Optional[float] = None
@@ -231,6 +239,9 @@ class TwsePublicMarketSource:
                 "source": "twse_mis",
                 "source_document_id": self._last_source_document_id,
                 "raw": item,
+                # 新增欄位（不改既有欄位語意）：當日開盤價 o 與這一輪的成交價 z；沒有就是 None。
+                "open": self._parse_price(item.get("o")),
+                "last_trade": last_trade,
             }
         return result
 
@@ -257,6 +268,9 @@ class TwsePublicMarketSource:
                     float(y_str) if y_str != "-" else self._prev_close.get(code, 0.0)
                 )
             except ValueError:
+                continue
+            if price <= 0:
+                # MIS reports 0 when there is no usable trade price.
                 continue
 
             if ex and code not in self._exchange_map:

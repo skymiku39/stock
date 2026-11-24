@@ -189,6 +189,69 @@ class TestGetQuotes:
         assert quote["price_basis"] == "bid_ask_mid"
         assert quote["pct_chg"] == pytest.approx(-2.76, abs=0.01)
 
+    @staticmethod
+    def _book_item(b: str, a: str, z: str = "-", pz: str = "-") -> dict:
+        return {
+            "c": "1234", "z": z, "pz": pz, "b": b, "a": a,
+            "v": "100", "y": "70.0000", "d": "20261125",
+            "t": "10:00:00", "n": "測試", "ex": "tse",
+        }
+
+    def _quote(self, item: dict) -> dict:
+        source = TwsePublicMarketSource(symbols=["1234"])
+        with patch.object(source, "_fetch_raw", return_value=[item]):
+            return source.get_quotes()["1234"]
+
+    def test_zero_bid_is_not_a_book_price(self) -> None:
+        quote = self._quote(self._book_item("0_76.4000_", "76.4000_76.5000_"))
+        assert quote["best_bid"] is None
+        assert quote["best_ask"] == 76.4
+        assert quote["price"] != 38.2
+        assert quote["price"] == 76.4
+        assert quote["price_basis"] == "best_ask"
+
+    def test_normal_two_sided_book_mid_unchanged(self) -> None:
+        quote = self._quote(self._book_item("76.3000_76.2000_", "76.4000_76.5000_"))
+        assert quote["price"] == pytest.approx(76.35)
+        assert quote["price_basis"] == "bid_ask_mid"
+
+    def test_both_sides_zero_gives_no_price(self) -> None:
+        quote = self._quote(self._book_item("0_", "0.0000_"))
+        assert quote["best_bid"] is None
+        assert quote["best_ask"] is None
+        assert quote["price"] is None
+        assert quote["price_basis"] == ""
+        assert quote["pct_chg"] is None
+
+    def test_zero_last_and_previous_trade_fall_through(self) -> None:
+        quote = self._quote(self._book_item(
+            "76.3000_", "76.4000_", z="0.0000", pz="0",
+        ))
+        assert quote["price"] == pytest.approx(76.35)
+        assert quote["price_basis"] == "bid_ask_mid"
+
+    def test_open_and_last_trade_are_extra_fields(self) -> None:
+        quote = self._quote({**self._book_item("72.1000_", "72.2000_", z="72.3000"),
+                             "o": "72.2000"})
+        assert quote["open"] == 72.2
+        assert quote["last_trade"] == 72.3
+        assert quote["price"] == 72.3 and quote["price_basis"] == "last_trade"  # 既有欄位不變
+
+    def test_missing_or_zero_open_is_none(self) -> None:
+        quote = self._quote(self._book_item("76.3000_", "76.4000_"))
+        assert quote["open"] is None and quote["last_trade"] is None
+        assert quote["price_basis"] == "bid_ask_mid"
+        quote = self._quote({**self._book_item("76.3000_", "76.4000_"), "o": "0.0000"})
+        assert quote["open"] is None
+
+
+class TestPollZeroPrice:
+    def test_zero_last_trade_is_skipped(self) -> None:
+        items = [{"c": "1234", "z": "0.0000", "v": "100", "y": "70.00", "ex": "tse"}]
+        source = TwsePublicMarketSource(symbols=["1234"])
+        with patch.object(source, "_fetch_raw", return_value=items):
+            assert source.poll() == []
+
 
 class TestBuildExCh:
     def test_unknown_symbol_tries_both(self) -> None:

@@ -220,6 +220,12 @@ JSONL 保留於 `log/llm_calls/`，可供後續重播。
   `MAX_LOT_PER_SYMBOL`）。同一個訊號每個交易日只提醒一次。
 - 輸出在 `data/smile_watch/`：`status-<代號>.json`（最新狀態）、`alerts.jsonl`（每次提醒）、
   `state.json`（當天已提醒的訊號）。提醒會跳本機通知（見下方）；有設定 Telegram 另外推播。
+  兩個通道各自送，任何一邊出錯都不影響另一邊。
+- **持股開盤跳空**（`open_gap`）：當天第一筆成交（MIS 開盤價 `o`；沒有 `o` 時用當天第一次拿到的
+  成交價 `z`，不用委買委賣中間價）相對昨收的漲跌幅，絕對值達門檻就提醒一次，每檔每天最多一次，
+  之後盤中的漲跌不再判斷。門檻是名單檔的選配欄位 `"open_gap_alert_pct": 3`（缺欄位用 3，`0` 停用）。
+  涵蓋名單內有庫存的標的，以及 `data/smile_watch/holdings.json` 裡名單外的持股（同一次 MIS 請求，
+  只讀不寫這個檔）。通知範例：`持股開盤跳空 1514：開高 +3.2%｜第一筆成交 108.36｜昨收 105.00（開盤價）`。
 - **本機通知**（`bot/local_notify.py`，`LOCAL_NOTIFY_ENABLED=false` 可停用）：在這台電腦跳 Windows
   桌面通知，不經外部服務、不用額外套件。做法和 Hello Streamer 用的 winotify 相同，通知上的程式名稱是
   「股票研究 Stock Lab」（要關閉或調整，在 Windows 設定 → 系統 → 通知裡找這個名稱）。排程器的程序在工作階段 0（S4U），從那裡發的通知不會出現在
