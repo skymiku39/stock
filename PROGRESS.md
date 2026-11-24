@@ -372,6 +372,8 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
     - 持股開盤跳空 ±3% 通知（`smile_watch.py`，`config/smile_watch.json` 的 `open_gap_alert_pct`）：開盤價 `o` 優先、沒有時用當天第一次拿到的成交價，不用中間價；每檔每天一次；名單外持股併進同一次 MIS 請求；各通知通道互相隔離。盤中才啟動且沒有 `o` 時，用的是啟動當下的成交價（通知內註明）。
     - FinMind 核對：EPS 維持比累計；超出誤差但同期營收與營益率都一致時標 `not_comparable`（使用者選定；先試過單季相減，只從 21 降到 17 項，因為加權股數變動對單季一樣有影響）。金融保險業營收標 `not_applicable`。11-24 那批離線重算：mismatch 0、not_comparable 21、db_missing 2。取捨：分割造成的大差距（2327、5904）與疑似 FinMind 錯的 3583 也不再警告，3583 待人工對 MOPS。
     - ETF 持股新鮮度：每日揭露的 ETF 改和同期最新的比，落後 ≥3 個工作日才算過期；參考日本身落後預期日 ≥3 時視為可能全部停更。原本選的「≥2」不可行：真實資料顯示那三檔固定晚 2 個交易日。真實資料驗證 34/34 ok。
+    - 00:49 重啟排程器（等 daily_inputs、collection 結束後 Stop/Start-ScheduledTask，舊 pid 10108 已結束、新 pid 16156）；任務清單已含 `smile_mood_log`、`smile_mood_log_update`、`smile_watch`。今天 09:00 盯盤起用新程式（開盤跳空通知、0 價修正），尚未在真實行情下驗證。
+    - issue #50、PR #51 已開，等 GitHub Actions。
     - 全套 1933 passed、1 failed（`test_dashboard_task_processes.py::test_timeout_kills_worker_tree_before_next_job`，單獨重跑通過，計時測試在高負載時不穩，與本次改動無關）。
   - 分支合併評估：全套 1911 passed；領先 master 102、落後 0，無衝突、可快轉；無憑證或大檔進版控。分支從沒跑過 GitHub Actions（只在 master push 或 PR 觸發）。小問題：`cloud_sync_cli.py:107` 測試仍寫進正式 `log/`（master 既有）；`free_sources/quota.py` 換日清掉每小時計數、非原子寫入。
 - 日 K 回補跑完後要產生 ETF 名單的因子報告（11-24 排程器仍在補各檔 2025-11 的資料）。
