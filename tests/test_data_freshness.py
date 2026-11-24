@@ -109,3 +109,48 @@ def test_collection_status_separates_advisory_from_blocking(tmp_path):
         "collection_warnings": [advisory], "collection_advisory_warnings": [advisory]}), encoding="utf-8")
     check = fresh._collection(tmp_path, now)
     assert check["status"] == fresh.OK and "1 則只需註明限制" in check["detail"]
+
+
+def _finmind_report(root, day, **fields):
+    folder = root / "data/reports"
+    folder.mkdir(parents=True, exist_ok=True)
+    body = {"status": "ok", "source": "FinMind", "summary": {"total": 9, "match": 9, "mismatch": 0, "db_missing": 0}}
+    body.update(fields)
+    (folder / f"finmind_crosscheck_{day}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_finmind_crosscheck_check_states(tmp_path):
+    now = dt.datetime(2026, 11, 24, 10, tzinfo=TZ)
+    assert fresh._finmind_crosscheck(tmp_path, now)["status"] == "info"
+    _finmind_report(tmp_path, "2026-11-24")
+    ok = fresh._finmind_crosscheck(tmp_path, now)
+    assert ok["status"] == "ok" and "FinMind" in ok["detail"]
+    _finmind_report(tmp_path, "2026-11-24", status="skipped")
+    assert fresh._finmind_crosscheck(tmp_path, now)["status"] == "info"
+    _finmind_report(tmp_path, "2026-11-24", status="quota_exceeded")
+    assert fresh._finmind_crosscheck(tmp_path, now)["status"] == "warn"
+
+
+def test_finmind_crosscheck_check_flags_mismatch_missing_and_stale(tmp_path):
+    now = dt.datetime(2026, 11, 24, 10, tzinfo=TZ)
+    _finmind_report(tmp_path, "2026-11-24",
+                    summary={"total": 9, "match": 7, "mismatch": 1, "db_missing": 1},
+                    items=[{"symbol": "2330", "period": "2026Q3", "field": "eps", "status": "mismatch"}])
+    bad = fresh._finmind_crosscheck(tmp_path, now)
+    assert bad["status"] == "warn" and "2330 2026Q3 eps" in bad["detail"] and "缺資料" in bad["detail"]
+    _finmind_report(tmp_path, "2026-11-19")      # 比 11-24 舊，但取最新的一份（11-24）
+    assert fresh._finmind_crosscheck(tmp_path, now)["status"] == "warn"
+    old = tmp_path / "old"
+    _finmind_report(old, "2026-11-18")
+    stale = fresh._finmind_crosscheck(old, now)
+    assert stale["status"] == "warn" and "沒更新" in stale["detail"]
+
+
+def test_finmind_crosscheck_check_does_not_change_overall_without_report(tmp_path, monkeypatch):
+    from bot import active_etf, daily_collection
+    now = dt.datetime(2026, 11, 17, 1, tzinfo=TZ)
+    root = _project(tmp_path, [("2330", "2026-11-16")], heartbeat="2026-11-17T00:59:00+08:00")
+    monkeypatch.setattr(daily_collection, "extended_price_symbols", lambda r: [])
+    monkeypatch.setattr(active_etf, "load_active_etfs", lambda r: [])
+    checks = _by_name(fresh.check_data_freshness(root, settings=SimpleNamespace(symbols=["2330"]), now=now))
+    assert checks["FinMind 交叉核對"]["status"] == "info"

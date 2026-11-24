@@ -215,6 +215,51 @@ def _crosscheck(root: Path) -> Dict[str, Any]:
     return _check("日 K 交叉核對", status, describe(result) if "matched" in result else f"{latest} 的紀錄無法讀取")
 
 
+FINMIND_REPORT_STALE_DAYS = 3
+
+
+def _finmind_crosscheck(root: Path, now: dt.datetime) -> Dict[str, Any]:
+    """最新一份 FinMind 台股交叉核對報告（bot.free_sources.finmind_crosscheck）。"""
+    name = "FinMind 交叉核對"
+    folder = root / "data/reports"
+    try:
+        days = sorted(m.group(1) for p in folder.glob("finmind_crosscheck_*.json")
+                      if (m := _DATE.search(p.name)))
+    except OSError:
+        days = []
+    if not days:
+        return _check(name, INFO, "還沒有核對報告")
+    day = days[-1]
+    report = read_json(folder / f"finmind_crosscheck_{day}.json")
+    if not report:
+        return _check(name, WARN, f"{day} 的報告無法讀取")
+    try:
+        age = (now.date() - dt.date.fromisoformat(day)).days
+    except ValueError:
+        age = None
+    status = str(report.get("status") or "")
+    summary = report.get("summary") or {}
+    mismatch, missing = int(summary.get("mismatch") or 0), int(summary.get("db_missing") or 0)
+    extra = {"report_date": day, "report_status": status, "mismatch": mismatch, "db_missing": missing}
+    if status == "skipped":
+        return _check(name, INFO, f"{day} 沒有 FINMIND_TOKEN，未核對", **extra)
+    problems = []
+    if status in {"quota_exceeded", "error", "partial"}:
+        problems.append(f"報告狀態 {status}")
+    if mismatch:
+        bad = [f"{i.get('symbol')} {i.get('period')} {i.get('field')}"
+               for i in report.get("items") or [] if i.get("status") == "mismatch"]
+        problems.append(f"{mismatch} 項與資料庫不一致（{'、'.join(bad[:5])}{' 等' if len(bad) > 5 else ''}）")
+    if missing:
+        problems.append(f"{missing} 項資料庫缺資料")
+    if age is None or age > FINMIND_REPORT_STALE_DAYS:
+        problems.append(f"報告已 {age if age is not None else '?'} 天沒更新")
+    head = (f"{day}（來源 FinMind）核對 {summary.get('total', 0)} 項，一致 {summary.get('match', 0)} 項")
+    if problems:
+        return _check(name, WARN, head + "；" + "；".join(problems), **extra)
+    return _check(name, OK, head, **extra)
+
+
 def _collection(root: Path, now: dt.datetime) -> Dict[str, Any]:
     """今天的收集管線有沒有完成。
 
@@ -266,6 +311,7 @@ def check_data_freshness(root: Path, *, settings: Any = None, now: Optional[dt.d
         lambda: _news(root, now),
         lambda: _prices(root, now, core, extended),
         lambda: _crosscheck(root),
+        lambda: _finmind_crosscheck(root, now),
         lambda: _etf_holdings(root, now),
         lambda: _dated(_newest_date_in_names(root / "data/chips"), expected, "籌碼（三大法人、融資券）", 2, 4),
         lambda: _dated(_newest_date_in_names(root / "data/macro"), expected, "跨市場總經", 2, 4),
