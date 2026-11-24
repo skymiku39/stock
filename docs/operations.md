@@ -497,6 +497,11 @@ Select-String -Path "log\strategy_*.log" -Pattern "2330"
 1. 確認 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 正確
 2. 確認 Bot 沒有被停用
 3. Telegram 通知失敗不影響交易，可忽略
+4. 用測試指令確認：`uv run python -m bot.notifier --test "測試訊息"`（不會印 token）
+5. 美股隔夜重點（早上那次，`--slot morning`，沒加 `--no-notify`）會同時發本機通知與 Telegram；
+   兩個通道互不影響，只要任一個送出就會寫入 `notified_at`。preopen 那次不發。
+6. 還沒有 Bot：在 Telegram 找 `@BotFather` 發 `/newbot` 取得 token，對 Bot 發訊息後開
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` 找 `chat.id`，填入 `.env`（細節見 `docs/setup.md` Step 4）
 
 ### 4.5 程式當掉（未正常出場）
 

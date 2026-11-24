@@ -403,3 +403,69 @@ def test_b9_default_finnhub_collector_skips_without_key(tmp_path, monkeypatch):
     results = ob.run_api_collectors(tmp_path, _t(24, 8))
     assert results == {"finnhub": {"status": "skipped"}}
     assert not (tmp_path / "data").exists()
+
+
+class FakeTelegram:
+    def __init__(self, enabled=True, ok=True, boom=False):
+        self.enabled = enabled
+        self.ok = ok
+        self.boom = boom
+        self.sent = []
+
+    def send_plain(self, text):
+        if self.boom:
+            raise RuntimeError("network down")
+        self.sent.append(text)
+        return self.ok
+
+
+def test_telegram_sent_with_same_text_when_configured(tmp_path):
+    n, tg = FakeNotifier(), FakeTelegram()
+    brief = _brief(tmp_path, _t(24, 8), notifier=n, telegram_notifier=tg)
+    assert len(tg.sent) == 1 and tg.sent == n.sent
+    assert brief["notified_at"] == brief["generated_at"]
+    _brief(tmp_path, _t(24, 8, 5), notifier=n, telegram_notifier=tg)  # 已通知過，不重送
+    assert len(tg.sent) == 1
+
+
+def test_telegram_skipped_when_not_configured(tmp_path):
+    n, tg = FakeNotifier(), FakeTelegram(enabled=False)
+    brief = _brief(tmp_path, _t(24, 8), notifier=n, telegram_notifier=tg)
+    assert tg.sent == [] and len(n.sent) == 1 and brief["notified_at"]
+
+
+def test_telegram_failure_does_not_affect_local_or_file(tmp_path):
+    for tg in (FakeTelegram(boom=True), FakeTelegram(ok=False)):
+        root = tmp_path / str(id(tg))
+        n = FakeNotifier()
+        brief = _brief(root, _t(24, 8), notifier=n, telegram_notifier=tg)
+        assert len(n.sent) == 1 and brief["notified_at"] == brief["generated_at"]
+        saved = json.loads((root / "data" / "overnight_brief" / "latest.json").read_text(encoding="utf-8"))
+        assert saved["notified_at"] == brief["notified_at"]
+
+
+def test_local_failure_does_not_block_telegram(tmp_path):
+    class BadLocal:
+        def send(self, text):
+            raise OSError("no toast")
+
+    tg = FakeTelegram()
+    brief = _brief(tmp_path, _t(24, 8), notifier=BadLocal(), telegram_notifier=tg)
+    assert len(tg.sent) == 1 and brief["notified_at"] == brief["generated_at"]
+
+
+def test_both_channels_fail_leaves_notified_at_empty(tmp_path):
+    class BadLocal:
+        def send(self, text):
+            raise OSError("x")
+
+    brief = _brief(tmp_path, _t(24, 8), notifier=BadLocal(), telegram_notifier=FakeTelegram(ok=False))
+    assert brief["notified_at"] == ""
+    assert (tmp_path / "data" / "overnight_brief" / "latest.json").exists()
+
+
+def test_telegram_not_sent_for_preopen_or_no_notify(tmp_path):
+    tg = FakeTelegram()
+    _brief(tmp_path, _t(24, 8, 50), slot="preopen", notifier=FakeNotifier(), telegram_notifier=tg)
+    _brief(tmp_path, _t(25, 8), notifier=FakeNotifier(), telegram_notifier=tg, notify=False)
+    assert tg.sent == []

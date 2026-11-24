@@ -373,8 +373,11 @@ def us_sentiment_section(root: Path, day: dt.date) -> dict:
 
 
 def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, notifier=None,
-                notify: bool = True, summarize=None, collect_results: Optional[dict] = None) -> dict:
+                notify: bool = True, summarize=None, collect_results: Optional[dict] = None,
+                telegram_notifier=None) -> dict:
     root = Path(root)
+    # 只有正式路徑（兩個通知器都沒注入）才從設定建立 Telegram；測試注入本機假通知器時不會連網
+    default_telegram = notifier is None
     start = window_start(now)
     expected_date = previous_weekday(now.date()).isoformat()
     warnings: list = []
@@ -451,15 +454,30 @@ def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, n
                                 "note": f"{type(exc).__name__}: {exc}"}
 
     if notify and slot == "morning" and not brief["notified_at"]:
-        try:
+        text = notification_text(brief)
+        sent = False
+        try:  # 本機通知
             if notifier is None:
                 from bot.config import Settings
                 from bot.local_notify import LocalNotifier
                 notifier = LocalNotifier(Settings().local_notify_enabled)
-            notifier.send(notification_text(brief))
-            brief["notified_at"] = at
+            notifier.send(text)
+            sent = True
         except Exception:  # noqa: BLE001 - 通知失敗不能讓工作失敗
             pass
+        try:  # Telegram：與本機通知互不影響；沒設定就略過
+            if telegram_notifier is None and default_telegram:
+                from bot.config import Settings
+                from bot.notifier import TelegramNotifier
+                s = Settings()
+                telegram_notifier = TelegramNotifier(s.telegram_bot_token, s.telegram_chat_id)
+            if telegram_notifier is not None and telegram_notifier.enabled:
+                if telegram_notifier.send_plain(text):
+                    sent = True
+        except Exception:  # noqa: BLE001
+            pass
+        if sent:
+            brief["notified_at"] = at
 
     atomic_json(out_dir / f"{day}.json", brief)
     atomic_json(out_dir / "latest.json", brief)
