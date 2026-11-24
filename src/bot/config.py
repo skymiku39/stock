@@ -484,6 +484,11 @@ class Settings(BaseSettings):
     scheduler_history_fetch_time: datetime.time = datetime.time(14, 0)
     scheduler_history_fetch_end_time: datetime.time = datetime.time(23, 0)
 
+    # FMP 美股財報（docs/free-sources/fmp.md）：排程每隔幾分鐘檢查一次，收集程式自己依
+    # fetched_at 判斷本週是否已抓過，已抓過就零請求結束，所以一週實際只抓一輪（14 檔 84 次）。
+    scheduler_fmp_enabled: bool = True
+    scheduler_fmp_interval_min: int = Field(default=360, ge=30)
+
     # --- 事件鏈 (Pub/Sub 下游自動觸發) ---
     # true：QuantDataFetchCompleted 後自動跑微笑曲線選股
     event_chain_smile_screen: bool = False

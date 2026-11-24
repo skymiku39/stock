@@ -203,6 +203,85 @@ def summarize(symbol_data: dict) -> dict:
     }
 
 
+STALE_DAYS = 14  # 超過兩週沒更新就標 stale（正常一週一輪）
+BACKGROUND_NOTE = "美股財報背景資料（FMP）；金額以 currency 計、不換算，只當研究參考，不進交易規則"
+
+
+def _compact_period(period: dict) -> dict:
+    """去掉序列只留最新值與年增，給研究頁 / 模型背景用，避免塞太多數字。"""
+    out: Dict[str, Any] = {"latest_date": (period or {}).get("latest_date")}
+    for key in ("revenue", "gross_margin_pct", "eps", "free_cash_flow"):
+        item = dict((period or {}).get(key) or {})
+        item.pop("series", None)
+        out[key] = item
+    return out
+
+
+def load_summary(root: Path, symbol: str, now: Optional[dt.datetime] = None) -> Optional[dict]:
+    """讀本地 us_fundamentals/<代號>.json 做精簡趨勢摘要；沒檔或壞檔回 None。不連網。"""
+    path = data_dir(root) / f"{str(symbol).strip().upper()}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    full = summarize(data)
+    stale = True
+    try:
+        stamp = dt.datetime.fromisoformat(str(full.get("fetched_at")))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=TAIPEI)
+        stale = ((now or _now()) - stamp) > dt.timedelta(days=STALE_DAYS)
+    except (TypeError, ValueError):
+        pass
+    return {
+        "symbol": full["symbol"] or str(symbol).upper(),
+        "currency": full["currency"],
+        "fetched_at": full["fetched_at"],
+        "stale": stale,
+        "annual": _compact_period(full["annual"]),
+        "quarter": _compact_period(full["quarter"]),
+        "note": BACKGROUND_NOTE,
+    }
+
+
+def summaries_for_tw(
+    root: Path,
+    tw_ticker: str,
+    related_us: Optional[List[dict]] = None,
+    *,
+    limit: int = 6,
+    now: Optional[dt.datetime] = None,
+) -> List[dict]:
+    """台股個股研究用：本身的 ADR（DEFAULT_STOCKS 母股對應）排前面，再接供應鏈相關美股。
+    只回本地已有檔案的代號；related_us 為 market_macro.related_us_stocks_for_tw 的輸出。"""
+    from bot.market_macro import DEFAULT_STOCKS
+
+    wanted: List[tuple] = []
+    for sym, _name, _role, parent in DEFAULT_STOCKS:
+        if parent and parent == str(tw_ticker):
+            wanted.append((sym, "adr"))
+    for row in related_us or []:
+        sym = str((row or {}).get("us_ticker") or "").strip().upper()
+        if sym:
+            wanted.append((sym, "supply_chain"))
+    out: List[dict] = []
+    seen = set()
+    for sym, relation in wanted:
+        if sym in seen:
+            continue
+        seen.add(sym)
+        item = load_summary(root, sym, now)
+        if item is None:
+            continue
+        item["relation"] = relation
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def collect(
     root: Path,
     client: Any,
@@ -218,7 +297,7 @@ def collect(
     now = now or _now()
     res: Dict[str, Any] = {
         "fetched": [], "skipped_week": [], "errors": {}, "quota_stopped": False,
-        "not_attempted": [], "requests_planned": 0, "dry_run": dry_run,
+        "not_attempted": [], "requests_planned": 0, "dry_run": dry_run, "stopped_reason": "",
     }
     todo = []
     for sym in symbols:
@@ -236,11 +315,17 @@ def collect(
             data = fetch_symbol(client, sym, registry)
         except QuotaExceeded as exc:
             res["quota_stopped"] = True
+            res["stopped_reason"] = "quota"
             res["not_attempted"] = todo[i:]
             res["errors"][sym] = f"quota: {exc}"
             break
         except SourceError as exc:
             res["errors"][sym] = f"{exc.kind}: {exc.message}"
+            if exc.kind == "invalid_params":
+                # 參數錯誤（例如 limit 超過方案上限）每檔都會失敗，繼續只會浪費額度
+                res["stopped_reason"] = "invalid_params"
+                res["not_attempted"] = todo[i + 1:]
+                break
             continue
         except Exception as exc:
             res["errors"][sym] = type(exc).__name__

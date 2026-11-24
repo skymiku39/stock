@@ -27,7 +27,7 @@ def test_scheduler_builds_both_jobs_by_default(tmp_path) -> None:
     names = {j.name for j in sch.jobs}
     assert names == {"macro", "fundamentals", "research", "company", "history_fetch",
                      "overnight_brief", "overnight_brief_update",
-                     "finmind_crosscheck"}
+                     "finmind_crosscheck", "fmp_fundamentals"}
 
 
 def test_scheduler_skips_disabled_jobs() -> None:
@@ -43,6 +43,7 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_smile_watch_enabled=False,
             scheduler_overnight_brief_enabled=False,
             scheduler_finmind_crosscheck_enabled=False,
+            scheduler_fmp_enabled=False,
         ),
         dry_run=True,
     )
@@ -157,6 +158,7 @@ def test_scheduler_once_respects_daily_job_window(monkeypatch, tmp_path) -> None
             scheduler_research_interval_min=0,
             scheduler_company_interval_min=0,
             scheduler_history_fetch_interval_min=0,
+            scheduler_fmp_enabled=False,
             scheduler_intraday_enabled=True,
             scheduler_intraday_time=dt.time(9, 0),
             scheduler_intraday_end_time=dt.time(10, 0),

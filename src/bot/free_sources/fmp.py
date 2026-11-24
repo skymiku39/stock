@@ -1,11 +1,20 @@
 """Financial Modeling Prep（stable 路徑）。金鑰走查詢參數 apikey。"""
 from __future__ import annotations
 
-from typing import Any, List
+import re
+from typing import Any, List, Optional
 
 from bot.free_sources.base import BaseClient
 
 BASE_URL = "https://financialmodelingprep.com/stable"
+
+# FMP 對「免費方案不允許的參數值」與「方案不含的端點 / 代號」也回 402，不是額度用完。
+# 2026-11-24 實測 limit=8 的回應：
+# "Premium Query Parameter: 'Special Parameters : The values for 'limit' must be between 0 and 5 ..."
+_PARAM_ERROR = re.compile(r"(?i)premium query parameter|must be between|invalid (?:value|parameter)")
+_PLAN_RESTRICTED = re.compile(
+    r"(?i)premium endpoint|restricted endpoint|special endpoint|not available under your current subscription"
+)
 
 
 class FmpClient(BaseClient):
@@ -14,6 +23,15 @@ class FmpClient(BaseClient):
     def _check_body(self, data: Any) -> None:
         if isinstance(data, dict) and (data.get("Error Message") or data.get("error")):
             raise self._err(self.last_status, data.get("Error Message") or data.get("error"), "api_error")
+
+    def _classify_http_error(self, status: int, body: str) -> Optional[str]:
+        if status != 402:
+            return None
+        if _PARAM_ERROR.search(body or ""):
+            return "invalid_params"
+        if _PLAN_RESTRICTED.search(body or ""):
+            return "plan_restricted"
+        return None  # 其餘 402 仍視為額度用完
 
     def _statement(self, path: str, symbol: str, period: str, limit: int) -> List[dict]:
         params = {"symbol": symbol, "period": period, "limit": limit, "apikey": self._api_key}

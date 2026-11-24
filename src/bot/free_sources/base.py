@@ -32,7 +32,8 @@ def redact(text: object, secrets: Iterable[str] = ()) -> str:
 
 class SourceError(Exception):
     """資料來源錯誤。kind: auth/quota_exhausted/forbidden/not_found/rate_limited/
-    http_error/network/bad_response/api_error。訊息保證已遮蔽金鑰。"""
+    http_error/network/bad_response/api_error/invalid_params/plan_restricted。
+    訊息保證已遮蔽金鑰。"""
 
     def __init__(self, source: str, status: Optional[int], message: str, kind: Optional[str] = None):
         self.source = source
@@ -75,6 +76,11 @@ class BaseClient:
     def _check_body(self, data: Any) -> None:
         """子類別覆寫：HTTP 200 但內容其實是錯誤時 raise。"""
 
+    def _classify_http_error(self, status: int, body: str) -> Optional[str]:
+        """子類別覆寫：依回應內容細分錯誤種類（例如同為 402，參數錯與額度用完）。
+        回傳 None 表示沿用狀態碼的預設分類。"""
+        return None
+
     def _get(
         self,
         url: str,
@@ -91,7 +97,7 @@ class BaseClient:
         self.last_status = status
         if status >= 400:
             body = getattr(resp, "text", "") or ""
-            raise self._err(status, body[:200] or f"HTTP {status}")
+            raise self._err(status, body[:200] or f"HTTP {status}", self._classify_http_error(status, body))
         try:
             data = resp.json()
         except ValueError:
