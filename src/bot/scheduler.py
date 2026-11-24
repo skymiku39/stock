@@ -423,6 +423,16 @@ class Scheduler:
                 window_start=getattr(s, "scheduler_history_fetch_time", None),
                 window_end=getattr(s, "scheduler_history_fetch_end_time", None),
             ))
+        if getattr(s, "scheduler_fmp_enabled", False):
+            # FMP 美股財報：一週一輪靠 collect_fmp 的 fetched_this_week；沒金鑰時零請求結束。
+            jobs.append(Job(
+                name="fmp_fundamentals",
+                console_script="",
+                module="bot.free_sources.collect_fmp",
+                interval_min=s.scheduler_fmp_interval_min,
+                market_hours_only=False,
+                extra_args=["--root", str(self.project_root)],
+            ))
         if getattr(s, "scheduler_watch_snapshot_interval_min", 0) > 0:
             jobs.append(Job(
                 name="watch_snapshot",
