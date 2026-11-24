@@ -143,3 +143,67 @@ def test_no_holdings_file_keeps_watched_only(tmp_path):
     snap = tray_status.read_snapshot(tmp_path, dt.datetime(2026, 11, 20, 14, 0,
                                                            tzinfo=dt.timezone(dt.timedelta(hours=8))))
     assert snap.other_holdings == [] and snap.holdings_asof == ""
+
+
+def brief_payload(**over):
+    data = {
+        "date": "2026-11-20", "generated_at": "2026-11-20T08:00:12+08:00",
+        "market": {"status": "ok", "error": "",
+                   "indices": [{"symbol": "^GSPC", "name": "S&P 500", "price": 7260.2, "pct_change": 5.06},
+                               {"symbol": "^VIX", "name": "VIX", "price": 15.0, "pct_change": -23.74},
+                               {"symbol": "^XYZ", "name": "其他", "price": 1.0, "pct_change": 1.0}],
+                   "stocks": [{"symbol": "NVDA", "pct_change": 32.66}, {"symbol": "TSM", "pct_change": 3.2},
+                              {"symbol": "AAPL", "pct_change": 1.0}]},
+        "news": {"candidates": [{"title": "a"}, {"title": "b"}]},
+        "summary": {"status": "pending_model", "points": [{"text": "不該出現", "urls": []}]},
+        "warnings": ["注意"],
+    }
+    data.update(over)
+    return data
+
+
+def test_overnight_normal(tmp_path):
+    write(tmp_path, "data/overnight_brief/latest.json", brief_payload())
+    brief = tray_status.read_overnight(tmp_path, NOW)
+    assert brief.market_lines == ["S&P 500 +5.06%　VIX -23.74%　其他 +1.00%",
+                                  "台積電 ADR +3.20%　NVDA +32.66%"]
+    assert brief.date == "2026-11-20" and not brief.stale
+    assert brief.candidate_count == 2 and brief.warnings == ["注意"]
+    assert brief.summary_status == "pending_model" and brief.points == []
+
+
+def test_overnight_missing_or_broken_file(tmp_path):
+    assert tray_status.read_overnight(tmp_path, NOW) == tray_status.OvernightBrief()
+    write(tmp_path, "data/overnight_brief/latest.json", "{壞掉")
+    assert tray_status.read_overnight(tmp_path, NOW) == tray_status.OvernightBrief()
+    write(tmp_path, "data/overnight_brief/latest.json", {"date": "2026-11-20"})
+    assert tray_status.read_overnight(tmp_path, NOW).market_lines == ["行情暫時取不到"]
+
+
+def test_overnight_market_unavailable(tmp_path):
+    write(tmp_path, "data/overnight_brief/latest.json",
+          brief_payload(market={"status": "unavailable", "error": "x"}))
+    assert tray_status.read_overnight(tmp_path, NOW).market_lines == ["行情暫時取不到"]
+
+
+def test_overnight_not_today_is_stale(tmp_path):
+    write(tmp_path, "data/overnight_brief/latest.json", brief_payload(date="2026-11-19"))
+    assert tray_status.read_overnight(tmp_path, NOW).stale
+
+
+def test_overnight_summary_ok_takes_up_to_three_points(tmp_path):
+    points = [{"text": f"重點{i}", "urls": []} for i in range(5)]
+    write(tmp_path, "data/overnight_brief/latest.json",
+          brief_payload(summary={"status": "ok", "points": points}))
+    brief = tray_status.read_overnight(tmp_path, NOW)
+    assert brief.summary_status == "ok" and brief.points == ["重點0", "重點1", "重點2"]
+
+
+def test_overnight_does_not_affect_level(tmp_path):
+    write(tmp_path, "data/scheduler_status.json", scheduler())
+    write(tmp_path, "data/freshness_status.json", freshness([("每日收集", "ok", "x")]))
+    before = tray_status.read_snapshot(tmp_path, NOW)
+    write(tmp_path, "data/overnight_brief/latest.json", brief_payload(date="2026-11-01"))
+    after = tray_status.read_snapshot(tmp_path, NOW)
+    assert after.overnight.stale
+    assert (after.level, after.headline) == (before.level, before.headline)

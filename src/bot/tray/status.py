@@ -7,6 +7,7 @@
 - data/smile_watch/holdings.json   券商回報的全部庫存（盯盤每次讀庫存時重寫）
 - data/notifications/history.jsonl 本機通知紀錄
 - data/etf_focus/latest.json       ETF 關注名單
+- data/overnight_brief/latest.json 美股隔夜重點（只讀，不影響健康等級）
 """
 from __future__ import annotations
 
@@ -99,6 +100,18 @@ class FocusSummary:
 
 
 @dataclass
+class OvernightBrief:
+    date: str = ""
+    generated_at: str = ""
+    stale: bool = False  # date 不是今天
+    market_lines: List[str] = field(default_factory=list)
+    summary_status: str = ""
+    points: List[str] = field(default_factory=list)
+    candidate_count: int = 0
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class TraySnapshot:
     level: str
     headline: str
@@ -108,6 +121,7 @@ class TraySnapshot:
     holdings_asof: str = ""  # 券商庫存的查詢時間；空字串＝還沒有全部持股的資料
     notifications: List[dict] = field(default_factory=list)
     focus: FocusSummary = field(default_factory=FocusSummary)
+    overnight: OvernightBrief = field(default_factory=OvernightBrief)
     scheduler_state: str = ""
     heartbeat_age_seconds: Optional[float] = None
     running_jobs: List[str] = field(default_factory=list)
@@ -240,6 +254,62 @@ def read_focus(root: Path, top: int = 5) -> FocusSummary:
                         top_reduces=[label(s) for s in reduces])
 
 
+_INDEX_SHORT = {"^GSPC": "S&P 500", "^IXIC": "NASDAQ", "^DJI": "道瓊", "^SOX": "費半", "^VIX": "VIX"}
+_BRIEF_STOCKS = ("TSM", "NVDA", "AMD", "MU")
+
+
+def _pct_text(row: dict, label: str) -> str:
+    return f"{label} {float(row['pct_change']):+.2f}%"
+
+
+def _market_lines(market) -> List[str]:
+    if not isinstance(market, dict) or market.get("status") != "ok":
+        return ["行情暫時取不到"]
+    indices, stocks = [], []
+    for row in market.get("indices") or []:
+        try:
+            label = _INDEX_SHORT.get(row["symbol"]) or str(row.get("name") or row["symbol"])
+            indices.append(_pct_text(row, label))
+        except (KeyError, TypeError, ValueError):
+            continue
+    picked = {}
+    for row in market.get("stocks") or []:
+        try:
+            if row["symbol"] in _BRIEF_STOCKS:
+                picked[row["symbol"]] = _pct_text(row, "台積電 ADR" if row["symbol"] == "TSM"
+                                                  else row["symbol"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    stocks = [picked[s] for s in _BRIEF_STOCKS if s in picked]
+    return [("　".join(part)) for part in (indices, stocks) if part]
+
+
+def read_overnight(root: Path, now: dt.datetime) -> OvernightBrief:
+    data = _read_json(Path(root) / "data" / "overnight_brief" / "latest.json")
+    if not isinstance(data, dict):
+        return OvernightBrief()
+    try:
+        summary = data["summary"] if isinstance(data.get("summary"), dict) else {}
+        status = str(summary.get("status", ""))
+        points = []
+        if status == "ok":
+            for p in summary.get("points") or []:
+                if isinstance(p, dict) and p.get("text"):
+                    points.append(str(p["text"]))
+        news = data.get("news") if isinstance(data.get("news"), dict) else {}
+        warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+        date = str(data.get("date", ""))
+        return OvernightBrief(
+            date=date, generated_at=str(data.get("generated_at", "")),
+            stale=date != now.date().isoformat(),
+            market_lines=_market_lines(data.get("market")),
+            summary_status=status, points=points[:3],
+            candidate_count=len(news.get("candidates") or []),
+            warnings=[str(w) for w in warnings])
+    except (TypeError, ValueError):
+        return OvernightBrief()
+
+
 def read_snapshot(root: Path, now: dt.datetime) -> TraySnapshot:
     root = Path(root)
     scheduler = _read_json(root / "data" / "scheduler_status.json")
@@ -297,5 +367,6 @@ def read_snapshot(root: Path, now: dt.datetime) -> TraySnapshot:
                         holdings=holdings, holdings_asof=holdings_asof,
                         other_holdings=[h for h in everything if h.symbol not in watched],
                         notifications=read_notifications(root), focus=read_focus(root),
+                        overnight=read_overnight(root, now),
                         scheduler_state=scheduler_state, heartbeat_age_seconds=heartbeat_age,
                         running_jobs=running, read_at=now.isoformat(timespec="seconds"))

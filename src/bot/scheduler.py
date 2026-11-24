@@ -377,6 +377,24 @@ class Scheduler:
                 report_mode="update",
                 target_date_mode="today",
             ))
+        if getattr(s, "scheduler_overnight_brief_enabled", False):
+            for name, slot, start, end in (
+                ("overnight_brief", "morning",
+                 s.scheduler_overnight_brief_time, s.scheduler_overnight_brief_end_time),
+                ("overnight_brief_update", "preopen",
+                 s.scheduler_overnight_brief_update_time, s.scheduler_overnight_brief_update_end_time),
+            ):
+                jobs.append(Job(
+                    name=name,
+                    console_script="",
+                    module="bot.overnight_brief",
+                    interval_min=1440,
+                    market_hours_only=False,
+                    extra_args=["--root", str(self.project_root), "--slot", slot],
+                    run_once_per_day=True,
+                    window_start=start,
+                    window_end=end,
+                ))
         if getattr(s, "scheduler_company_interval_min", 0) > 0:
             jobs.append(Job(
                 name="company",

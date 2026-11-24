@@ -47,6 +47,7 @@ class TestSchedulerEvents:
                 scheduler_research_interval_min=0,
                 scheduler_company_interval_min=0,
                 scheduler_history_fetch_interval_min=0,
+                scheduler_overnight_brief_enabled=False,
                 scheduler_supervise_monitor=False,
             ),
             dry_run=True,

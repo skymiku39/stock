@@ -222,6 +222,27 @@ class StatusWindow:
             self._row(card, "還沒有券商庫存的完整清單（下次盯盤讀庫存時產生），目前只列盯盤中的",
                       color=CLR_TEXT_MUTED, size=12)
 
+        brief = snap.overnight
+        card = self._section(f"美股隔夜（{brief.generated_at[5:16].replace('T', ' ')} 產生）"
+                             if brief.generated_at else "美股隔夜")
+        if brief.date:
+            for line in brief.market_lines:
+                self._row(card, line)
+            if brief.summary_status == "ok" and brief.points:
+                for point in brief.points:
+                    self._row(card, f"・{point}")
+            else:
+                self._row(card, f"模型摘要尚未可用；候選新聞 {brief.candidate_count} 則，完整清單在儀表板",
+                          color=CLR_TEXT_SECONDARY, size=12)
+            for warning in brief.warnings:
+                self._row(card, warning, color=STATUS_COLOR[tray_status.WARN], size=12)
+            if brief.stale:
+                self._row(card, f"這是 {brief.date[5:]} 的內容，今天的還沒產生",
+                          color=CLR_TEXT_MUTED, size=12)
+        else:
+            self._row(card, "還沒有產生（平日 08:00 與 08:50 各產生一次）",
+                      color=CLR_TEXT_MUTED, size=12)
+
         problems = snap.problems()
         card = self._section(f"要注意（{len(problems)}）" if problems else "系統")
         if problems:

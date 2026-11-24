@@ -25,7 +25,8 @@ def test_scheduler_builds_both_jobs_by_default(tmp_path) -> None:
 
     sch = Scheduler(_settings(), project_root=tmp_path, dry_run=True)
     names = {j.name for j in sch.jobs}
-    assert names == {"macro", "fundamentals", "research", "company", "history_fetch"}
+    assert names == {"macro", "fundamentals", "research", "company", "history_fetch",
+                     "overnight_brief", "overnight_brief_update"}
 
 
 def test_scheduler_skips_disabled_jobs() -> None:
@@ -39,6 +40,7 @@ def test_scheduler_skips_disabled_jobs() -> None:
             scheduler_company_interval_min=0,
             scheduler_history_fetch_interval_min=0,
             scheduler_smile_watch_enabled=False,
+            scheduler_overnight_brief_enabled=False,
         ),
         dry_run=True,
     )

@@ -71,6 +71,10 @@ class Settings(BaseSettings):
         "scheduler_nextday_draft_end_time",
         "scheduler_nextday_update_time",
         "scheduler_nextday_update_end_time",
+        "scheduler_overnight_brief_time",
+        "scheduler_overnight_brief_end_time",
+        "scheduler_overnight_brief_update_time",
+        "scheduler_overnight_brief_update_end_time",
         mode="before",
     )
     @classmethod
@@ -375,6 +379,15 @@ class Settings(BaseSettings):
     # Dashboard 未設定 token 時維持唯讀；實際管理操作仍需明確驗證。
     memory_admin_token: str = ""
 
+    # --- 免費資料來源金鑰（空字串 = 該來源略過；見 docs/free-data-sources-plan.md）---
+    finnhub_api_key: str = ""
+    fugle_api_key: str = ""
+    finmind_token: str = ""
+    fmp_api_key: str = ""
+    massive_api_key: str = ""
+    marketaux_api_token: str = ""
+    alphavantage_api_key: str = ""
+
     # Dashboard 單次背景任務期限，逾時終止工作程序，不自動重試。
     dashboard_task_timeout_seconds: int = Field(default=3600, ge=1)
 
@@ -419,6 +432,12 @@ class Settings(BaseSettings):
     scheduler_nextday_update_enabled: bool = False
     scheduler_nextday_update_time: datetime.time = datetime.time(2, 0)
     scheduler_nextday_update_end_time: datetime.time = datetime.time(6, 0)
+    # 美股隔夜重點：08:00 第一次、08:50 更新（不呼叫模型，只整理行情與新聞候選）
+    scheduler_overnight_brief_enabled: bool = True
+    scheduler_overnight_brief_time: datetime.time = datetime.time(8, 0)
+    scheduler_overnight_brief_end_time: datetime.time = datetime.time(8, 49)
+    scheduler_overnight_brief_update_time: datetime.time = datetime.time(8, 50)
+    scheduler_overnight_brief_update_end_time: datetime.time = datetime.time(10, 0)
     # True=資料刷新只在台股交易時段 (含盤前盤後緩衝) 與平日執行
     scheduler_market_hours_only: bool = True
     scheduler_run_on_start: bool = True       # 啟動時先立刻跑一輪

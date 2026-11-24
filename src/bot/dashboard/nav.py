@@ -188,6 +188,7 @@ PAGES = {
     "自動化管線": dash_pages.page_pipeline,
     # 監控與訊號
     "美股 / 跨市場": dash_pages.page_macro,
+    "美股隔夜重點": dash_pages.page_overnight_brief,
     "熱門個股期貨": dash_pages.page_hot_stock_futures,
     "跟單訊號": dash_pages.page_follow_signals,
     "主動 ETF 追蹤": dash_pages.page_etf_tracker,
@@ -214,6 +215,7 @@ NAV_GROUPS = {
     "🔍 研究與分析": ["功能總覽", "今日當沖戰情室", "今日當沖即時追蹤", "明日當沖關注", "K 線看板", "盤中強弱排行", "個股總覽", "目前持股分析", "個股深入分析", "自動化管線"],
     "📡 監控與訊號": [
         "美股 / 跨市場",
+        "美股隔夜重點",
         "熱門個股期貨",
         "跟單訊號",
         "主動 ETF 追蹤",
