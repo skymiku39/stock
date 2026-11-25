@@ -309,6 +309,20 @@ def _market_lines(market) -> List[str]:
     return [("　".join(part)) for part in (indices, stocks) if part]
 
 
+def _night_line(night) -> List[str]:
+    """台指期夜盤一行；沒有資料時不顯示（舊版 latest.json 沒有這個欄位）。"""
+    if not isinstance(night, dict) or night.get("status") != "ok":
+        return []
+    front = night.get("front") if isinstance(night.get("front"), dict) else {}
+    try:
+        text = f"台指期夜盤 {float(front['last']):,.0f}（{float(front['pct_change']):+.2f}%）"
+    except (KeyError, TypeError, ValueError):
+        return []
+    if not front.get("closed"):
+        text += " 未收盤"
+    return [text]
+
+
 def read_overnight(root: Path, now: dt.datetime) -> OvernightBrief:
     data = _read_json(Path(root) / "data" / "overnight_brief" / "latest.json")
     if not isinstance(data, dict):
@@ -327,7 +341,8 @@ def read_overnight(root: Path, now: dt.datetime) -> OvernightBrief:
         return OvernightBrief(
             date=date, generated_at=str(data.get("generated_at", "")),
             stale=date != now.date().isoformat(),
-            market_lines=_market_lines(data.get("market")),
+            market_lines=(_market_lines(data.get("market"))
+                          + _night_line(data.get("night_futures"))),
             summary_status=status, points=points[:3],
             candidate_count=len(news.get("candidates") or []),
             warnings=[str(w) for w in warnings])

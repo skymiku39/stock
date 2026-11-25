@@ -322,6 +322,11 @@ uv run --offline --no-sync python -m bot.overnight_brief --root . --slot morning
 - 行情每次都重新抓（不沿用當天的快取）。為什麼：當天的行情快取可能是美股盤中抓的，不是收盤。重抓也會更新 `data/macro/` 當天的快取。
 - 候選新聞是規則篩選（同一件事越多家報導排越前面），只是之後交給模型的前置步驟，不是重要性判斷。同一件事可能被拆成好幾則。
 - 排程設定：`SCHEDULER_OVERNIGHT_BRIEF_ENABLED`（預設 true）與 `SCHEDULER_OVERNIGHT_BRIEF_TIME`、`_END_TIME`、`_UPDATE_TIME`、`_UPDATE_END_TIME`。台股休市日不會另外判斷，平日都會產生。
+- 台指期夜盤：每次產生時一併抓 TAIFEX MIS 的盤後行情（`bot.night_futures`），寫進 `night_futures` 欄位、通知多一行、系統匣與儀表板也會顯示；同時存到 `data/night_futures/<夜盤開始日>.json` 與 `latest.json`，原始回應登錄為 `taifex_mis_night`。抓不到時只寫警告。
+  - 為什麼不用期交所 OpenAPI 的日報：日報收盤後才更新，夜盤那一列記在夜盤結束後那個交易日，早上 08:00 還拿不到昨晚的夜盤。
+  - 日期：檔名與 `session_date` 是夜盤「開始」那天（例：11-24 15:00～11-25 05:00 記為 11-24），`for_trading_day` 是它對應的下一個平日（不排除國定假日）。漲跌幅相對前一個日盤的結算價；`vs_spot_close_pct` 相對加權指數前一日收盤，含正逆價差。
+  - 單獨執行：`uv run --offline --no-sync python -m bot.night_futures --root .`（`--json` 印完整紀錄，`--no-save` 不寫 `data/night_futures/`）。夜盤進行中執行也可以，`closed` 會是 false。
+  - 夜盤目前只供參考，不進任何交易規則，也沒有歷史資料可回測（從 2026-11-25 起每天累積）。
 
 ## 一、每日操作流程
 

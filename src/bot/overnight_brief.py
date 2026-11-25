@@ -325,6 +325,12 @@ def notification_text(brief: dict) -> str:
              for sym, label in (("^GSPC", "S&P 500"), ("^IXIC", "NASDAQ"),
                                 ("^SOX", "費半"), ("TSM", "台積電 ADR")) if sym in rows]
     lines.append("、".join(parts) if market["status"] == "ok" and parts else "行情暫時取不到")
+    night = brief.get("night_futures") or {}
+    front = night.get("front") or {}
+    if night.get("status") == "ok" and front.get("pct_change") is not None:
+        lines.append(f"台指期夜盤 {front['last']:,.0f}（{front['pct_change']:+.2f}%，"
+                     f"低 {front['low']:,.0f}）" if front.get("low") is not None else
+                     f"台指期夜盤 {front['last']:,.0f}（{front['pct_change']:+.2f}%）")
     points = brief["summary"].get("points") or []
     if points:
         first = points[0]
@@ -374,10 +380,12 @@ def us_sentiment_section(root: Path, day: dt.date) -> dict:
 
 def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, notifier=None,
                 notify: bool = True, summarize=None, collect_results: Optional[dict] = None,
-                telegram_notifier=None) -> dict:
+                telegram_notifier=None, night_loader=None) -> dict:
     root = Path(root)
     # 只有正式路徑（兩個通知器都沒注入）才從設定建立 Telegram；測試注入本機假通知器時不會連網
     default_telegram = notifier is None
+    # 夜盤同理：只有行情也走正式路徑（沒注入 macro_loader）時才連 TAIFEX
+    default_night = macro_loader is None and night_loader is None
     start = window_start(now)
     expected_date = previous_weekday(now.date()).isoformat()
     warnings: list = []
@@ -417,6 +425,19 @@ def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, n
     market, market_warnings = _market_section(macro_loader, now, expected_date)
     warnings += market_warnings
 
+    from bot import night_futures
+
+    if night_loader is None and default_night:
+        def night_loader():
+            return night_futures.fetch_night_futures(root=root, now=now)
+    if night_loader is not None:
+        night, night_warnings = night_futures.brief_section(
+            night_loader, expected_session_date=expected_date)
+        warnings += night_warnings
+    else:
+        night = {"status": "skipped", "error": "", "fetched_at": "", "spot_close": None,
+                 "front": None}
+
     day = now.date().isoformat()
     out_dir = root / "data" / "overnight_brief"
     existing = read_json(out_dir / f"{day}.json", {})
@@ -430,6 +451,7 @@ def build_brief(root: Path, *, now: dt.datetime, slot: str, macro_loader=None, n
         "runs": list(existing.get("runs") or []) + [{"slot": slot, "at": at}],
         "window": {"start": start.isoformat(), "end": now.isoformat(timespec="seconds")},
         "market": market,
+        "night_futures": night,
         "news": {
             "items_in_window": len(in_window),
             "rss_items_in_window": len(rss_in_window),
@@ -508,6 +530,7 @@ def main(argv=None) -> int:
         return 2
     print(json.dumps({
         "date": brief["date"], "slot": brief["slot"], "market": brief["market"]["status"],
+        "night_futures": brief["night_futures"]["status"],
         "items_in_window": brief["news"]["items_in_window"],
         "api_items_in_window": brief["news"]["api_items_in_window"],
         "api_sources": {k: {"items_in_window": v["items_in_window"],

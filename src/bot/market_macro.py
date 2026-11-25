@@ -435,8 +435,16 @@ def _normalize_taifex_rows(rows: Any) -> List[Dict[str, Any]]:
             "SettlementPrice": row.get("SettlementPrice") or row.get("結算價"),
             "OpenInterest": row.get("OpenInterest") or row.get("未沖銷契約數"),
             "Date": row.get("Date") or row.get("日期"),
+            # 「一般」＝日盤、「盤後」＝夜盤；同一合約兩列並存，價差只能用日盤那列。
+            "TradingSession": str(
+                row.get("TradingSession") or row.get("交易時段") or ""
+            ).strip(),
         })
     return normalized
+
+
+def _is_night_row(row: Dict[str, Any]) -> bool:
+    return str(row.get("TradingSession") or "").strip() == "盤後"
 
 
 def _taifex_rows_from_bytes(raw: bytes) -> List[Dict[str, Any]]:
@@ -450,10 +458,12 @@ def _taifex_rows_from_bytes(raw: bytes) -> List[Dict[str, Any]]:
 
 
 def _front_tx_row(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """取 TX 月合約近月列，排除週合約與其他商品。"""
+    """取 TX 月合約近月列（日盤），排除週合約、夜盤與其他商品。"""
     tx_rows = []
     for row in rows:
         if str(row.get("Contract") or "").strip().upper() != "TX":
+            continue
+        if _is_night_row(row):
             continue
         month = str(row.get("ContractMonth(Week)") or row.get("ContractMonth") or "").strip()
         if len(month) == 6 and month.isdigit():
@@ -621,6 +631,8 @@ def fetch_tx_futures_basis(
         if not isinstance(r, dict):
             continue
         if str(r.get("Contract") or "").strip().upper() != "TX":
+            continue
+        if _is_night_row(r):
             continue
         cm = str(r.get("ContractMonth(Week)") or r.get("ContractMonth") or "").strip()
         if len(cm) == 6 and cm.isdigit():

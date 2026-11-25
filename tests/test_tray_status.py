@@ -228,3 +228,18 @@ def test_overnight_does_not_affect_level(tmp_path):
     after = tray_status.read_snapshot(tmp_path, NOW)
     assert after.overnight.stale
     assert (after.level, after.headline) == (before.level, before.headline)
+
+
+def test_overnight_night_futures_line(tmp_path):
+    night = {"status": "ok", "front": {"last": 38482.0, "pct_change": -4.57, "closed": True}}
+    write(tmp_path, "data/overnight_brief/latest.json", brief_payload(night_futures=night))
+    lines = tray_status.read_overnight(tmp_path, NOW).market_lines
+    assert lines[-1] == "台指期夜盤 38,482（-4.57%）"
+
+    night["front"]["closed"] = False
+    write(tmp_path, "data/overnight_brief/latest.json", brief_payload(night_futures=night))
+    assert tray_status.read_overnight(tmp_path, NOW).market_lines[-1].endswith("未收盤")
+
+    write(tmp_path, "data/overnight_brief/latest.json",
+          brief_payload(night_futures={"status": "error", "front": None}))
+    assert len(tray_status.read_overnight(tmp_path, NOW).market_lines) == 2

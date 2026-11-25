@@ -7389,6 +7389,33 @@ def page_overnight_brief() -> None:
         st.caption(f"行情抓取時間：{_brief_hhmm(market.get('fetched_at'), True)}。"
                    "台股收盤、匯率與 ADR 的日期可能不同，溢價僅供參考。")
 
+    night = as_dict(data.get("night_futures"))
+    if night:
+        st.markdown("### 台指期夜盤")
+        front = as_dict(night.get("front"))
+        if night.get("status") != "ok" or not front:
+            st.info(f"夜盤取不到：{night.get('error') or night.get('status') or '未知原因'}")
+        else:
+            def _num(key: str) -> str:
+                value = front.get(key)
+                return f"{float(value):,.0f}" if isinstance(value, (int, float)) else "-"
+
+            cols = st.columns(4)
+            try:
+                cols[0].metric(f"近月 {front.get('contract_month', '')}", _num("last"),
+                               f"{float(front['pct_change']):+.2f}%")
+            except (KeyError, TypeError, ValueError):
+                cols[0].metric("近月", _num("last"))
+            cols[1].metric("最高", _num("high"))
+            cols[2].metric("最低", _num("low"))
+            cols[3].metric("成交量", f"{int(front.get('volume') or 0):,}")
+            st.caption(
+                f"夜盤 {front.get('session_date', '')} 15:00 起，最後成交 {front.get('quote_time', '')}"
+                f"（{'已收盤' if front.get('closed') else '狀態 ' + str(front.get('status') or '空白')}），"
+                f"對應交易日 {front.get('for_trading_day', '')}。漲跌幅相對前一日盤結算價 "
+                f"{front.get('ref_settlement')}；相對現貨收盤 {night.get('spot_close')} 為 "
+                f"{front.get('vs_spot_close_pct')}%（含正逆價差）。來源：TAIFEX MIS。")
+
     us_sentiment = as_dict(data.get("us_sentiment"))
     sentiment_rows = as_list(us_sentiment.get("rows"))
     if sentiment_rows:

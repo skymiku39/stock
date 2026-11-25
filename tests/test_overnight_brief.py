@@ -469,3 +469,41 @@ def test_telegram_not_sent_for_preopen_or_no_notify(tmp_path):
     _brief(tmp_path, _t(24, 8, 50), slot="preopen", notifier=FakeNotifier(), telegram_notifier=tg)
     _brief(tmp_path, _t(25, 8), notifier=FakeNotifier(), telegram_notifier=tg, notify=False)
     assert tg.sent == []
+
+
+def _night_record(session_date="2026-11-23", closed=True):
+    return {"status": "ok", "error": "", "fetched_at": "2026-11-24T08:00:00+08:00",
+            "spot_close": 36000.0,
+            "front": {"symbol_id": "TXFL6-M", "contract_month": "202612", "last": 38482.0,
+                      "pct_change": -4.57, "low": 37730.0, "high": 40900.0,
+                      "session_date": session_date, "closed": closed, "status": "TC"}}
+
+
+def test_night_futures_in_brief_and_notification(tmp_path):
+    n = FakeNotifier()
+    brief = _brief(tmp_path, _t(24, 8), notifier=n, night_loader=_night_record)
+    assert brief["night_futures"]["status"] == "ok"
+    assert brief["night_futures"]["front"]["last"] == 38482.0
+    assert not any("夜盤" in w for w in brief["warnings"])
+    assert "台指期夜盤 38,482（-4.57%，低 37,730）" in n.sent[0].split("\n")
+
+
+def test_night_futures_warnings_and_failure(tmp_path):
+    brief = _brief(tmp_path, _t(24, 8), notify=False,
+                   night_loader=lambda: _night_record("2026-11-20", closed=False))
+    assert any("不是預期的 2026-11-23" in w for w in brief["warnings"])
+    assert any("可能還沒收盤" in w for w in brief["warnings"])
+
+    def boom():
+        raise RuntimeError("taifex down")
+
+    n = FakeNotifier()
+    brief = _brief(tmp_path / "x", _t(24, 8), notifier=n, night_loader=boom)
+    assert brief["night_futures"]["status"] == "error"
+    assert any("台指期夜盤取不到" in w for w in brief["warnings"])
+    assert not any(line.startswith("台指期夜盤 ") for line in n.sent[0].split("\n"))
+
+
+def test_night_futures_skipped_when_macro_injected(tmp_path):
+    brief = _brief(tmp_path, _t(24, 8), notify=False)
+    assert brief["night_futures"]["status"] == "skipped"
