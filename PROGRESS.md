@@ -1,6 +1,6 @@
 # PROGRESS
 
-最後更新：2026-11-25（分支 `feat/daily-collect-etf-universe` 已開 issue #50、PR #51，等 GitHub Actions；Tests workflow 先前被手動停用，11-25 重新啟用；#38 已關閉不做；模型額度擋到 12-06，Gemini 閘道待部署；M1 結束，策略方向待使用者決定）
+最後更新：2026-11-25（新分支 `feat/night-session-futures` 補台指期夜盤，尚未提交；PR #51 已合併；Tests workflow 先前被手動停用，11-25 重新啟用；#38 已關閉不做；模型額度擋到 12-06，Gemini 閘道待部署；M1 結束，策略方向待使用者決定）
 
 ## 專案目標
 Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財務、籌碼、ETF 持股、新聞與法說資料存入 SQLite，保留原始來源與引用，提供查詢、AI 研究問答、圖表、回測與模擬交易。目前 `RUN_MODE=watch`、`SIMULATION=true`；當沖實單模組已封存（2026-06-11）。
@@ -375,6 +375,13 @@ Stock Lab（`stock-bot`）：本機台股研究工作台。把公開行情、財
     - issue #50、PR #51 已開，等 GitHub Actions。11-25 01:30 發現 PR 開了 50 分鐘沒有任何檢查：GitHub 上的 Tests workflow 是手動停用狀態（何時停用未查）。使用者同意後已重新啟用，並以推送本次更新觸發檢查。
     - 全套 1933 passed、1 failed（`test_dashboard_task_processes.py::test_timeout_kills_worker_tree_before_next_job`，單獨重跑通過，計時測試在高負載時不穩，與本次改動無關）。
   - 分支合併評估：全套 1911 passed；領先 master 102、落後 0，無衝突、可快轉；無憑證或大檔進版控。分支從沒跑過 GitHub Actions（只在 master push 或 PR 觸發）。小問題：`cloud_sync_cli.py:107` 測試仍寫進正式 `log/`（master 既有）；`free_sources/quota.py` 換日清掉每小時計數、非原子寫入。
+- **2026-11-25 台指期夜盤（使用者要求先補夜盤資料；分支 `feat/night-session-futures`）**：
+  - 起因：盤點判斷基準時發現系統看不到夜盤。期交所 OpenAPI 日報（`DailyMarketReportFut`）收盤後才更新，夜盤列記在夜盤結束後那個交易日；早上 08:00 拿不到昨晚的夜盤。例：11-25 盤前台指期夜盤已跌 4.57%，系統完全沒有這個資訊。
+  - 做法：新增 `src/bot/night_futures.py`，抓 TAIFEX MIS `getQuoteList`（`MarketType=1`、`CID=TXF`）。夜盤收盤後到下一場開始前都查得到上一場的最後狀態（11-25 11:31 實測）。取有成交的最近月合約，記錄最後價、相對前一日盤結算的漲跌幅、高低、量、狀態（`TC`＝已收盤）、前一日現貨收盤。存 `data/night_futures/`，原始回應登錄為 `taifex_mis_night`。美股隔夜重點每次產生時一併抓，寫進 `night_futures` 欄位；通知、系統匣、儀表板都多顯示一行。
+  - 決策：只供參考，不進交易規則。為什麼：沒有歷史資料可回測，只能從今天起每天累積；以後要不要當規則，等有資料再決定。
+  - 順手修正：日報的 `TradingSession` 原本在解析時被丟掉，近月價差靠排序剛好取到日盤列；現在明確排除「盤後」列。
+  - 實測：真實 MIS 回應取到 TXFL6 38,482（−4.57%，低 37,730，04:59:57，TC）；日報價差仍取到日盤 40,324。隔夜重點端對端只在暫存資料夾跑過（`--slot preopen --no-notify`），正式排程要明天 08:00 才會第一次帶出夜盤。
+  - 未做：夜盤進行中的即時監控或通知（例如美股開盤後夜盤急跌）、夜盤歷史回補、把夜盤納入情緒或大跌判斷。
 - 日 K 回補跑完後要產生 ETF 名單的因子報告（11-24 排程器仍在補各檔 2025-11 的資料）。
 - 排程設計備忘：exit 4=busy 60 秒後重試；exit 3=blocked/partial 依 `next_retry_epoch`；重試次數用完只照一般間隔執行，直到成功才歸零。
 
